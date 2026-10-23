@@ -1,9 +1,11 @@
 mod config;
+mod error;
 mod exec;
 mod files;
 mod gh;
 mod git;
 mod keys;
+mod logging;
 mod model;
 mod platform;
 mod tmux;
@@ -15,6 +17,17 @@ fn version() -> &'static str {
 }
 
 fn main() {
+    // tatou works without its log file, so a logging failure is reported and ignored
+    if let Err(err) = logging::init() {
+        eprintln!("tatou: logging disabled: {err}");
+    }
+    tracing::info!(
+        version = version(),
+        pid = std::process::id(),
+        config_dir = ?config::config_dir().ok(),
+        "started"
+    );
+
     // Placeholder until the command line is parsed (step 1.10).
     println!("tatou {}", version());
 }

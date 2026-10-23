@@ -16,7 +16,7 @@ Read `DESIGN.md` before starting any feature. Its philosophy section is the deci
 - `ratatui` + `crossterm` for the UI
 - `ignore` for gitignore-aware directory walking
 - `serde` + `toml` for config; paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), macOS included, honouring `$XDG_*` when set
-- `thiserror` for errors, `tracing` for logs (to a file under `$XDG_STATE_HOME/tatou/`, never to the terminal)
+- `thiserror` for errors, `tracing` + `tracing-subscriber` (`fmt` only) for logs (to `$XDG_STATE_HOME/tatou/tatou.log`, rotated at startup past 1 MiB, never to the terminal)
 - `std::thread` + `mpsc` for background work; no async runtime
 - External tools, called as commands: `git`, `tmux` ≥ 3.2 (required), `gh` (optional); notifications via `notify-send` (Linux) or `osascript` (macOS)
 - Releases: GoReleaser with the Rust builder (`.goreleaser.yaml`); GitHub Actions, one file per workflow in `.github/workflows/` (`test.yaml`, `release.yaml`)
@@ -28,7 +28,9 @@ Keep the dependency list short. Before adding a crate, check whether the standar
 ```
 src/
   main.rs     # arg parsing: dashboard, --popup, `status`, `hooks`
-  config.rs   # load/save config.toml
+  error.rs    # crate-wide Error enum and Result alias
+  logging.rs  # log file setup and rotation
+  config.rs   # load/save config.toml; XDG config and state directories
   exec.rs     # the only place that runs external commands
   platform.rs # the only platform-specific code: open(path), notify(title, body)
   git.rs      # worktrees, branches, status; output parsing
