@@ -1,0 +1,110 @@
+name: Test
+
+# Tests every pull request on Linux and macOS, and checks that tatou builds for every release platform
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  ZIG_VERSION: 0.17.0
+  CARGO_ZIGBUILD_VERSION: 0.24.0
+
+jobs:
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v7
+
+    - name: Set up Rust
+      run: |
+        rustup toolchain install stable --profile minimal --component clippy,rustfmt
+        rustup default stable
+
+    # tmux tests are skipped where tmux is missing, CI runs them
+    - name: Install tmux
+      run: |
+        if [ "$RUNNER_OS" = macOS ]; then
+          brew install tmux
+        else
+          sudo apt-get update && sudo apt-get install -y tmux
+        fi
+
+    - name: Cache cargo
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: test-${{ runner.os }}-
+
+    - name: Check formatting
+      run: cargo fmt --check
+
+    - name: Clippy
+      run: cargo clippy --locked --all-targets -- -D warnings
+
+    - name: Run tests
+      run: cargo test --locked
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - name: Set up Rust
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+
+    # cargo-zigbuild cross-compiles with zig, which comes from its Python package
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: 3.x
+
+    - name: Install zig
+      run: pip install "ziglang==$ZIG_VERSION"
+
+    - name: Cache cargo-zigbuild
+      uses: actions/cache@v6
+      with:
+        path: ~/.cargo/bin/cargo-zigbuild
+        key: cargo-zigbuild-${{ runner.os }}-${{ env.CARGO_ZIGBUILD_VERSION }}
+
+    - name: Install cargo-zigbuild
+      run: command -v cargo-zigbuild || cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+
+    - name: Cache cargo
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: build-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: build-${{ runner.os }}-
+
+    # Builds exactly like a release, without publishing anything
+    - name: Build
+      uses: goreleaser/goreleaser-action@v7
+      with:
+        version: "~> v2"
+        args: release --snapshot --clean
