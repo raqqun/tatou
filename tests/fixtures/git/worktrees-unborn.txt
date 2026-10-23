@@ -1,0 +1,4 @@
+worktree /home/me/code/empty
+HEAD 0000000000000000000000000000000000000000
+branch refs/heads/main
+

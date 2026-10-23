@@ -76,7 +76,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 ## Testing
 
 - Parsers for git, tmux and gh output are pure functions tested against fixtures in `tests/fixtures/`; one-line outputs (like `tmux -V`) are inline strings in the test.
-- Git tests use throwaway repos in a `tempfile::TempDir`.
+- Git tests use throwaway repos in a `tempfile::TempDir`, and run git with the user's config disabled (`GIT_CONFIG_GLOBAL=/dev/null`), so their hooks or commit signing never interfere.
 - tmux tests use a unique `-L` socket per test and kill that server afterwards; skip if `tmux` is missing.
 - Keymap parsing and model merging are unit-tested.
 - UI rendering can be checked with ratatui's `TestBackend` for key screens; don't over-test layout.

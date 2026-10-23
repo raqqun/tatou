@@ -132,7 +132,8 @@ Depends on: 1.7
 
 Depends on: 1.4
 
-- Pure parser to `Worktree { path, head, branch: Option, detached, bare, locked, prunable }`; the first entry is the main worktree.
+- Pure parser to `Worktree { path, head, branch: Option, detached, bare, locked, prunable }`; the first entry is the main worktree. `locked` and `prunable` carry git's reason (empty when a lock has none); `branch` drops `refs/heads/`.
+- Read line by line, without `-z` (which needs git ≥ 2.36; Ubuntu 22.04 ships 2.34): a path containing a newline cannot be read back, and tatou does not support one.
 - Fetch function `worktrees(repo)` running `git -C <repo> worktree list --porcelain`.
 - Errors per project (not a repo, git missing) are values, not panics.
 

@@ -1,0 +1,7 @@
+worktree /home/me/code/api.git
+bare
+
+worktree /home/me/code/api.worktrees/main
+HEAD 5fd71d0a678bf10d8078991b7286f696fe659c1f
+branch refs/heads/main-wt
+
