@@ -91,5 +91,6 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 - Follow the milestones in `DESIGN.md` in order; `MILESTONE.md` breaks them into steps, each a GitHub issue in the **tatou** project. One step = one issue = one pull request.
 - Plan first for anything touching more than two modules, and wait for approval.
 - Small steps, one logical change per commit, imperative commit messages.
+- Every commit is signed off for the DCO: `git commit -s` (also when amending).
 - When a design decision changes, update `DESIGN.md` in the same commit.
 - If something is ambiguous, ask instead of guessing.
