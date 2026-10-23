@@ -162,6 +162,7 @@ Depends on: 1.6, 1.7, 1.10
 - Nesting (DESIGN §5): if `$TMUX` points at the tatou server, just `switch-client -t '=tatou'`. If it points at another server, warn and ask: attach anyway (with `TMUX` unset) or quit.
 - Attach: `exec_replace` of `tmux -L tatou -f <conf> new-session -A -s tatou '<exe> --dashboard'`.
 - `--dashboard` started outside the tatou server prints a hint to run `tatou` and exits.
+- Lives in `launcher.rs`. An invalid `config.toml` prints the error and exits 1. Reloading unbinds the keys and prefix the previous `tmux.conf` set, so a changed key does not stay bound. Inside the tatou server, a closed dashboard session is created again before switching. The dashboard window is named `tatou`.
 
 **Done when**
 - Manual check documented in the PR: first launch creates the session; a second terminal re-attaches; launching inside the user's tmux warns.

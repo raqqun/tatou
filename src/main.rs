@@ -5,6 +5,7 @@ mod files;
 mod gh;
 mod git;
 mod keys;
+mod launcher;
 mod logging;
 mod model;
 mod platform;
@@ -76,8 +77,7 @@ fn main() -> ExitCode {
         }
     };
 
-    // Placeholders until each command's own step fills it in
-    let (level, what, issue) = match command {
+    let level = match command {
         Command::Help => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -86,12 +86,9 @@ fn main() -> ExitCode {
             println!("tatou {}", version());
             return ExitCode::SUCCESS;
         }
-        Command::Launch => (LevelFilter::INFO, "the launcher", 11),
-        Command::Dashboard => (LevelFilter::INFO, "--dashboard", 14),
-        Command::Popup => (LevelFilter::INFO, "--popup", 25),
         // Runs every few seconds from tmux's status line: only problems are worth a log line
-        Command::Status => (LevelFilter::WARN, "status", 30),
-        Command::Hooks => (LevelFilter::INFO, "hooks", 26),
+        Command::Status => LevelFilter::WARN,
+        _ => LevelFilter::INFO,
     };
 
     // tatou works without its log file, so a logging failure is reported and ignored
@@ -106,6 +103,29 @@ fn main() -> ExitCode {
         "started"
     );
 
+    match command {
+        Command::Launch => launcher::run(),
+        Command::Dashboard => dashboard(),
+        Command::Popup => not_implemented("--popup", 25),
+        Command::Status => not_implemented("status", 30),
+        Command::Hooks => not_implemented("hooks", 26),
+        // Handled before logging starts
+        Command::Help | Command::Version => ExitCode::SUCCESS,
+    }
+}
+
+/// The dashboard lives in the `tatou` session on tatou's tmux server, where the
+/// launcher starts it.
+fn dashboard() -> ExitCode {
+    if tmux::nesting() != tmux::Nesting::Tatou {
+        eprintln!("tatou: the dashboard runs inside tatou's tmux server; run `tatou` to start it");
+        return ExitCode::FAILURE;
+    }
+    not_implemented("--dashboard", 14)
+}
+
+/// Placeholder until the command's own step fills it in.
+fn not_implemented(what: &str, issue: u32) -> ExitCode {
     eprintln!("tatou: {what} is not implemented yet (#{issue})");
     ExitCode::FAILURE
 }

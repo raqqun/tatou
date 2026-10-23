@@ -147,8 +147,6 @@ struct ProjectFile {
 
 /// Loads `<config dir>/config.toml`, first writing the commented template if it
 /// does not exist.
-// Not called yet: the launcher and the dashboard use it (#11, #14)
-#[allow(dead_code)]
 pub fn load() -> Result<Config> {
     let path = config_dir()?.join("config.toml");
     write_template(&path)?;

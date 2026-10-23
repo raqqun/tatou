@@ -55,7 +55,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
 tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its own generated tmux config** (§8.3). Same binary, same UI:
 
-- **Launcher:** `tatou` — typed in any terminal. Regenerates tatou's tmux config, then attaches to the tatou server, creating the `tatou` dashboard session if needed (`tmux -L tatou -f <conf> new-session -A -s tatou "tatou --dashboard"`). Running `tatou` again from another terminal just re-attaches.
+- **Launcher:** `tatou` — typed in any terminal. Regenerates tatou's tmux config, then attaches to the tatou server, creating the `tatou` dashboard session if needed (`tmux -L tatou -f <conf> new-session -A -s tatou "tatou --dashboard"`). Running `tatou` again from another terminal just re-attaches; from inside tatou's server, it switches to the dashboard, starting it again if its session was closed. An invalid `config.toml` stops the launch with the error. When the server is already running, the regenerated config is applied with `source-file`, after unbinding the keys the previous one bound.
 - **Dashboard:** `tatou --dashboard` — the full-screen UI, living in the `tatou` session. Selecting a worktree switches the client to that worktree's session; the "back" key (default `Alt-d`) returns to the dashboard.
 - **Popup:** `tatou --popup` — the same UI in a floating tmux popup over whatever you're doing, opened with the popup key (default `Alt-g`). Jumping to a session or launching an action closes the popup. The binding is part of tatou's generated tmux config; nothing to add by hand.
 - **Status line:** `tatou status` — prints a short summary (e.g. `⚠2 ●3`); tatou's tmux config shows it in the status bar.
@@ -215,7 +215,7 @@ base = "main"
 - Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
 - Plain `std::thread` + `mpsc` channels for background commands; no async runtime.
 - Commands' stdout and stderr are read as UTF-8, lossily: file names that are not valid UTF-8 are not supported. Commands have no timeout; they run on background threads with stdin closed and git/gh prompts disabled, so a stuck command only stalls its own refresh.
-- Modules: `error`, `logging`, `config`, `exec`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `keys`, `ui`.
+- Modules: `error`, `logging`, `config`, `exec`, `launcher`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `keys`, `ui`.
 - Parsers for git/tmux/gh output are pure and tested against captured fixtures.
 - Runtime requirements: `git`, `tmux` (3.2+ for `display-popup` and `set-buffer -w`). Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`).
 - Versioning: every build is an alpha until a stable v1. The `VERSION` file holds the version as its git tag (`v0.1.0-alpha.N`), mirrored in `Cargo.toml`; each task's pull request bumps `N`. Merging into `main` makes CI tag that version and publish it as a GitHub pre-release with GoReleaser (Rust builder). Tags are never created by hand.

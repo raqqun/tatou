@@ -19,6 +19,13 @@ pub enum Error {
     #[error("tatou needs tmux 3.2 or later, found `{found}`")]
     TmuxVersion { found: String },
 
+    /// A program tatou requires is not installed, or not in `$PATH`.
+    #[error("tatou needs {needs}, but `{program}` was not found; install it and try again")]
+    Missing {
+        program: &'static str,
+        needs: &'static str,
+    },
+
     /// The program could not be started, e.g. it is not installed.
     #[error("cannot run {program}: {source}")]
     Spawn { program: String, source: io::Error },
