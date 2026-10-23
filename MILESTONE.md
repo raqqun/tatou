@@ -108,8 +108,8 @@ Depends on: 1.5
 
 Depends on: 1.4, 1.6
 
-- A small `Tmux { socket, conf }` value; every invocation builds `tmux -L <socket> -f <conf> …` through `exec.rs`. Production socket is `tatou`; tests pass a unique socket.
-- `tmux -V` parser (`tmux 3.4`, `tmux 3.3a`, `tmux next-3.5`) and a check for ≥ 3.2 with a clear error.
+- A small `Server { socket, conf }` value (named apart from `config::Tmux`); every invocation builds `tmux -L <socket> -f <conf> …` through `exec.rs`. Production socket is `tatou`; tests pass a unique socket.
+- `tmux -V` parser (`tmux 3.4`, `tmux 3.3a`, `tmux next-3.5`) and a check for ≥ 3.2 with a clear error. A version without a number (`tmux master`, built from git) is accepted with a warning in the log.
 - Test helper: unique socket per test, server killed on drop, test skipped when `tmux` is missing.
 
 **Done when**
