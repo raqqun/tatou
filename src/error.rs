@@ -12,6 +12,10 @@ pub enum Error {
     #[error("{}: {source}", path.display())]
     Io { path: PathBuf, source: io::Error },
 
+    /// `config.toml` is invalid; `message` says where and why.
+    #[error("{}: {message}", path.display())]
+    Config { path: PathBuf, message: String },
+
     /// The program could not be started, e.g. it is not installed.
     #[error("cannot run {program}: {source}")]
     Spawn { program: String, source: io::Error },
