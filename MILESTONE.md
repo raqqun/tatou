@@ -147,6 +147,8 @@ Depends on: 1.3
 
 - `main.rs` with plain `std::env::args` parsing (no CLI crate): `tatou` (launcher), `tatou --dashboard`, and stubs for `--popup`, `status`, `hooks` that later steps fill in; `--help`, `--version`.
 - Unknown arguments print usage and exit with status 2.
+- `-h` and `-V` are accepted as short forms. Until its step lands, each command prints `tatou: <command> is not implemented yet (#n)` and exits with status 1.
+- `status` logs at `warn` by default (it runs every few seconds from the status line); `--help` and `--version` do not open the log.
 
 **Done when**
 - Unit tests for argument parsing; `--version` prints the version from `VERSION`.
