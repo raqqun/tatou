@@ -28,6 +28,7 @@ Keep the dependency list short. Before adding a crate, check whether the standar
 ```
 src/
   main.rs     # arg parsing: dashboard, --popup, `status`, `hooks`
+  launcher.rs # `tatou`: check tools, regenerate tmux.conf, attach to the dashboard
   error.rs    # crate-wide Error enum and Result alias
   logging.rs  # log file setup and rotation
   config.rs   # load/save config.toml; XDG config and state directories
@@ -80,7 +81,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 - tmux tests use a unique `-L` socket per test and kill that server afterwards; skip if `tmux` is missing.
 - Keymap parsing and model merging are unit-tested.
 - UI rendering can be checked with ratatui's `TestBackend` for key screens; don't over-test layout.
-- No test touches the network, the user's real repositories or their tmux server.
+- No test touches the network, the user's real repositories or their tmux server. Tests that run the tatou binary use the sandbox in `tests/common/` (`$HOME`, `$XDG_*` and `$TMUX_TMPDIR` in a temporary directory).
 - CI runs fmt, clippy and tests on both Linux and macOS, plus a GoReleaser snapshot build, on every pull request.
 
 ## Versioning

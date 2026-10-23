@@ -12,18 +12,13 @@ use std::process::{Command, Stdio};
 use crate::error::{Error, Result};
 
 /// What a successful command printed, converted to UTF-8 lossily.
-// Not read yet: the tmux and git parsers use it (#7, #9)
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Output {
     pub stdout: String,
-    pub stderr: String,
 }
 
 /// Runs `program` with `args` in `cwd` (or the current directory) and waits for it.
 /// A non-zero exit becomes `Error::Command` carrying the command's stderr.
-// Not called yet: tmux.rs and git.rs use it (#7, #9)
-#[allow(dead_code)]
 pub fn run(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output> {
     let line = command_line(program, args);
     tracing::debug!(command = %line, cwd = ?cwd, "run");
@@ -45,9 +40,12 @@ pub fn run(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output> {
             stderr: stderr.trim().to_string(),
         });
     }
+    // A successful command's warnings are only worth a debug line
+    if !stderr.is_empty() {
+        tracing::debug!(command = %line, stderr = stderr.trim(), "stderr");
+    }
     Ok(Output {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr,
     })
 }
 
@@ -59,13 +57,17 @@ pub fn run_sh(script: &str, cwd: Option<&Path>) -> Result<Output> {
     run("sh", &["-c", script], cwd)
 }
 
-/// Replaces the current process with `program`, which inherits the terminal.
-/// Only returns if the program could not be started.
-// Not called yet: the launcher uses it to hand the terminal to tmux (#11)
-#[allow(dead_code)]
-pub fn exec_replace(program: &str, args: &[&str]) -> Error {
-    tracing::debug!(command = %command_line(program, args), "exec");
-    let source = command(program, args).exec();
+/// Replaces the current process with `program`, which inherits the terminal and
+/// the environment without the variables in `remove`. Only returns if the program
+/// could not be started. With variables to remove, std swaps the process's whole
+/// environment while it starts `program`, so call it only while no other thread runs.
+pub fn exec_replace(program: &str, args: &[&str], remove: &[&str]) -> Error {
+    tracing::debug!(command = %command_line(program, args), ?remove, "exec");
+    let mut command = command(program, args);
+    for name in remove {
+        command.env_remove(name);
+    }
+    let source = command.exec();
     Error::Spawn {
         program: program.to_string(),
         source,
@@ -73,8 +75,6 @@ pub fn exec_replace(program: &str, args: &[&str]) -> Error {
 }
 
 /// Quotes `value` for POSIX `sh` so that it is always read as one literal word.
-// Not called yet: command templates use it (#35, #42)
-#[allow(dead_code)]
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
@@ -122,7 +122,6 @@ mod tests {
     fn run_captures_stdout() {
         let output = run("echo", &["hello", "world"], None).unwrap();
         assert_eq!(output.stdout, "hello world\n");
-        assert_eq!(output.stderr, "");
     }
 
     #[test]
@@ -166,7 +165,8 @@ mod tests {
 
     #[test]
     fn exec_replace_returns_when_the_program_cannot_start() {
-        let err = exec_replace("tatou-no-such-program", &[]);
+        // Nothing to remove: that would swap the environment under the other tests' threads
+        let err = exec_replace("tatou-no-such-program", &[], &[]);
         assert!(matches!(err, Error::Spawn { .. }));
     }
 

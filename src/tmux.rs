@@ -1,6 +1,8 @@
 //! tatou's own tmux server: its generated `tmux.conf`, sessions, options,
 //! switch/popup/window/send-keys, and output parsing.
 
+use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -11,6 +13,12 @@ use crate::exec::{self, Output};
 
 /// Lines of scrollback kept per pane; agents print a lot.
 const HISTORY_LIMIT: u32 = 50_000;
+
+/// The `-L` socket name of tatou's server.
+const SOCKET: &str = "tatou";
+
+/// The session the dashboard runs in.
+pub const DASHBOARD: &str = "tatou";
 
 /// The oldest tmux tatou supports, as (major, minor).
 const MIN_VERSION: (u32, u32) = (3, 2);
@@ -29,10 +37,8 @@ pub struct Server {
 
 impl Server {
     /// tatou's own server, on the `tatou` socket.
-    // Not called yet: the launcher creates it (#11)
-    #[allow(dead_code)]
     pub fn tatou(conf: &Path) -> Server {
-        Server::new("tatou", conf)
+        Server::new(SOCKET, conf)
     }
 
     fn new(socket: &str, conf: &Path) -> Server {
@@ -43,20 +49,35 @@ impl Server {
     }
 
     /// Runs a tmux command on this server; several can be chained with `";"`.
-    // Not called outside tests yet: `sessions` uses it, itself unused until (#12, #13)
-    #[allow(dead_code)]
     pub fn run(&self, args: &[&str]) -> Result<Output> {
         exec::run("tmux", &self.args(args), None)
     }
 
     /// The full argument list for `args`, for commands that take over the
     /// terminal through `exec::exec_replace` instead of `run`.
-    // Not called outside tests yet: the launcher attaches with it (#11)
-    #[allow(dead_code)]
     pub fn args<'a>(&'a self, args: &[&'a str]) -> Vec<&'a str> {
         let mut all = vec!["-u", "-L", self.socket.as_str(), "-f", self.conf.as_str()];
         all.extend_from_slice(args);
         all
+    }
+
+    /// Applies the regenerated config to the server, if it is running. `previous` is
+    /// the config it replaced: sourcing the new one can add and change key bindings
+    /// but not remove them, so the ones `previous` made are undone first.
+    pub fn reload(&self, previous: Option<&str>) -> Result<()> {
+        let undo = previous.map(undo_commands).unwrap_or_default();
+        let mut args = Vec::new();
+        for command in &undo {
+            args.extend(command.iter().map(String::as_str));
+            args.push(";");
+        }
+        args.extend(["source-file", self.conf.as_str()]);
+        match self.run(&args) {
+            Ok(_) => Ok(()),
+            // The next command starts the server with `-f`, which loads the config
+            Err(Error::Command { stderr, .. }) if no_server(&stderr) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Every session on the server, sorted by name; none when the server is not running.
@@ -153,10 +174,40 @@ fn parse_status(value: &str) -> Option<AgentStatus> {
     }
 }
 
+/// Where a tatou process runs, according to `$TMUX`.
+#[derive(Debug, PartialEq)]
+pub enum Nesting {
+    /// Not inside tmux.
+    Outside,
+    /// Inside a session on tatou's server.
+    Tatou,
+    /// Inside another tmux server, such as the user's own.
+    Other,
+}
+
+/// Where this process runs, from `$TMUX`.
+pub fn nesting() -> Nesting {
+    nesting_from(env::var_os("TMUX").as_deref())
+}
+
+/// `$TMUX` is `<socket path>,<server pid>,<session index>`; the socket path ends with
+/// the `-L` name.
+fn nesting_from(var: Option<&OsStr>) -> Nesting {
+    let var = match var {
+        Some(var) if !var.is_empty() => var.to_string_lossy(),
+        _ => return Nesting::Outside,
+    };
+    // The socket path may contain commas; the pid and index never do
+    let socket = var.rsplitn(3, ',').last().unwrap_or(&var);
+    if Path::new(socket).file_name() == Some(OsStr::new(SOCKET)) {
+        Nesting::Tatou
+    } else {
+        Nesting::Other
+    }
+}
+
 /// Checks that the installed tmux is recent enough and returns its version line.
 /// `tmux -V` talks to no server, so it is the one command run without `Server`.
-// Not called yet: the launcher checks before attaching (#11)
-#[allow(dead_code)]
 pub fn check_version() -> Result<String> {
     let output = exec::run("tmux", &["-V"], None)?;
     let line = output.stdout.trim();
@@ -192,11 +243,14 @@ fn parse_version(line: &str) -> Option<(u32, u32)> {
     Some((major.parse().ok()?, rest[..digits].parse().ok()?))
 }
 
-/// Writes `tmux.conf` next to `config.toml`, replacing the previous one, and
-/// returns its path. Called at every launch, so the file always follows the config.
-// Not called yet: the launcher regenerates the conf (#11)
-#[allow(dead_code)]
-pub fn write_conf(config: &Config) -> Result<PathBuf> {
+/// `tmux.conf`, generated next to `config.toml`.
+pub fn conf_path() -> Result<PathBuf> {
+    Ok(config::config_dir()?.join("tmux.conf"))
+}
+
+/// Writes `tmux.conf` from `config`, replacing the previous one. Called at every
+/// launch, so the file always follows the config.
+pub fn write_conf(config: &Config) -> Result<()> {
     let dir = config::config_dir()?;
     // The files tmux itself would load, in its own order
     let user_confs = [
@@ -204,9 +258,7 @@ pub fn write_conf(config: &Config) -> Result<PathBuf> {
         config::config_home()?.join("tmux/tmux.conf"),
     ];
     let text = conf(&config.tmux, &user_confs, &dir.join("tmux.local.conf"));
-    let path = dir.join("tmux.conf");
-    write_atomic(&path, &text)?;
-    Ok(path)
+    write_atomic(&conf_path()?, &text)
 }
 
 /// The contents of tatou's `tmux.conf`: the user's own tmux config when inherited,
@@ -267,6 +319,43 @@ fn quote_path(path: &Path) -> String {
     quote(&path.to_string_lossy())
 }
 
+/// Reads back the word `quote` wrote at the start of `text`.
+fn unquote(text: &str) -> Option<String> {
+    let mut rest = text.strip_prefix('\'')?;
+    let mut word = String::new();
+    loop {
+        let end = rest.find('\'')?;
+        word.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix(r"\''") {
+            Some(after) => {
+                word.push('\'');
+                rest = after;
+            }
+            None => return Some(word),
+        }
+    }
+}
+
+/// The tmux commands that undo the key bindings and the prefix set by `conf`, a
+/// `tmux.conf` tatou generated. Its other settings are the same in every version.
+fn undo_commands(conf: &str) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    for line in conf.lines() {
+        let command = if let Some(rest) = line.strip_prefix("bind-key -n ") {
+            unquote(rest).map(|key| vec!["unbind-key".into(), "-n".into(), key])
+        } else if let Some(rest) = line.strip_prefix("bind-key ") {
+            unquote(rest).map(|key| vec!["unbind-key".into(), key])
+        } else if line.starts_with("set-option -g prefix ") {
+            Some(vec!["set-option".into(), "-gu".into(), "prefix".into()])
+        } else {
+            None
+        };
+        commands.extend(command);
+    }
+    commands
+}
+
 /// Writes `text` to a temporary file beside `path` and renames it over `path`,
 /// so a running tmux server never sources a half-written file.
 fn write_atomic(path: &Path, text: &str) -> Result<()> {
@@ -304,6 +393,11 @@ pub mod testing {
         /// A server that loads no config, or `None` when tmux is not installed, so
         /// that the test can return early. The server starts with the first command.
         pub fn new() -> Option<TestServer> {
+            TestServer::with_conf(Path::new("/dev/null"))
+        }
+
+        /// A server that loads `conf` when it starts.
+        pub fn with_conf(conf: &Path) -> Option<TestServer> {
             if exec::run("tmux", &["-V"], None).is_err() {
                 eprintln!("tmux is not installed: skipping");
                 return None;
@@ -311,7 +405,7 @@ pub mod testing {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let socket = format!("tatou-test-{}-{n}", std::process::id());
-            Some(TestServer(Server::new(&socket, Path::new("/dev/null"))))
+            Some(TestServer(Server::new(&socket, conf)))
         }
     }
 
@@ -684,5 +778,88 @@ $3\tshort\t/home/me
         ];
         assert_eq!(sessions, expected);
         assert!(sessions.iter().all(|session| session.activity > 0));
+    }
+
+    #[test]
+    fn tells_where_tmux_says_we_run() {
+        let nesting = |var: Option<&str>| nesting_from(var.map(OsStr::new));
+        assert_eq!(nesting(None), Nesting::Outside);
+        assert_eq!(nesting(Some("")), Nesting::Outside);
+        assert_eq!(
+            nesting(Some("/private/tmp/tmux-501/tatou,4242,0")),
+            Nesting::Tatou
+        );
+        assert_eq!(nesting(Some("/tmp/a,b/tmux-0/tatou,1,2")), Nesting::Tatou);
+        assert_eq!(
+            nesting(Some("/tmp/tmux-1000/default,4242,3")),
+            Nesting::Other
+        );
+        assert_eq!(
+            nesting(Some("/tmp/tmux-0/tatou-test-1-0,1,0")),
+            Nesting::Other
+        );
+    }
+
+    #[test]
+    fn unquote_reads_back_what_quote_wrote() {
+        for value in ["M-d", "it's", "''", "a ; b", "", r"back\slash"] {
+            let line = format!("{} switch-client", quote(value));
+            assert_eq!(unquote(&line).as_deref(), Some(value), "{value:?}");
+        }
+        assert_eq!(unquote("M-d switch-client"), None);
+        assert_eq!(unquote("'unterminated"), None);
+    }
+
+    #[test]
+    fn undoes_the_bindings_and_prefix_of_a_generated_conf() {
+        let tmux = config::Tmux {
+            back: "M-'".into(),
+            prefix: Some("C-a".into()),
+            ..Default::default()
+        };
+        let commands = undo_commands(&generate(&tmux));
+        let expected = [
+            vec!["set-option", "-gu", "prefix"],
+            vec!["unbind-key", "C-a"],
+            vec!["unbind-key", "-n", "M-'"],
+        ];
+        assert_eq!(commands, expected);
+        assert!(undo_commands(&generate(&config::Tmux::default())).len() == 1);
+    }
+
+    #[test]
+    fn reload_applies_a_new_conf_and_drops_the_old_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tmux.conf");
+        let old = conf(&config::Tmux::default(), &[], &dir.path().join("none"));
+        fs::write(&path, &old).unwrap();
+        let Some(server) = TestServer::with_conf(&path) else {
+            return;
+        };
+        assert!(server.reload(None).is_ok(), "no server running is fine");
+        server.run(&["new-session", "-d", "-s", "probe"]).unwrap();
+        let root_keys = || server.run(&["list-keys", "-T", "root"]).unwrap().stdout;
+        assert!(root_keys().contains("M-d"));
+
+        let tmux = config::Tmux {
+            back: "M-b".into(),
+            prefix: Some("C-a".into()),
+            ..Default::default()
+        };
+        fs::write(&path, conf(&tmux, &[], &dir.path().join("none"))).unwrap();
+        server.reload(Some(&old)).unwrap();
+        let keys = root_keys();
+        assert!(keys.contains("M-b") && !keys.contains("M-d"), "{keys}");
+        let prefix = server.run(&["show-options", "-gv", "prefix"]).unwrap();
+        assert_eq!(prefix.stdout, "C-a\n");
+
+        // Back to the defaults: the prefix returns to tmux's own
+        let current = fs::read_to_string(&path).unwrap();
+        fs::write(&path, &old).unwrap();
+        server.reload(Some(&current)).unwrap();
+        let prefix = server.run(&["show-options", "-gv", "prefix"]).unwrap();
+        assert_eq!(prefix.stdout, "C-b\n");
+        let keys = root_keys();
+        assert!(keys.contains("M-d") && !keys.contains("M-b"), "{keys}");
     }
 }
