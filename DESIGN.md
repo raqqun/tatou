@@ -113,7 +113,7 @@ All keys are configurable (§9). Any action can also be bound to a custom tmux c
 ```
 config.toml ─► projects
 git worktree list --porcelain (per project) ─► worktrees
-tmux list-sessions -F '#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_activity}'
+tmux list-sessions -F '#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{session_activity}'
                                              ─► session, status, agent pane per worktree (matched by path)
 gh pr list --state all --json number,headRefName,state,isDraft,statusCheckRollup,url (per project)
                                              ─► PR badge per branch
@@ -128,7 +128,7 @@ Refresh: tmux every ~1s, git on selection change and every few seconds, `gh` eve
 - Worktrees created outside tatou appear automatically.
 
 ### 8.3 Sessions
-**Dedicated server.** All tmux commands use `tmux -L tatou -f ~/.config/tatou/tmux.conf`. This gives tatou predictable behaviour and its own keybindings, keeps `tmux ls` on the user's personal server uncluttered, and lets tatou change server-wide settings without affecting anything else. The sessions remain plain tmux: `tmux -L tatou attach -t <session>` works from any terminal.
+**Dedicated server.** All tmux commands use `tmux -u -L tatou -f ~/.config/tatou/tmux.conf` (`-u` forces UTF-8: without a UTF-8 locale, tmux prints tabs and non-ASCII characters in `-F` output as `_`). This gives tatou predictable behaviour and its own keybindings, keeps `tmux ls` on the user's personal server uncluttered, and lets tatou change server-wide settings without affecting anything else. The sessions remain plain tmux: `tmux -L tatou attach -t <session>` works from any terminal.
 
 **Generated config.** `~/.config/tatou/tmux.conf` is written by tatou at every launch from `config.toml`, and is never edited by hand. It contains:
 - Settings agents need: `escape-time 10`, `extended-keys on` (e.g. Shift+Enter), `focus-events on`, `set-clipboard on`, `allow-passthrough on`, `mouse on`, a large `history-limit`, true-colour terminal features.
@@ -138,11 +138,11 @@ Refresh: tmux every ~1s, git on selection change and every few seconds, `gh` eve
 
 **One session per worktree:**
 ```
-tmux -L tatou new-session -d -s <repo>-<name> -c <path> -e TATOU=1 -P -F '#{pane_id}' <agent command>
-tmux -L tatou set-option -t <session> @tatou_path <path>
-tmux -L tatou set-option -t <session> @tatou_agent_pane <pane_id>
+tmux -L tatou new-session -d -s <repo>-<name> -c <path> -e TATOU=1 -P -F '#{session_id} #{pane_id}' <agent command>
+tmux -L tatou set-option -t <session_id> @tatou_path <path>
+tmux -L tatou set-option -t <session_id> @tatou_agent_pane <pane_id>
 ```
-Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`), never by parsing names. Extra shells, splits and windows are plain tmux.
+Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`), never by parsing names, and targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
 
 ### 8.4 Agent status
 Agents report their own state by setting a tmux option; `$TMUX` inside a session points at the tatou server and session, `TATOU=1` makes it a no-op elsewhere.

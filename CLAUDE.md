@@ -59,7 +59,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 
 - **No terminal-in-terminal.** Never capture or render agent/pane output. To show something, switch the tmux client, or open a tmux window or popup.
 - **No persistent state** besides `config.toml` and the generated `tmux.conf` (rebuilt from `config.toml` at every launch). No database, cache or state file; derive everything from `git`, `tmux` and `gh`.
-- **tatou's own tmux server only.** Every tmux invocation goes through `tmux.rs` and uses `-L tatou -f <generated conf>`. Never talk to the user's default tmux server, never read or write the user's `~/.tmux.conf` or `~/.config/tmux/tmux.conf` (except sourcing them when `inherit_user_conf = true`), never create `tmux.local.conf`.
+- **tatou's own tmux server only.** Every tmux invocation goes through `tmux.rs` and uses `-u -L tatou -f <generated conf>`. Never talk to the user's default tmux server, never read or write the user's `~/.tmux.conf` or `~/.config/tmux/tmux.conf` (except sourcing them when `inherit_user_conf = true`), never create `tmux.local.conf`.
 - **Don't reimplement tools.** No built-in editor, pager, diff viewer, file operations, splits or session persistence; delegate to `$EDITOR`, `$PAGER`, `git diff`, tmux.
 - **Everything tatou creates must be usable without tatou:** plain worktrees, plain tmux sessions.
 - **Linux and macOS only, no platform sprawl.** All `cfg(target_os)` code lives in `platform.rs`. Shell snippets and command templates are POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).

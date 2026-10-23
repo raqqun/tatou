@@ -108,7 +108,7 @@ Depends on: 1.5
 
 Depends on: 1.4, 1.6
 
-- A small `Server { socket, conf }` value (named apart from `config::Tmux`); every invocation builds `tmux -L <socket> -f <conf> …` through `exec.rs`. Production socket is `tatou`; tests pass a unique socket.
+- A small `Server { socket, conf }` value (named apart from `config::Tmux`); every invocation builds `tmux -u -L <socket> -f <conf> …` through `exec.rs` (`-u` added in 1.8). Production socket is `tatou`; tests pass a unique socket.
 - `tmux -V` parser (`tmux 3.4`, `tmux 3.3a`, `tmux next-3.5`) and a check for ≥ 3.2 with a clear error. A version without a number (`tmux master`, built from git) is accepted with a warning in the log.
 - Test helper: unique socket per test, server killed on drop, test skipped when `tmux` is missing.
 
@@ -121,6 +121,8 @@ Depends on: 1.7
 
 - `list-sessions -F` with tab-separated fields: `#{session_id}`, `#{session_name}`, `#{@tatou_path}`, `#{@tatou_status}`, `#{@tatou_agent_pane}`, `#{session_path}`, `#{session_activity}`. (`session_id` and `session_path` extend the format in DESIGN §8.1: the id is an unambiguous target, the path is the matching fallback. Update DESIGN.)
 - Pure parser over fixtures in `tests/fixtures/tmux/`; "no server running" maps to an empty list, not an error.
+- tmux replaces tabs and non-ASCII characters in `-F` output with `_` unless the client is UTF-8, so every invocation passes `-u`.
+- `@tatou_status` parses to busy / input / idle; any other value counts as not set. A line in an unexpected shape (a tab or newline in a path) is skipped with a warning in the log.
 
 **Done when**
 - Fixture tests: no sessions, sessions with and without `@tatou_*` options, paths with spaces.
@@ -250,7 +252,7 @@ Depends on: 1.9
 
 Depends on: 1.8
 
-- `new_session(name, path, command)`: `new-session -d -s <name> -c <path> -e TATOU=1 -P -F '#{session_id} #{pane_id}' <command>`, then set `@tatou_path` and `@tatou_agent_pane`.
+- `new_session(name, path, command)`: `new-session -d -s <name> -c <path> -e TATOU=1 -P -F '#{session_id} #{pane_id}' <command>`, then set `@tatou_path` and `@tatou_agent_pane` with `-t <session_id>` (`set-option -t =<name>` fails: it takes a pane target).
 - Session names: `<repo>-<name>`, with characters tmux rejects (`.`, `:`) replaced; append `-2`, `-3`… if taken. Names are cosmetic; matching stays by path.
 - `respawn_agent(pane, command)`: `respawn-pane -k -t <pane>`; `new_window(session, path, command)`; `kill_session(id)`.
 
