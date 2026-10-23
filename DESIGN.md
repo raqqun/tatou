@@ -201,6 +201,12 @@ base = "main"
 # on_create = "cp ../my-app/.env . && npm install"
 ```
 
+- Every setting is optional. When `config.toml` does not exist, tatou writes it with every setting commented out and no projects, and the dashboard shows its path.
+- Unknown keys are errors, reported with the line. `[keys]` action names are checked against the keymap.
+- `[agents]` is merged with the built-in `claude`, `codex` and `shell`: new names add an agent, a built-in name replaces its command. `default_agent` must name one of them.
+- `path` and `worktree_dir` accept `~/`; any other path must be absolute. A project whose `path` is missing or invalid is shown with its error, and the other projects still load.
+- `base` is optional: without it, new worktrees start from the branch checked out in the project's main worktree.
+
 ## 10. Implementation notes
 
 - Single Rust crate. Dependencies: `ratatui`, `crossterm`, `ignore`, `serde`, `toml`, `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`).

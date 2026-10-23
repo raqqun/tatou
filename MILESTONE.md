@@ -83,7 +83,7 @@ Depends on: 1.3
 - Types for the whole schema in `DESIGN.md` §9 (`default_agent`, `show_ignored`, `[tmux]`, `[agents]`, `[keys]`, `[keys.custom]`, `[keys.tmux]`, `[[project]]` with `path`, `base`, `worktree_dir`, `on_create`), with defaults; unknown keys are an error with a clear message (`deny_unknown_fields`).
 - `~` expansion in paths; project paths canonicalised; a missing project path is reported per project, not fatal.
 - Load from `<config_dir>/config.toml`. Parse errors show file, line and message, then exit cleanly.
-- **Decision to confirm:** when the file is missing, write a commented template (all examples commented out, no projects) and start with an empty project list, showing the config path in the UI's empty state.
+- **Decided:** when the file is missing, write a commented template (all settings commented out, no projects) and start with an empty project list, showing the config path in the UI's empty state. `base` is optional (default: the main worktree's branch). `[agents]` is merged with the built-in agents. A relative project path is an error on that project only. `[keys]` action names are checked in 6.1.
 
 **Done when**
 - Unit tests: full example from `DESIGN.md` §9 parses; empty file gives defaults; unknown key errors; `~` expansion.
@@ -270,7 +270,7 @@ Depends on: 1.15
 
 Depends on: 2.1, 2.2, 2.3
 
-- Dialog: name, base branch (default: project `base`), agent (default: `default_agent`, choices from `[agents]`).
+- Dialog: name, base branch (default: project `base`, else the branch checked out in the main worktree), agent (default: `default_agent`, choices from `[agents]`).
 - Runs on a background thread: `git worktree add` → `on_create` via `run_sh` in the new worktree (if set) → `new-session` with the agent command → set options. Progress shown; the UI stays responsive.
 - `on_create` failure: show its output, keep the worktree, still start the session.
 - The new worktree is selected when it appears.
