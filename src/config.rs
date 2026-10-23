@@ -25,7 +25,7 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # popup = "M-g"               # opens `tatou --popup`
 # back = "M-d"                # returns to the dashboard
 # prefix = "C-b"              # prefix key on tatou's tmux server
-# inherit_user_conf = false   # also source ~/.tmux.conf before tatou's settings
+# inherit_user_conf = false   # also source your own tmux config before tatou's settings
 
 # Commands that start an agent; added to the built-in claude, codex and shell,
 # or replacing one of them when the name is the same
@@ -55,7 +55,7 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 "#;
 
 /// The configuration, with defaults applied and paths resolved.
-// Not read yet: the tmux config generator and the model use it (#6, #12)
+// Not read yet beyond `tmux`: the model uses it (#12)
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Config {
@@ -70,8 +70,6 @@ pub struct Config {
     pub projects: Vec<Project>,
 }
 
-// Not read yet: the tmux config generator uses it (#6)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tmux {
@@ -271,33 +269,47 @@ fn expand_tilde(path: &str, home: Option<&Path>) -> std::result::Result<PathBuf,
 
 /// `$XDG_CONFIG_HOME/tatou`, or `~/.config/tatou`; the same on every platform, macOS included.
 pub fn config_dir() -> Result<PathBuf> {
-    xdg_dir(
+    Ok(config_home()?.join("tatou"))
+}
+
+/// `$XDG_STATE_HOME/tatou`, or `~/.local/state/tatou`; holds the log file.
+pub fn state_dir() -> Result<PathBuf> {
+    let base = xdg_base(
+        env::var_os("XDG_STATE_HOME"),
+        env::var_os("HOME"),
+        ".local/state",
+    )?;
+    Ok(base.join("tatou"))
+}
+
+/// `$XDG_CONFIG_HOME`, or `~/.config`; also where tmux looks for the user's `tmux/tmux.conf`.
+pub fn config_home() -> Result<PathBuf> {
+    xdg_base(
         env::var_os("XDG_CONFIG_HOME"),
         env::var_os("HOME"),
         ".config",
     )
 }
 
-/// `$XDG_STATE_HOME/tatou`, or `~/.local/state/tatou`; holds the log file.
-pub fn state_dir() -> Result<PathBuf> {
-    xdg_dir(
-        env::var_os("XDG_STATE_HOME"),
-        env::var_os("HOME"),
-        ".local/state",
-    )
+/// `$HOME`, which must be absolute.
+pub fn home_dir() -> Result<PathBuf> {
+    absolute_home(env::var_os("HOME"))
 }
 
-/// tatou's directory under an XDG base directory. Following the XDG spec, the
-/// variable is ignored when it is empty or relative, and `$HOME/<default>` is used.
-fn xdg_dir(var: Option<OsString>, home: Option<OsString>, default: &str) -> Result<PathBuf> {
-    let base = match var.map(PathBuf::from) {
-        Some(dir) if dir.is_absolute() => dir,
-        _ => match home.map(PathBuf::from) {
-            Some(home) if home.is_absolute() => home.join(default),
-            _ => return Err(Error::NoHome),
-        },
-    };
-    Ok(base.join("tatou"))
+/// An XDG base directory. Following the XDG spec, the variable is ignored when it
+/// is empty or relative, and `$HOME/<default>` is used.
+fn xdg_base(var: Option<OsString>, home: Option<OsString>, default: &str) -> Result<PathBuf> {
+    match var.map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => Ok(dir),
+        _ => Ok(absolute_home(home)?.join(default)),
+    }
+}
+
+fn absolute_home(home: Option<OsString>) -> Result<PathBuf> {
+    match home.map(PathBuf::from) {
+        Some(home) if home.is_absolute() => Ok(home),
+        _ => Err(Error::NoHome),
+    }
 }
 
 #[cfg(test)]
@@ -305,7 +317,7 @@ mod tests {
     use super::*;
 
     fn dir(var: Option<&str>, home: Option<&str>) -> Result<PathBuf> {
-        xdg_dir(var.map(OsString::from), home.map(OsString::from), ".config")
+        xdg_base(var.map(OsString::from), home.map(OsString::from), ".config")
     }
 
     fn parse_ok(text: &str) -> Config {
@@ -329,14 +341,14 @@ mod tests {
     #[test]
     fn uses_the_xdg_variable_when_absolute() {
         let got = dir(Some("/xdg/config"), Some("/home/me")).unwrap();
-        assert_eq!(got, PathBuf::from("/xdg/config/tatou"));
+        assert_eq!(got, PathBuf::from("/xdg/config"));
     }
 
     #[test]
     fn falls_back_to_home_when_unset_empty_or_relative() {
         for var in [None, Some(""), Some("relative/config")] {
             let got = dir(var, Some("/home/me")).unwrap();
-            assert_eq!(got, PathBuf::from("/home/me/.config/tatou"), "{var:?}");
+            assert_eq!(got, PathBuf::from("/home/me/.config"), "{var:?}");
         }
     }
 

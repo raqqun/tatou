@@ -95,13 +95,14 @@ Depends on: 1.5
 - Pure function `config -> String`, then an atomic write (temp file + rename) to `<config_dir>/tmux.conf` at every launch.
 - Contents (DESIGN §8.3): `escape-time 10`, `extended-keys on`, `focus-events on`, `set-clipboard on`, `allow-passthrough on`, `mouse on`, large `history-limit`, true-colour `terminal-features`; optional `prefix`.
 - Back key: `bind-key -n <back> switch-client -t '=tatou'` (the `=` forces an exact match so a session named `tatou-…` is never picked).
-- If `inherit_user_conf = true`: `source-file -q ~/.tmux.conf` before tatou's settings.
+- If `inherit_user_conf = true`: `source-file -q` the user's own tmux config before tatou's settings, both files tmux itself loads: `~/.tmux.conf` and `$XDG_CONFIG_HOME/tmux/tmux.conf`.
 - Last line: `source-file -q <config_dir>/tmux.local.conf` (never created by tatou).
-- Refer to the tatou binary by absolute path (`std::env::current_exe()`), so bindings work without `$PATH`. Popup binding (2.8), status line (3.5) and `[keys.tmux]` (6.3) are added by their own steps.
+- Values from the config are single-quoted for tmux's parser.
+- Popup binding (2.8), status line (3.5) and `[keys.tmux]` (6.3) are added by their own steps; the first two refer to the tatou binary by absolute path (`std::env::current_exe()`), so bindings work without `$PATH`.
 
 **Done when**
 - Unit tests on the generated string: defaults, custom back key, prefix, `inherit_user_conf` order, local conf is the last line.
-- `tmux -L tatou-test -f <generated> start-server \; kill-server` succeeds (config is valid tmux).
+- `tmux -L <test socket> -f /dev/null start-server \; source-file <generated>` succeeds (config is valid tmux; errors in a file given with `-f` are silently ignored, `source-file` reports them).
 
 ### 1.7 `tmux.rs`: client and version check (#7)
 
