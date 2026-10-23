@@ -15,7 +15,12 @@ const HISTORY_LIMIT: u32 = 50_000;
 /// The oldest tmux tatou supports, as (major, minor).
 const MIN_VERSION: (u32, u32) = (3, 2);
 
-/// A tmux server: every command sent to it is `tmux -L <socket> -f <conf> …`.
+/// The fields `sessions` reads, tab-separated; empty when an option is not set.
+const SESSION_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{session_activity}";
+
+/// A tmux server: every command sent to it is `tmux -u -L <socket> -f <conf> …`.
+/// `-u` makes tmux print UTF-8 whatever the locale; without it, tabs and non-ASCII
+/// characters in `-F` output come back as `_`.
 #[derive(Debug, Clone)]
 pub struct Server {
     socket: String,
@@ -38,7 +43,7 @@ impl Server {
     }
 
     /// Runs a tmux command on this server; several can be chained with `";"`.
-    // Not called outside tests yet: listing sessions uses it (#8)
+    // Not called outside tests yet: `sessions` uses it, itself unused until (#12, #13)
     #[allow(dead_code)]
     pub fn run(&self, args: &[&str]) -> Result<Output> {
         exec::run("tmux", &self.args(args), None)
@@ -49,9 +54,102 @@ impl Server {
     // Not called outside tests yet: the launcher attaches with it (#11)
     #[allow(dead_code)]
     pub fn args<'a>(&'a self, args: &[&'a str]) -> Vec<&'a str> {
-        let mut all = vec!["-L", self.socket.as_str(), "-f", self.conf.as_str()];
+        let mut all = vec!["-u", "-L", self.socket.as_str(), "-f", self.conf.as_str()];
         all.extend_from_slice(args);
         all
+    }
+
+    /// Every session on the server, sorted by name; none when the server is not running.
+    // Not called yet: the model and the background refresh use it (#12, #13)
+    #[allow(dead_code)]
+    pub fn sessions(&self) -> Result<Vec<Session>> {
+        match self.run(&["list-sessions", "-F", SESSION_FORMAT]) {
+            Ok(output) => Ok(parse_sessions(&output.stdout)),
+            Err(Error::Command { stderr, .. }) if no_server(&stderr) => Ok(Vec::new()),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+/// A session on tatou's server, as `list-sessions` reports it.
+// Not read yet: the model matches sessions to worktrees (#12)
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+pub struct Session {
+    /// `$1`: the target for commands, unlike the name, which can be ambiguous.
+    pub id: String,
+    pub name: String,
+    /// `@tatou_path`, set when tatou creates the session; matched against worktrees first.
+    pub tatou_path: Option<PathBuf>,
+    /// `@tatou_status`, set by the agent's hooks (DESIGN §8.4).
+    pub status: Option<AgentStatus>,
+    /// `@tatou_agent_pane`, the pane running the agent: `%1`.
+    pub agent_pane: Option<String>,
+    /// The session's start directory, matched when `tatou_path` is not set.
+    pub path: PathBuf,
+    /// Last activity, in seconds since the Unix epoch.
+    pub activity: u64,
+}
+
+/// What an agent reports through `@tatou_status`.
+// Not read yet: the model and the UI show it (#12, #15)
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStatus {
+    Busy,
+    Input,
+    Idle,
+}
+
+/// tmux's messages when nothing listens on the socket: the server exited, or never started.
+fn no_server(stderr: &str) -> bool {
+    stderr.starts_with("no server running on ")
+        || (stderr.starts_with("error connecting to ")
+            && (stderr.ends_with("(No such file or directory)")
+                || stderr.ends_with("(Connection refused)")))
+}
+
+/// Parses `list-sessions -F SESSION_FORMAT` output. A line in another shape, such as
+/// one with a tab or a newline inside a path, is skipped so the other sessions still show.
+fn parse_sessions(text: &str) -> Vec<Session> {
+    let mut sessions = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        match parse_session(line) {
+            Some(session) => sessions.push(session),
+            None => tracing::warn!(line, "skipping a tmux session line in an unexpected shape"),
+        }
+    }
+    sessions
+}
+
+fn parse_session(line: &str) -> Option<Session> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let [id, name, tatou_path, status, agent_pane, path, activity] = fields[..] else {
+        return None;
+    };
+    let set = |value: &str| (!value.is_empty()).then(|| value.to_string());
+    Some(Session {
+        id: id.to_string(),
+        name: name.to_string(),
+        tatou_path: set(tatou_path).map(PathBuf::from),
+        status: parse_status(status),
+        agent_pane: set(agent_pane),
+        path: PathBuf::from(path),
+        activity: activity.parse().ok()?,
+    })
+}
+
+/// Any value other than the three statuses counts as not set.
+fn parse_status(value: &str) -> Option<AgentStatus> {
+    match value {
+        "busy" => Some(AgentStatus::Busy),
+        "input" => Some(AgentStatus::Input),
+        "idle" => Some(AgentStatus::Idle),
+        "" => None,
+        _ => {
+            tracing::debug!(value, "ignoring an unknown @tatou_status");
+            None
+        }
     }
 }
 
@@ -428,16 +526,8 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     fn the_server_arguments_come_first() {
         let server = Server::tatou(Path::new("/c/tatou/tmux.conf"));
         assert_eq!(
-            server.args(&["attach", "-t", "=tatou"]),
-            [
-                "-L",
-                "tatou",
-                "-f",
-                "/c/tatou/tmux.conf",
-                "attach",
-                "-t",
-                "=tatou"
-            ]
+            server.args(&["attach", "-t", "=tatou"]).join(" "),
+            "-u -L tatou -f /c/tatou/tmux.conf attach -t =tatou"
         );
     }
 
@@ -467,5 +557,132 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
         }
         let line = check_version().unwrap();
         assert!(line.starts_with("tmux "), "{line:?}");
+    }
+
+    #[test]
+    fn parses_sessions() {
+        let text = include_str!("../tests/fixtures/tmux/sessions.txt");
+        let plain = |id: &str, name: &str, path: &str| Session {
+            id: id.into(),
+            name: name.into(),
+            tatou_path: None,
+            status: None,
+            agent_pane: None,
+            path: path.into(),
+            activity: 1792788783,
+        };
+        let created = |id, name, path: &str, status, pane: &str| Session {
+            tatou_path: Some(path.into()),
+            status: Some(status),
+            agent_pane: Some(pane.into()),
+            ..plain(id, name, path)
+        };
+        let docs = "/home/me/code/api.worktrees/docs";
+        let login = "/home/me/code/my-app.worktrees/fix login";
+        let expected = [
+            created("$2", "api-docs", docs, AgentStatus::Input, "%2"),
+            created("$1", "my-app-fix login", login, AgentStatus::Busy, "%1"),
+            plain("$3", "scratch", "/home/me/notes and ideas"),
+            plain("$0", "tatou", "/home/me"),
+        ];
+        assert_eq!(parse_sessions(text), expected);
+    }
+
+    #[test]
+    fn no_output_is_no_sessions() {
+        assert_eq!(parse_sessions(""), []);
+    }
+
+    #[test]
+    fn lines_in_another_shape_are_skipped() {
+        let text = "\
+$0\ttatou\t\t\t\t/home/me\t1792788783
+$1\ttab\t\t\t\t/home/me/a\tb\t1792788783
+$2\tactivity\t\t\t\t/home/me\tnot a number
+$3\tshort\t/home/me
+";
+        let names: Vec<_> = parse_sessions(text).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["tatou"]);
+    }
+
+    #[test]
+    fn unknown_statuses_count_as_not_set() {
+        assert_eq!(parse_status("idle"), Some(AgentStatus::Idle));
+        assert_eq!(parse_status(""), None);
+        assert_eq!(parse_status("Busy"), None);
+        assert_eq!(parse_status("thinking"), None);
+    }
+
+    #[test]
+    fn recognises_no_server_running() {
+        let messages = [
+            "no server running on /tmp/tmux-0/tatou",
+            "error connecting to /tmp/tmux-0/tatou (No such file or directory)",
+            "error connecting to /private/tmp/tmux-501/tatou (Connection refused)",
+        ];
+        for stderr in messages {
+            assert!(no_server(stderr), "{stderr:?}");
+        }
+        assert!(!no_server(
+            "error connecting to /tmp/tmux-0/tatou (Permission denied)"
+        ));
+        assert!(!no_server("unknown option -- F"));
+    }
+
+    #[test]
+    fn reads_sessions_back_from_tmux() {
+        let Some(server) = TestServer::new() else {
+            return;
+        };
+        assert_eq!(server.sessions().unwrap(), [], "no server yet");
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let worktree = home.join("fix login");
+        fs::create_dir(&worktree).unwrap();
+        let (home, worktree) = (home.to_str().unwrap(), worktree.to_str().unwrap());
+        // `-P -F` prints the new session's id and pane, as tatou will when it creates one
+        let new_session = |name: &str, path: &str| {
+            let args = ["new-session", "-d", "-s", name, "-c", path, "-P", "-F"];
+            let output = server.run(&[&args[..], &["#{session_id} #{pane_id}"]].concat());
+            let output = output.unwrap().stdout;
+            let (id, pane) = output.trim_end().split_once(' ').unwrap();
+            (id.to_string(), pane.to_string())
+        };
+        let (app, pane) = new_session("app-fix login", worktree);
+        let (plain, _) = new_session("plain", home);
+        for (option, value) in [
+            ("@tatou_path", worktree),
+            ("@tatou_status", "busy"),
+            ("@tatou_agent_pane", &pane),
+        ] {
+            server
+                .run(&["set-option", "-t", &app, option, value])
+                .unwrap();
+        }
+
+        let sessions = server.sessions().unwrap();
+        let expected = [
+            Session {
+                id: app,
+                name: "app-fix login".into(),
+                tatou_path: Some(worktree.into()),
+                status: Some(AgentStatus::Busy),
+                agent_pane: Some(pane),
+                path: worktree.into(),
+                activity: sessions[0].activity,
+            },
+            Session {
+                id: plain,
+                name: "plain".into(),
+                tatou_path: None,
+                status: None,
+                agent_pane: None,
+                path: home.into(),
+                activity: sessions[1].activity,
+            },
+        ];
+        assert_eq!(sessions, expected);
+        assert!(sessions.iter().all(|session| session.activity > 0));
     }
 }
