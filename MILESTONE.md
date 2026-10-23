@@ -55,7 +55,7 @@ Depends on: 1.1
 - Crate error type with `thiserror` (one enum, variants added as modules need them).
 - XDG helpers: `config_dir()` = `$XDG_CONFIG_HOME/tatou` or `~/.config/tatou`; `state_dir()` = `$XDG_STATE_HOME/tatou` or `~/.local/state/tatou`. Same on macOS (no `~/Library`). Empty `$XDG_*` is treated as unset (XDG spec).
 - Logging with `tracing` to `<state_dir>/tatou.log`, never to the terminal; level from `TATOU_LOG` (default `info`).
-- **Decision to confirm:** writing tracing events to a file needs `tracing-subscriber` (fmt layer, ANSI off). Add it and list it in `DESIGN.md` §10 and `CLAUDE.md`, or write a minimal hand-rolled subscriber.
+- **Decided:** `tracing-subscriber` with only its `fmt` and `std` features (ANSI off), listed in `DESIGN.md` §10 and `CLAUDE.md`. The error enum lives in `src/error.rs`, log setup in `src/logging.rs`. Every tatou process appends to the same file; at startup it is moved to `tatou.log.old` once past 1 MiB.
 
 **Done when**
 - Unit tests for path resolution with and without `$XDG_*` (set via a test-local env, not the user's).

@@ -203,12 +203,12 @@ base = "main"
 
 ## 10. Implementation notes
 
-- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `ignore`, `serde`, `toml`, `thiserror`, `tracing` (logging to a file, never to the terminal).
+- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `ignore`, `serde`, `toml`, `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`).
 - Paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), honouring `$XDG_*` variables when set. No `~/Library/...` on macOS: CLI users expect `~/.config`.
 - All platform differences live in one `platform` module behind two functions, `open(path)` and `notify(title, body)`, using `cfg(target_os)`. Nothing else in the codebase is platform-specific.
 - Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
 - Plain `std::thread` + `mpsc` channels for background commands; no async runtime.
-- Modules: `config`, `exec`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `keys`, `ui`.
+- Modules: `error`, `logging`, `config`, `exec`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `keys`, `ui`.
 - Parsers for git/tmux/gh output are pure and tested against captured fixtures.
 - Runtime requirements: `git`, `tmux` (3.2+ for `display-popup` and `set-buffer -w`). Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`).
 - Versioning: every build is an alpha until a stable v1. The `VERSION` file holds the version as its git tag (`v0.1.0-alpha.N`), mirrored in `Cargo.toml`; each task's pull request bumps `N`. Merging into `main` makes CI tag that version and publish it as a GitHub pre-release with GoReleaser (Rust builder). Tags are never created by hand.
