@@ -7,9 +7,92 @@ use std::process;
 
 use crate::config::{self, Config};
 use crate::error::{Error, Result};
+use crate::exec::{self, Output};
 
 /// Lines of scrollback kept per pane; agents print a lot.
 const HISTORY_LIMIT: u32 = 50_000;
+
+/// The oldest tmux tatou supports, as (major, minor).
+const MIN_VERSION: (u32, u32) = (3, 2);
+
+/// A tmux server: every command sent to it is `tmux -L <socket> -f <conf> …`.
+#[derive(Debug, Clone)]
+pub struct Server {
+    socket: String,
+    conf: String,
+}
+
+impl Server {
+    /// tatou's own server, on the `tatou` socket.
+    // Not called yet: the launcher creates it (#11)
+    #[allow(dead_code)]
+    pub fn tatou(conf: &Path) -> Server {
+        Server::new("tatou", conf)
+    }
+
+    fn new(socket: &str, conf: &Path) -> Server {
+        Server {
+            socket: socket.to_string(),
+            conf: conf.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Runs a tmux command on this server; several can be chained with `";"`.
+    // Not called outside tests yet: listing sessions uses it (#8)
+    #[allow(dead_code)]
+    pub fn run(&self, args: &[&str]) -> Result<Output> {
+        exec::run("tmux", &self.args(args), None)
+    }
+
+    /// The full argument list for `args`, for commands that take over the
+    /// terminal through `exec::exec_replace` instead of `run`.
+    // Not called outside tests yet: the launcher attaches with it (#11)
+    #[allow(dead_code)]
+    pub fn args<'a>(&'a self, args: &[&'a str]) -> Vec<&'a str> {
+        let mut all = vec!["-L", self.socket.as_str(), "-f", self.conf.as_str()];
+        all.extend_from_slice(args);
+        all
+    }
+}
+
+/// Checks that the installed tmux is recent enough and returns its version line.
+/// `tmux -V` talks to no server, so it is the one command run without `Server`.
+// Not called yet: the launcher checks before attaching (#11)
+#[allow(dead_code)]
+pub fn check_version() -> Result<String> {
+    let output = exec::run("tmux", &["-V"], None)?;
+    let line = output.stdout.trim();
+    check(line)?;
+    Ok(line.to_string())
+}
+
+/// Accepts `line` from `tmux -V` unless it names a version older than `MIN_VERSION`.
+fn check(line: &str) -> Result<()> {
+    match parse_version(line) {
+        Some(version) if version < MIN_VERSION => Err(Error::TmuxVersion {
+            found: line.to_string(),
+        }),
+        Some(_) => Ok(()),
+        // Builds from git print no number (`tmux master`) and are newer than any release
+        None => {
+            tracing::warn!(
+                version = line,
+                "unknown tmux version, assuming a recent build"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// `tmux 3.3a` and `tmux next-3.5` give (3, 3) and (3, 5); `tmux master` gives `None`.
+fn parse_version(line: &str) -> Option<(u32, u32)> {
+    let version = line.strip_prefix("tmux ")?;
+    let version = version.strip_prefix("next-").unwrap_or(version);
+    let (major, rest) = version.split_once('.')?;
+    // The minor version may carry a letter or a suffix: `3a`, `0-rc5`
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    Some((major.parse().ok()?, rest[..digits].parse().ok()?))
+}
 
 /// Writes `tmux.conf` next to `config.toml`, replacing the previous one, and
 /// returns its path. Called at every launch, so the file always follows the config.
@@ -107,10 +190,53 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     result.map_err(io_error)
 }
 
+/// A tmux server for tests, on a socket of its own and killed when dropped.
+#[cfg(test)]
+pub mod testing {
+    use std::ops::Deref;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::Server;
+    use crate::exec;
+
+    pub struct TestServer(Server);
+
+    impl TestServer {
+        /// A server that loads no config, or `None` when tmux is not installed, so
+        /// that the test can return early. The server starts with the first command.
+        pub fn new() -> Option<TestServer> {
+            if exec::run("tmux", &["-V"], None).is_err() {
+                eprintln!("tmux is not installed: skipping");
+                return None;
+            }
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let socket = format!("tatou-test-{}-{n}", std::process::id());
+            Some(TestServer(Server::new(&socket, Path::new("/dev/null"))))
+        }
+    }
+
+    impl Deref for TestServer {
+        type Target = Server;
+
+        fn deref(&self) -> &Server {
+            &self.0
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            // Fails when the server already exited, which is fine
+            let _ = self.0.run(&["kill-server"]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::TestServer;
     use super::*;
-    use crate::exec;
 
     fn user_confs() -> Vec<PathBuf> {
         vec![
@@ -232,10 +358,9 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     /// checked with `source-file`, which fails on the first invalid line.
     #[test]
     fn tmux_accepts_the_generated_conf() {
-        if exec::run("tmux", &["-V"], None).is_err() {
-            eprintln!("tmux is not installed: skipping");
+        let Some(server) = TestServer::new() else {
             return;
-        }
+        };
         let dir = tempfile::tempdir().unwrap();
         // Spaces and a quote in the path exercise the quoting
         let dir = dir.path().join("it's a dir");
@@ -252,16 +377,95 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
         let path = dir.join("tmux.conf");
         write_atomic(&path, &conf(&tmux, &[user_conf], &local_conf)).unwrap();
 
-        let socket = format!("tatou-test-{}", process::id());
-        let path = path.to_str().unwrap();
-        let mut args = vec!["-L", &socket, "-f", "/dev/null", "start-server"];
-        args.extend([";", "source-file", path]);
+        let mut args = vec!["start-server", ";", "source-file", path.to_str().unwrap()];
         for option in ["@tatou_user", "@tatou_local", "prefix"] {
             args.extend([";", "show-options", "-gv", option]);
         }
-        let result = exec::run("tmux", &args, None);
-        // Without sessions the server exits on its own; this is only a safety net
-        let _ = exec::run("tmux", &["-L", &socket, "kill-server"], None);
+        let result = server.run(&args);
         assert_eq!(result.unwrap().stdout, "on\non\nC-a\n");
+    }
+
+    #[test]
+    fn parses_tmux_versions() {
+        let cases = [
+            ("tmux 3.2", Some((3, 2))),
+            ("tmux 3.3a", Some((3, 3))),
+            ("tmux 3.4", Some((3, 4))),
+            ("tmux next-3.5", Some((3, 5))),
+            ("tmux 3.10", Some((3, 10))),
+            ("tmux 3.0-rc5", Some((3, 0))),
+            ("tmux 2.9a", Some((2, 9))),
+            ("tmux master", None),
+            ("tmux", None),
+            ("", None),
+        ];
+        for (line, expected) in cases {
+            assert_eq!(parse_version(line), expected, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn requires_tmux_3_2() {
+        for line in [
+            "tmux 3.2",
+            "tmux 3.3a",
+            "tmux next-3.6",
+            "tmux 4.0",
+            "tmux master",
+        ] {
+            assert!(check(line).is_ok(), "{line:?}");
+        }
+        for line in ["tmux 3.1c", "tmux 2.9a", "tmux 3.0-rc5"] {
+            let err = check(line).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("tatou needs tmux 3.2 or later, found `{line}`")
+            );
+        }
+    }
+
+    #[test]
+    fn the_server_arguments_come_first() {
+        let server = Server::tatou(Path::new("/c/tatou/tmux.conf"));
+        assert_eq!(
+            server.args(&["attach", "-t", "=tatou"]),
+            [
+                "-L",
+                "tatou",
+                "-f",
+                "/c/tatou/tmux.conf",
+                "attach",
+                "-t",
+                "=tatou"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_test_server_runs_on_its_own_socket_and_is_killed_on_drop() {
+        let Some(server) = TestServer::new() else {
+            return;
+        };
+        let other = TestServer::new().unwrap();
+        assert_ne!(server.args(&[]), other.args(&[]));
+
+        server.run(&["new-session", "-d", "-s", "probe"]).unwrap();
+        let sessions = server.run(&["list-sessions", "-F", "#{session_name}"]);
+        assert_eq!(sessions.unwrap().stdout, "probe\n");
+        // Nothing runs on the other socket
+        assert!(other.run(&["list-sessions"]).is_err());
+
+        let socket = Server::clone(&server);
+        drop(server);
+        assert!(socket.run(&["list-sessions"]).is_err());
+    }
+
+    #[test]
+    fn check_version_accepts_the_installed_tmux() {
+        if TestServer::new().is_none() {
+            return;
+        }
+        let line = check_version().unwrap();
+        assert!(line.starts_with("tmux "), "{line:?}");
     }
 }
