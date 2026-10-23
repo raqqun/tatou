@@ -134,7 +134,7 @@ Refresh: tmux every ~1s, git on selection change and every few seconds, `gh` eve
 - Settings agents need: `escape-time 10`, `extended-keys on` (e.g. Shift+Enter), `focus-events on`, `set-clipboard on`, `allow-passthrough on`, `mouse on`, a large `history-limit`, true-colour terminal features.
 - tatou's bindings: popup key, back-to-dashboard key, and any `[keys.tmux]` entries from config.
 - A status bar showing `#(tatou status)`.
-- As its last line: `source-file -q ~/.config/tatou/tmux.local.conf`, the user's own overrides (created by the user, never by tatou). Optionally, `inherit_user_conf = true` also sources `~/.tmux.conf` first.
+- As its last line: `source-file -q ~/.config/tatou/tmux.local.conf`, the user's own overrides (created by the user, never by tatou). Optionally, `inherit_user_conf = true` also sources the user's own tmux config first: `~/.tmux.conf` and `$XDG_CONFIG_HOME/tmux/tmux.conf`, the files tmux itself loads.
 
 **One session per worktree:**
 ```
@@ -175,7 +175,7 @@ default_agent = "claude"
 popup = "M-g"                # opens `tatou --popup`
 back  = "M-d"                # returns to the dashboard
 # prefix = "C-b"
-# inherit_user_conf = false  # also source ~/.tmux.conf before tatou's settings
+# inherit_user_conf = false  # also source your own tmux config before tatou's settings
 
 [agents]
 claude = "claude"
