@@ -209,7 +209,7 @@ base = "main"
 
 ## 10. Implementation notes
 
-- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `ignore`, `serde`, `toml`, `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`).
+- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `ignore`, `serde`, `toml`, `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`, default `info`, and `warn` for `tatou status`, which runs every few seconds; `--help` and `--version` do not log).
 - Paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), honouring `$XDG_*` variables when set. No `~/Library/...` on macOS: CLI users expect `~/.config`.
 - All platform differences live in one `platform` module behind two functions, `open(path)` and `notify(title, body)`, using `cfg(target_os)`. Nothing else in the codebase is platform-specific.
 - Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).

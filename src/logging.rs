@@ -16,9 +16,9 @@ use crate::error::{Error, Result};
 
 const MAX_SIZE: u64 = 1024 * 1024;
 
-/// Starts logging to the log file at the level set by `$TATOU_LOG` (default `info`),
-/// and returns the file's path.
-pub fn init() -> Result<PathBuf> {
+/// Starts logging to the log file at the level set by `$TATOU_LOG`, or `default`
+/// when it is unset or invalid, and returns the file's path.
+pub fn init(default: LevelFilter) -> Result<PathBuf> {
     let dir = config::state_dir()?;
     fs::create_dir_all(&dir).map_err(|source| Error::Io {
         path: dir.clone(),
@@ -38,7 +38,7 @@ pub fn init() -> Result<PathBuf> {
     tracing_subscriber::fmt()
         .with_writer(Mutex::new(file))
         .with_ansi(false)
-        .with_max_level(level(std::env::var("TATOU_LOG").ok().as_deref()))
+        .with_max_level(level(std::env::var("TATOU_LOG").ok().as_deref(), default))
         .init();
     Ok(path)
 }
@@ -59,10 +59,9 @@ fn rotate(path: &Path, old: &Path, max: u64) -> Result<()> {
 }
 
 /// The log level from `$TATOU_LOG` (`off`, `error`, `warn`, `info`, `debug`, `trace`);
-/// `info` when unset or invalid.
-fn level(var: Option<&str>) -> LevelFilter {
-    var.and_then(|v| v.parse().ok())
-        .unwrap_or(LevelFilter::INFO)
+/// `default` when unset or invalid.
+fn level(var: Option<&str>, default: LevelFilter) -> LevelFilter {
+    var.and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 #[cfg(test)]
@@ -70,16 +69,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn level_defaults_to_info() {
-        assert_eq!(level(None), LevelFilter::INFO);
-        assert_eq!(level(Some("loud")), LevelFilter::INFO);
+    fn level_falls_back_to_the_default() {
+        assert_eq!(level(None, LevelFilter::INFO), LevelFilter::INFO);
+        assert_eq!(level(Some("loud"), LevelFilter::WARN), LevelFilter::WARN);
     }
 
     #[test]
     fn level_parses_names_in_any_case() {
-        assert_eq!(level(Some("debug")), LevelFilter::DEBUG);
-        assert_eq!(level(Some("WARN")), LevelFilter::WARN);
-        assert_eq!(level(Some("off")), LevelFilter::OFF);
+        assert_eq!(level(Some("debug"), LevelFilter::WARN), LevelFilter::DEBUG);
+        assert_eq!(level(Some("WARN"), LevelFilter::INFO), LevelFilter::WARN);
+        assert_eq!(level(Some("off"), LevelFilter::INFO), LevelFilter::OFF);
     }
 
     #[test]
