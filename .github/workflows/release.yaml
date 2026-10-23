@@ -1,0 +1,89 @@
+name: Release
+
+# Publishes a release when a pull request is merged into main and the VERSION
+# file contains a version that has not been released yet.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  ZIG_VERSION: 0.17.0
+  CARGO_ZIGBUILD_VERSION: 0.24.0
+
+jobs:
+
+  release:
+    name: Release
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    steps:
+
+    - name: Check out the merged code
+      uses: actions/checkout@v7
+      with:
+        ref: ${{ github.event.pull_request.merge_commit_sha }}
+        fetch-depth: 0
+
+    # A version counts as released once its GitHub release exists, so a failed
+    # release can be re-run even though its tag was already pushed
+    - name: Read version
+      id: version
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        version=$(cat VERSION)
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        if gh release view "$version" > /dev/null 2>&1; then
+          echo "$version is already released, bump the VERSION file to release a new version"
+          echo "new=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "new=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    # Reuses the tag of a failed release, and releases the commit it points to
+    - name: Tag the version
+      if: steps.version.outputs.new == 'true'
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        if [ -n "$(git tag --list "$VERSION")" ]; then
+          git checkout "$VERSION"
+        else
+          git tag "$VERSION"
+          git push origin "$VERSION"
+        fi
+
+    - name: Set up Rust
+      if: steps.version.outputs.new == 'true'
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+
+    # cargo-zigbuild cross-compiles with zig, which comes from its Python package
+    - name: Set up Python
+      if: steps.version.outputs.new == 'true'
+      uses: actions/setup-python@v7
+      with:
+        python-version: 3.x
+
+    - name: Install zig
+      if: steps.version.outputs.new == 'true'
+      run: pip install "ziglang==$ZIG_VERSION"
+
+    - name: Install cargo-zigbuild
+      if: steps.version.outputs.new == 'true'
+      run: cargo install --locked cargo-zigbuild --version "$CARGO_ZIGBUILD_VERSION"
+
+    - name: Release with GoReleaser
+      if: steps.version.outputs.new == 'true'
+      uses: goreleaser/goreleaser-action@v7
+      with:
+        version: "~> v2"
+        args: release --clean
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,23 @@
+# GoReleaser builds and publishes tatou releases, see .github/workflows/release.yaml
+version: 2
+
+builds:
+  - builder: rust
+    flags: [--release, --locked]
+    # Rust target names, as cargo requires them; everywhere else platforms are named os-arch
+    targets:
+      - x86_64-unknown-linux-musl # linux-amd64, statically linked
+      - aarch64-unknown-linux-musl # linux-arm64, statically linked
+      - aarch64-apple-darwin # darwin-arm64, Apple silicon only
+
+# Publish tar.gz archives, e.g. tatou-v0.1.0-alpha.2-linux-amd64.tar.gz
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Tag }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: sha256sums.txt
+
+release:
+  # Every version before v1 has an -alpha.N suffix and is published as a prerelease
+  prerelease: auto
