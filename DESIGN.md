@@ -113,7 +113,7 @@ All keys are configurable (§9). Any action can also be bound to a custom tmux c
 ```
 config.toml ─► projects
 git worktree list --porcelain (per project) ─► worktrees
-tmux list-sessions -F '#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{session_activity}'
+tmux list-panes -a -F '#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}'
                                              ─► session, status, agent pane per worktree (matched by path)
 gh pr list --state all --json number,headRefName,state,isDraft,statusCheckRollup,url (per project)
                                              ─► PR badge per branch
@@ -142,7 +142,7 @@ tmux -L tatou new-session -d -s <repo>-<name> -c <path> -e TATOU=1 -P -F '#{sess
 tmux -L tatou set-option -t <session_id> @tatou_path <path>
 tmux -L tatou set-option -t <session_id> @tatou_agent_pane <pane_id>
 ```
-Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`), never by parsing names, and targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
+Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`, comparing paths with symlinks resolved), never by parsing names; the dashboard's own `tatou` session is never a worktree's. Sessions are targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
 
 ### 8.4 Agent status
 Agents report their own state by setting a tmux option; `$TMUX` inside a session points at the tatou server and session, `TATOU=1` makes it a no-op elsewhere.
@@ -159,7 +159,7 @@ Claude Code (`~/.claude/settings.json`), added by the user:
 ```
 Other agents run the same one-liner from their own notify/hook mechanism. `tatou hooks` prints these snippets.
 
-Without hooks: `#{session_activity}` gives "active" vs "quiet". No further guessing.
+Without hooks: output in the agent's window within the last 10 s (`#{window_activity}` of the `@tatou_agent_pane` window, or of the most recent window when there is none) gives "active", else "quiet". `#{session_activity}` does not work for this: it changes on keyboard input only. No further guessing.
 
 On a transition to `input` for a worktree that isn't the current tmux session: a desktop notification (see §10; skipped silently if unavailable) and `tmux display-message`.
 

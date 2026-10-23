@@ -175,6 +175,7 @@ Depends on: 1.5, 1.8, 1.9
 - Session matching by path only (`@tatou_path`, then `session_path`), comparing canonicalised paths (macOS `/var` vs `/private/var`). Never by session name.
 - Status: `@tatou_status` (`busy` / `input` / `idle`) when set; otherwise activity-based (`active` vs `quiet` from `session_activity` and a threshold); `none` without a session. Verify `session_activity` tracks pane output; if not, use the agent window's `window_activity` instead and update DESIGN.
 - The `tatou` dashboard session is never shown as a worktree.
+- Verified: `session_activity` changes on keyboard input only, so sessions are read with `list-panes -a` (session fields plus `#{pane_id}` and `#{window_activity}` per pane) and the activity is the agent pane's window, or the most recent window without one. Active means output within 10 s. The dashboard session is recognised by its exact name `tatou`; bare main repositories are not listed.
 
 **Done when**
 - Unit tests: match by option, fallback to session path, two sessions on one worktree (first wins, deterministic), worktree without session, session without worktree ignored, each status.

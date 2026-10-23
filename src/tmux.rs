@@ -23,8 +23,10 @@ pub const DASHBOARD: &str = "tatou";
 /// The oldest tmux tatou supports, as (major, minor).
 const MIN_VERSION: (u32, u32) = (3, 2);
 
-/// The fields `sessions` reads, tab-separated; empty when an option is not set.
-const SESSION_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{session_activity}";
+/// The fields `sessions` reads for each pane, tab-separated; empty when an option is
+/// not set. Panes rather than sessions, because only a window's activity follows the
+/// output of its panes: `session_activity` changes on keyboard input alone.
+const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}";
 
 /// A tmux server: every command sent to it is `tmux -u -L <socket> -f <conf> …`.
 /// `-u` makes tmux print UTF-8 whatever the locale; without it, tabs and non-ASCII
@@ -81,10 +83,10 @@ impl Server {
     }
 
     /// Every session on the server, sorted by name; none when the server is not running.
-    // Not called yet: the model and the background refresh use it (#12, #13)
+    // Not called yet: the background refresh uses it (#13)
     #[allow(dead_code)]
     pub fn sessions(&self) -> Result<Vec<Session>> {
-        match self.run(&["list-sessions", "-F", SESSION_FORMAT]) {
+        match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
             Ok(output) => Ok(parse_sessions(&output.stdout)),
             Err(Error::Command { stderr, .. }) if no_server(&stderr) => Ok(Vec::new()),
             Err(err) => Err(err),
@@ -92,8 +94,8 @@ impl Server {
     }
 }
 
-/// A session on tatou's server, as `list-sessions` reports it.
-// Not read yet: the model matches sessions to worktrees (#12)
+/// A session on tatou's server, from the list of its panes.
+// Not read yet beyond the model, itself unused until (#13)
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Session {
@@ -108,12 +110,13 @@ pub struct Session {
     pub agent_pane: Option<String>,
     /// The session's start directory, matched when `tatou_path` is not set.
     pub path: PathBuf,
-    /// Last activity, in seconds since the Unix epoch.
+    /// When the agent's window last printed, in seconds since the Unix epoch; for a
+    /// session without an agent pane, its most recent window.
     pub activity: u64,
 }
 
 /// What an agent reports through `@tatou_status`.
-// Not read yet: the model and the UI show it (#12, #15)
+// Not read yet beyond the model, itself unused until (#13)
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
@@ -130,34 +133,72 @@ fn no_server(stderr: &str) -> bool {
                 || stderr.ends_with("(Connection refused)")))
 }
 
-/// Parses `list-sessions -F SESSION_FORMAT` output. A line in another shape, such as
-/// one with a tab or a newline inside a path, is skipped so the other sessions still show.
+/// Parses `list-panes -a -F PANE_FORMAT` output into sessions, in the order they
+/// first appear. A line in another shape, such as one with a tab or a newline inside
+/// a path, is skipped so the other sessions still show.
 fn parse_sessions(text: &str) -> Vec<Session> {
-    let mut sessions = Vec::new();
+    // Each session with its panes' ids and window activity
+    let mut sessions: Vec<(Session, Vec<(String, u64)>)> = Vec::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
-        match parse_session(line) {
-            Some(session) => sessions.push(session),
-            None => tracing::warn!(line, "skipping a tmux session line in an unexpected shape"),
+        let Some((session, pane)) = parse_pane(line) else {
+            tracing::warn!(line, "skipping a tmux pane line in an unexpected shape");
+            continue;
+        };
+        match sessions
+            .iter_mut()
+            .find(|(known, _)| known.id == session.id)
+        {
+            Some((_, panes)) => panes.push(pane),
+            None => sessions.push((session, vec![pane])),
         }
     }
-    sessions
+    let mut result = Vec::new();
+    for (mut session, panes) in sessions {
+        let agent = panes
+            .iter()
+            .find(|(id, _)| session.agent_pane.as_ref() == Some(id));
+        session.activity = match agent {
+            Some((_, activity)) => *activity,
+            // Without an agent pane, any window counts
+            None => panes
+                .iter()
+                .map(|(_, activity)| *activity)
+                .max()
+                .unwrap_or(0),
+        };
+        result.push(session);
+    }
+    result
 }
 
-fn parse_session(line: &str) -> Option<Session> {
+/// One line: the pane's session (its activity not set yet) and the pane's id and
+/// window activity.
+fn parse_pane(line: &str) -> Option<(Session, (String, u64))> {
     let fields: Vec<&str> = line.split('\t').collect();
-    let [id, name, tatou_path, status, agent_pane, path, activity] = fields[..] else {
+    let [
+        id,
+        name,
+        tatou_path,
+        status,
+        agent_pane,
+        path,
+        pane,
+        activity,
+    ] = fields[..]
+    else {
         return None;
     };
     let set = |value: &str| (!value.is_empty()).then(|| value.to_string());
-    Some(Session {
+    let session = Session {
         id: id.to_string(),
         name: name.to_string(),
         tatou_path: set(tatou_path).map(PathBuf::from),
         status: parse_status(status),
         agent_pane: set(agent_pane),
         path: PathBuf::from(path),
-        activity: activity.parse().ok()?,
-    })
+        activity: 0,
+    };
+    Some((session, (pane.to_string(), activity.parse().ok()?)))
 }
 
 /// Any value other than the three statuses counts as not set.
@@ -654,32 +695,45 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     }
 
     #[test]
-    fn parses_sessions() {
-        let text = include_str!("../tests/fixtures/tmux/sessions.txt");
-        let plain = |id: &str, name: &str, path: &str| Session {
+    fn parses_sessions_from_their_panes() {
+        let text = include_str!("../tests/fixtures/tmux/panes.txt");
+        let plain = |id: &str, name: &str, path: &str, activity| Session {
             id: id.into(),
             name: name.into(),
             tatou_path: None,
             status: None,
             agent_pane: None,
             path: path.into(),
-            activity: 1792788783,
+            activity,
         };
-        let created = |id, name, path: &str, status, pane: &str| Session {
+        let created = |id, name, path: &str, pane: &str, activity| Session {
             tatou_path: Some(path.into()),
-            status: Some(status),
             agent_pane: Some(pane.into()),
-            ..plain(id, name, path)
+            ..plain(id, name, path, activity)
         };
         let docs = "/home/me/code/api.worktrees/docs";
         let login = "/home/me/code/my-app.worktrees/fix login";
         let expected = [
-            created("$2", "api-docs", docs, AgentStatus::Input, "%2"),
-            created("$1", "my-app-fix login", login, AgentStatus::Busy, "%1"),
-            plain("$3", "scratch", "/home/me/notes and ideas"),
-            plain("$0", "tatou", "/home/me"),
+            Session {
+                status: Some(AgentStatus::Input),
+                ..created("$2", "api-docs", docs, "%2", 1792793302)
+            },
+            // Its agent's window, not the shell window opened later
+            created("$1", "my-app-fix login", login, "%1", 1792793302),
+            // No agent pane: its most recent window
+            plain("$3", "scratch", "/home/me/notes and ideas", 1792793307),
+            plain("$0", "tatou", "/home/me", 1792793302),
         ];
         assert_eq!(parse_sessions(text), expected);
+    }
+
+    #[test]
+    fn a_closed_agent_pane_falls_back_to_the_most_recent_window() {
+        let text = "\
+$1\tapp\t/a\t\t%9\t/a\t%1\t100
+$1\tapp\t/a\t\t%9\t/a\t%2\t200
+";
+        assert_eq!(parse_sessions(text)[0].activity, 200);
     }
 
     #[test]
@@ -690,9 +744,9 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     #[test]
     fn lines_in_another_shape_are_skipped() {
         let text = "\
-$0\ttatou\t\t\t\t/home/me\t1792788783
-$1\ttab\t\t\t\t/home/me/a\tb\t1792788783
-$2\tactivity\t\t\t\t/home/me\tnot a number
+$0\ttatou\t\t\t\t/home/me\t%0\t1792788783
+$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783
+$2\tactivity\t\t\t\t/home/me\t%2\tnot a number
 $3\tshort\t/home/me
 ";
         let names: Vec<_> = parse_sessions(text).into_iter().map(|s| s.name).collect();
