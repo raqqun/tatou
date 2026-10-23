@@ -208,6 +208,7 @@ base = "main"
 - All platform differences live in one `platform` module behind two functions, `open(path)` and `notify(title, body)`, using `cfg(target_os)`. Nothing else in the codebase is platform-specific.
 - Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
 - Plain `std::thread` + `mpsc` channels for background commands; no async runtime.
+- Commands' stdout and stderr are read as UTF-8, lossily: file names that are not valid UTF-8 are not supported. Commands have no timeout; they run on background threads with stdin closed and git/gh prompts disabled, so a stuck command only stalls its own refresh.
 - Modules: `error`, `logging`, `config`, `exec`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `keys`, `ui`.
 - Parsers for git/tmux/gh output are pure and tested against captured fixtures.
 - Runtime requirements: `git`, `tmux` (3.2+ for `display-popup` and `set-buffer -w`). Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`).

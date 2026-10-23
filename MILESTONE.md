@@ -69,7 +69,8 @@ Depends on: 1.3
 - `run_sh(script, cwd)`: the deliberate `sh -c` path, used only for `on_create` and custom templates.
 - `exec_replace(program, args)`: replace the current process (`CommandExt::exec`), used by the launcher to hand the terminal to tmux.
 - `shell_quote(&str) -> String`: POSIX single-quote quoting for values substituted into templates.
-- Set `GIT_TERMINAL_PROMPT=0` and `GH_PROMPT_DISABLED=1` so background commands never wait for input.
+- Set `GIT_TERMINAL_PROMPT=0` for `git` and `GH_PROMPT_DISABLED=1` for `gh` so background commands never wait for input. Only for those two: a tmux server inherits the environment of the command that starts it and would pass the variables on to every agent session.
+- **Decided:** stdout/stderr as lossy UTF-8 strings; no timeout (revisited in 5.2); code not called yet gets a per-item `#[allow(dead_code)]` naming the issue that will use it.
 - Log every command (program + args) at `debug`.
 
 **Done when**
@@ -481,6 +482,7 @@ Depends on: 1.4
 Depends on: 5.1, 1.13
 
 - Every ~60 s and on demand (a refresh key). Missing `gh`, not authenticated, or no GitHub remote: no badges, one log line, no error spam in the UI.
+- `gh` talks to the network: decide whether `exec::run` needs a timeout now (it has none since 1.4).
 
 **Done when**
 - Unit test: an error from `gh` maps to "no badges" for that project only.

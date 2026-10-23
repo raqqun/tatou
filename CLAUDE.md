@@ -70,6 +70,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 - **Never force destructive git operations silently.** If `git worktree remove` fails, show git's message and require explicit confirmation to force.
 - **Match tmux sessions to worktrees by path** (`@tatou_path`, then `#{session_path}`), never by parsing session names.
 - No `unwrap()`/`expect()` outside tests unless the invariant is impossible to break; comment why.
+- Code written before anything calls it gets `#[allow(dead_code)]` on the item, with a comment naming the issue that will use it; that issue removes the attribute. Never allow dead code crate-wide.
 - Prefer plain, obvious code over abstractions. No traits or generics until there are two real uses.
 
 ## Testing
