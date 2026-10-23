@@ -1,0 +1,27 @@
+worktree /home/me/code/my-app
+HEAD 5fd71d0a678bf10d8078991b7286f696fe659c1f
+branch refs/heads/main
+
+worktree /home/me/code/my-app.worktrees/bisect
+HEAD 5fd71d0a678bf10d8078991b7286f696fe659c1f
+detached
+
+worktree /home/me/code/my-app.worktrees/docs
+HEAD 5fd71d0a678bf10d8078991b7286f696fe659c1f
+branch refs/heads/docs
+locked
+
+worktree /home/me/code/my-app.worktrees/fix login
+HEAD 5fd71d0a678bf10d8078991b7286f696fe659c1f
+branch refs/heads/fix-login
+
+worktree /home/me/code/my-app.worktrees/old
+HEAD 5fd71d0a678bf10d8078991b7286f696fe659c1f
+branch refs/heads/old
+prunable gitdir file points to non-existent location
+
+worktree /home/me/code/my-app.worktrees/spike
+HEAD 5fd71d0a678bf10d8078991b7286f696fe659c1f
+branch refs/heads/spike
+locked on a USB drive
+
