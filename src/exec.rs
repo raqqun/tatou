@@ -87,6 +87,12 @@ fn command(program: &str, args: &[&str]) -> Command {
     match program {
         "git" => {
             command.env("GIT_TERMINAL_PROMPT", "0");
+            // Tests never see the user's or the system's git config: their hooks or
+            // commit signing must not get in the way
+            if cfg!(test) {
+                command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+                command.env("GIT_CONFIG_NOSYSTEM", "1");
+            }
         }
         "gh" => {
             command.env("GH_PROMPT_DISABLED", "1");
@@ -181,7 +187,15 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(env("git"), [("GIT_TERMINAL_PROMPT".into(), "0".into())]);
+        assert_eq!(
+            env("git"),
+            [
+                // These two in unit tests only
+                ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+                ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+                ("GIT_TERMINAL_PROMPT".into(), "0".into()),
+            ]
+        );
         assert_eq!(env("gh"), [("GH_PROMPT_DISABLED".into(), "1".into())]);
         assert_eq!(env("tmux"), []);
     }
