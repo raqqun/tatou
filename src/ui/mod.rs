@@ -2,6 +2,7 @@
 
 mod dialog;
 mod projects;
+mod sessions;
 mod terminal;
 
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use crate::refresh::{ConfigWatch, Refresh, Update};
 use crate::tmux::{self, Server};
 use dialog::{Choice, Confirm, Dialog, Field, Form, Message, Outcome};
 use projects::Tree;
+use sessions::Sessions;
 
 /// How long to wait for input before applying updates and drawing again.
 const TICK: Duration = Duration::from_millis(100);
@@ -124,6 +126,9 @@ struct App {
     refresh: Option<Refresh>,
     sources: Sources,
     tree: Tree,
+    sessions: Sessions,
+    /// `$HOME`, to show folders with `~/`.
+    home: Option<PathBuf>,
     keymap: Keymap,
     focus: Pane,
     /// Takes the keys while open; drawn over the panes.
@@ -148,6 +153,8 @@ impl App {
             refresh: None,
             sources: Sources::default(),
             tree: Tree::default(),
+            sessions: Sessions::default(),
+            home: std::env::var_os("HOME").map(PathBuf::from),
             keymap: Keymap::defaults(),
             focus: Pane::Worktrees,
             dialog: None,
@@ -319,8 +326,14 @@ impl App {
 
     /// Rebuilds the left pane from the latest sources; `now` dates agents' activity.
     fn update_view(&mut self, now: u64) {
-        if let Ok(config) = &self.config {
-            self.tree.set_view(self.sources.view(config, now));
+        let view = match &self.config {
+            Ok(config) => self.sources.view(config, now),
+            Err(_) => Vec::new(),
+        };
+        let rows = self.sources.session_rows(&view, now, self.home.as_deref());
+        self.sessions.set_rows(rows);
+        if self.config.is_ok() {
+            self.tree.set_view(view);
         }
         self.select_new_worktree();
     }
@@ -336,8 +349,16 @@ impl App {
 
     fn handle(&mut self, action: Action) {
         let worktrees = self.focus == Pane::Worktrees;
+        let sessions = self.focus == Pane::Sessions;
         match action {
             Action::Quit => self.quit = true,
+            Action::Up if sessions => self.sessions.up(),
+            Action::Down if sessions => self.sessions.down(),
+            Action::Jump if sessions => {
+                if let Some(row) = self.sessions.selected() {
+                    self.tasks.push(Task::Switch(row.id.clone()));
+                }
+            }
             Action::Up if worktrees => self.tree.up(),
             Action::Down if worktrees => self.tree.down(),
             Action::Collapse if worktrees => self.tree.collapse(),
@@ -349,7 +370,8 @@ impl App {
             Action::RemoveWorktree if worktrees => self.confirm_remove(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
-                    Pane::Worktrees => Pane::Files,
+                    Pane::Worktrees => Pane::Sessions,
+                    Pane::Sessions => Pane::Files,
                     _ => Pane::Worktrees,
                 }
             }
@@ -598,6 +620,9 @@ impl App {
 
     /// The actions that do not apply to the selected row.
     fn hidden(&self) -> &'static [Action] {
+        if self.focus == Pane::Sessions && self.sessions.selected().is_none() {
+            return &[Action::Jump];
+        }
         if self.focus != Pane::Worktrees {
             return &[];
         }
@@ -618,7 +643,20 @@ impl App {
         let [left, right] =
             Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
                 .areas(main);
-        self.render_projects(frame, left);
+        // Sessions as tall as its rows and borders, up to a third of the column; not
+        // drawn when a third has no room for one row, so the projects keep theirs
+        let wanted = self.sessions.len().max(1) as u16 + 2;
+        let height = match wanted.min(left.height / 3) {
+            fits @ 3.. => fits,
+            _ => 0,
+        };
+        let [projects, sessions] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(left);
+        // Without room for the sessions, their error goes below the projects
+        self.render_projects(frame, projects, height == 0);
+        if height > 0 {
+            self.render_sessions(frame, sessions);
+        }
         frame.render_widget(self.pane_block(" Files ", Pane::Files), right);
         frame.render_widget(self.hint_bar(), hints);
         if let Some(open) = &mut self.dialog {
@@ -626,15 +664,26 @@ impl App {
         }
     }
 
-    /// The projects, else why there are none; reload and tmux errors at the bottom.
-    fn render_projects(&mut self, frame: &mut Frame, area: Rect) {
+    /// Every session on tatou's server; a tmux error at the bottom.
+    fn render_sessions(&mut self, frame: &mut Frame, area: Rect) {
+        let mut block = self.pane_block(" Sessions ", Pane::Sessions);
+        if let Some(err) = self.sources.sessions_error() {
+            let style = Style::new().fg(Color::Red);
+            block = block.title_bottom(Line::styled(format!(" {err} "), style));
+        }
+        self.sessions.render(frame, area, block);
+    }
+
+    /// The projects, else why there are none; a reload error at the bottom, and
+    /// the sessions' error with `sessions_error`.
+    fn render_projects(&mut self, frame: &mut Frame, area: Rect, sessions_error: bool) {
         let mut block = self.pane_block(" Projects ", Pane::Worktrees);
         let style = Style::new().fg(Color::Red);
         if let (Some(err), Ok(config)) = (&self.reload_error, &self.config) {
             let err = one_line(err, &config.path);
             block = block.title_bottom(Line::styled(format!(" config.toml: {err} "), style));
         }
-        if let Some(err) = self.sources.sessions_error() {
+        if let Some(err) = self.sources.sessions_error().filter(|_| sessions_error) {
             block = block.title_bottom(Line::styled(format!(" {err} "), style));
         }
         let message = match &self.config {
@@ -753,8 +802,11 @@ mod tests {
 
     /// The left pane's text inside its borders, on a 100-column screen.
     fn projects_pane(app: &mut App, height: u16) -> Vec<String> {
-        let lines = screen(app, 100, height);
-        let inner = &lines[1..height as usize - 2];
+        // Three more rows for the sessions' pane below, empty: the same room as before it
+        let lines = screen(app, 100, height + 3);
+        let bottom = lines.iter().position(|l| l.starts_with('└')).unwrap();
+        // Taller when the sessions' pane has no room: only empty lines more
+        let inner = &lines[1..bottom.min(height as usize - 2)];
         inner
             .iter()
             .map(|line| {
@@ -909,6 +961,10 @@ mod tests {
     fn tab_switches_the_focus_and_the_hints() {
         let mut app = app();
         press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Pane::Sessions);
+        let lines = screen(&mut app, 80, 12);
+        assert_eq!(lines[11], "? help  q quit", "no session to jump to");
+        press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Files);
         let lines = screen(&mut app, 80, 4);
         assert!(lines[3].starts_with("e edit  v view  D diff"), "{lines:?}");
@@ -1007,6 +1063,7 @@ mod tests {
         );
         press(&mut app, KeyCode::Char('j'));
         assert!(hint_line(&mut app).starts_with("⏎ jump  n new"), "session");
+        press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Tab);
         assert!(hint_line(&mut app).starts_with("e edit"), "files");
     }
@@ -1587,6 +1644,153 @@ unknown field `popop`, expected one of `popup`, `back`";
         let lines = screen(&mut app, 100, 14).join("\n");
         assert!(lines.contains("┌ fix not removed "), "{lines}");
         assert!(lines.contains("use 'remove -f -f' to override"), "{lines}");
+    }
+
+    /// A session tatou did not tag, in `path`, active at `NOW`.
+    fn tmux_session(id: &str, name: &str, path: &str) -> tmux::Session {
+        tmux::Session {
+            id: id.into(),
+            name: name.into(),
+            tatou_path: None,
+            status: None,
+            agent_pane: None,
+            path: path.into(),
+            activity: NOW,
+        }
+    }
+
+    const NOW: u64 = 1_000_000;
+
+    /// `app` with its `fix` worktree and `sessions` on the server, as refreshed.
+    fn with_sessions(sessions: Vec<tmux::Session>) -> App {
+        let mut app = with_a_project(None);
+        app.home = Some("/home/me".into());
+        let worktrees = vec![
+            git::Worktree {
+                path: "/code/app".into(),
+                head: None,
+                branch: Some("main".into()),
+                detached: false,
+                bare: false,
+                locked: None,
+                prunable: None,
+            },
+            git::Worktree {
+                path: "/code/app.worktrees/fix".into(),
+                head: None,
+                branch: Some("fix".into()),
+                detached: false,
+                bare: false,
+                locked: None,
+                prunable: None,
+            },
+        ];
+        app.sources.apply(Update::Worktrees {
+            project: "/code/app".into(),
+            result: Ok(worktrees),
+            remote_default: None,
+        });
+        app.sources.apply(Update::Sessions(Ok(sessions)));
+        app.update_view(NOW);
+        app
+    }
+
+    /// The sessions' pane, inside its borders, on a 100×`height` screen.
+    fn sessions_pane(app: &mut App, height: u16) -> Vec<String> {
+        let lines = screen(app, 100, height);
+        let top = lines
+            .iter()
+            .position(|l| l.starts_with("┌ Sessions"))
+            .expect("the pane");
+        lines[top + 1..]
+            .iter()
+            .take_while(|l| !l.starts_with('└'))
+            .map(|l| {
+                l.chars()
+                    .skip(1)
+                    .take(38)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_sessions_pane_lists_every_session_but_the_dashboards() {
+        let mut app = with_sessions(vec![
+            tmux_session("$1", "app-fix", "/code/app.worktrees/fix"),
+            tmux_session("$2", "notes", "/home/me/notes"),
+            tmux_session("$0", tmux::DASHBOARD, "/code/app"),
+        ]);
+        assert_eq!(
+            sessions_pane(&mut app, 20),
+            ["● app-fix  app/fix", "● notes  ~/notes"],
+            "its worktree, else its folder"
+        );
+    }
+
+    #[test]
+    fn without_sessions_the_pane_says_so() {
+        let mut app = with_sessions(vec![]);
+        assert_eq!(sessions_pane(&mut app, 20), ["No sessions"]);
+    }
+
+    #[test]
+    fn the_sessions_pane_takes_at_most_a_third_of_the_column() {
+        let many = (0..20)
+            .map(|n| tmux_session(&format!("${n}"), &format!("s{n:02}"), "/tmp"))
+            .collect();
+        let mut app = with_sessions(many);
+        // 30 rows: a column of 29, so 9 for the pane, 7 inside its borders
+        let rows = sessions_pane(&mut app, 30);
+        assert_eq!(rows.len(), 7, "{rows:?}");
+        // Moving past the last shown row scrolls
+        app.focus = Pane::Sessions;
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        let rows = sessions_pane(&mut app, 30);
+        assert!(rows.iter().any(|r| r.contains("s10")), "{rows:?}");
+    }
+
+    #[test]
+    fn enter_in_the_sessions_pane_jumps_and_the_selection_follows_its_session() {
+        let mut app = with_sessions(vec![
+            tmux_session("$1", "app-fix", "/code/app.worktrees/fix"),
+            tmux_session("$2", "notes", "/home/me/notes"),
+        ]);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Pane::Sessions);
+        assert!(hint_line(&mut app).starts_with("⏎ jump  ? help"));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tasks, [Task::Switch("$2".into())]);
+        // A session listed before it: still on notes
+        app.sources.apply(Update::Sessions(Ok(vec![
+            tmux_session("$3", "aaa", "/tmp"),
+            tmux_session("$1", "app-fix", "/code/app.worktrees/fix"),
+            tmux_session("$2", "notes", "/home/me/notes"),
+        ])));
+        app.update_view(NOW);
+        assert_eq!(
+            app.sessions.selected().map(|s| s.name.as_str()),
+            Some("notes")
+        );
+        // The tree did not move meanwhile
+        assert_eq!(
+            app.tree.selected().cloned(),
+            Some(projects::Row::Project("/code/app".into()))
+        );
+    }
+
+    #[test]
+    fn a_tmux_error_shows_below_the_sessions() {
+        let mut app = with_sessions(vec![]);
+        app.sources
+            .apply(Update::Sessions(Err("tmux: no server".into())));
+        let lines = screen(&mut app, 60, 20);
+        assert!(lines[18].starts_with("└ tmux: no server ─"), "{lines:?}");
     }
 
     fn test_config() -> Config {

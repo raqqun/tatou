@@ -9,8 +9,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Worktrees,
+    /// Every session on tatou's server, below the projects.
+    Sessions,
     Files,
-    /// Navigation and the app itself, in either pane.
+    /// Navigation and the app itself, in any pane.
     Any,
 }
 
@@ -138,6 +140,13 @@ impl Action {
         }
     }
 
+    /// Whether the action does something in `pane`: its own, and jumping in the
+    /// sessions' pane too.
+    pub fn applies(self, pane: Pane) -> bool {
+        let own = self.pane();
+        own == pane || own == Pane::Any || (self == Action::Jump && pane == Pane::Sessions)
+    }
+
     /// Moving around is not worth space in the hint bar.
     fn is_navigation(self) -> bool {
         matches!(
@@ -260,9 +269,7 @@ impl Keymap {
     pub fn hints(&self, pane: Pane, hidden: &[Action]) -> Vec<(String, &'static str)> {
         let mut hints: Vec<(String, &'static str)> = Vec::new();
         let mut shown: Vec<Action> = Vec::new();
-        let wanted = |action: Action| {
-            (action.pane() == pane || action.pane() == Pane::Any) && !hidden.contains(&action)
-        };
+        let wanted = |action: Action| action.applies(pane) && !hidden.contains(&action);
         for (key, action) in &self.bindings {
             if wanted(*action) && !action.is_navigation() && !shown.contains(action) {
                 shown.push(*action);
@@ -388,6 +395,12 @@ mod tests {
             .map(|(k, _)| k)
             .collect();
         assert_eq!(without_jump, ["n", "s", "t", "p", "d", "q"]);
+        let sessions: Vec<_> = keymap
+            .hints(Pane::Sessions, &[])
+            .into_iter()
+            .map(|(k, a)| format!("{k} {a}"))
+            .collect();
+        assert_eq!(sessions, ["⏎ jump", "? help", "q quit"]);
     }
 
     #[test]
