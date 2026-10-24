@@ -349,7 +349,7 @@ Depends on: 2.2, 2.3
 Depends on: 2.2
 
 - Session exists: `new-window -t <session> -c <path>`, then switch to it.
-- **Decision to confirm:** no session yet → create one whose first window is `$SHELL` (no `@tatou_agent_pane` set).
+- Decided: no session yet → create one whose first window is `$SHELL` (tmux's default shell), tagged with `@tatou_path` but no `@tatou_agent_pane`; a later `s` starts the agent in a window of its own there (2.5). `Server::new_session` takes an optional command for it, like `new_window`.
 
 **Done when**
 - Manual check documented in the PR.

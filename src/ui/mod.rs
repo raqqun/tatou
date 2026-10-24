@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-use crate::actions::{self, NewWorktree, RestartAgent, StartAgent, Task};
+use crate::actions::{self, NewWorktree, RestartAgent, Shell, StartAgent, Task};
 use crate::config::{self, Config, Tmux};
 use crate::error::{Error, Result};
 use crate::git;
@@ -301,6 +301,7 @@ impl App {
             Action::Jump if worktrees => self.jump(),
             Action::NewWorktree if worktrees => self.open_new_worktree(),
             Action::StartAgent if worktrees => self.choose_agent(),
+            Action::Shell if worktrees => self.open_shell(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
                     Pane::Worktrees => Pane::Files,
@@ -335,6 +336,22 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// A shell in the selected worktree, in its session or a new one.
+    fn open_shell(&mut self) {
+        let (Some(worktree), Some(project)) =
+            (self.tree.selected_worktree(), self.tree.selected_project())
+        else {
+            return;
+        };
+        let name = worktree.label().to_string();
+        self.tasks.push(Task::Shell(Shell {
+            path: worktree.path.clone(),
+            session: worktree.session.as_ref().map(|s| s.id.clone()),
+            session_name: tmux::session_name(&project.name, &name),
+            name,
+        }));
     }
 
     /// `s` on a worktree: which agent, `default_agent` chosen first.
@@ -1284,6 +1301,33 @@ unknown field `popop`, expected one of `popup`, `back`";
         app.config = Ok(test_config());
         press(&mut app, KeyCode::Char('s'));
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn t_opens_a_shell_in_the_worktree() {
+        let mut app = on_fix_with_a_session();
+        press(&mut app, KeyCode::Char('t'));
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('t'));
+        let expected = [
+            Task::Shell(Shell {
+                name: "fix".into(),
+                path: "/code/app.worktrees/fix".into(),
+                session: Some("$3".into()),
+                session_name: "app-fix".into(),
+            }),
+            Task::Shell(Shell {
+                name: "main".into(),
+                path: "/code/app".into(),
+                session: None,
+                session_name: "app-main".into(),
+            }),
+        ];
+        assert_eq!(app.tasks, expected);
+        // Not on a project
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.tasks.len(), 2);
     }
 
     fn test_config() -> Config {

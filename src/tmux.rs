@@ -86,11 +86,17 @@ impl Server {
         self.run(&["switch-client", "-t", session]).map(|_| ())
     }
 
-    /// Starts `command` in a new detached session in `path`, named `name`, or
-    /// `name-2`, `name-3`, … when taken. `TATOU=1` in its environment lets the
-    /// agent's hooks report to tatou; `@tatou_path` and `@tatou_agent_pane` tag it.
+    /// Starts `command`, an agent, in a new detached session in `path`, named
+    /// `name`, or `name-2`, `name-3`, … when taken; without a command, the default
+    /// shell. `TATOU=1` in its environment lets the agent's hooks report to tatou;
+    /// `@tatou_path` tags it, and `@tatou_agent_pane` the agent's pane, if any.
     /// tmux runs `command` with its default shell, like any config command.
-    pub fn new_session(&self, name: &str, path: &Path, command: &str) -> Result<NewSession> {
+    pub fn new_session(
+        &self,
+        name: &str,
+        path: &Path,
+        command: Option<&str>,
+    ) -> Result<NewSession> {
         let dir = path.to_string_lossy();
         let mut n = 1;
         let (name, output) = loop {
@@ -98,7 +104,7 @@ impl Server {
                 1 => name.to_string(),
                 n => format!("{name}-{n}"),
             };
-            let args = [
+            let mut args = vec![
                 "new-session",
                 "-d",
                 "-s",
@@ -110,8 +116,8 @@ impl Server {
                 "-P",
                 "-F",
                 "#{session_id} #{pane_id}",
-                command,
             ];
+            args.extend(command);
             match self.run(&args) {
                 Ok(output) => break (name, output.stdout),
                 Err(Error::Command { stderr, .. }) if stderr.starts_with("duplicate session") => {
@@ -125,9 +131,11 @@ impl Server {
         };
         // By id: `-t =<name>` is read as a pane here. Should this fail, the session
         // still matches its worktree by its start directory
-        let tag_path = ["set-option", "-t", id, "@tatou_path", &dir];
-        let tag_pane = ["set-option", "-t", id, "@tatou_agent_pane", pane];
-        self.run(&[&tag_path[..], &[";"], &tag_pane[..]].concat())?;
+        let mut tags = vec!["set-option", "-t", id, "@tatou_path", &dir];
+        if command.is_some() {
+            tags.extend([";", "set-option", "-t", id, "@tatou_agent_pane", pane]);
+        }
+        self.run(&tags)?;
         Ok(NewSession {
             id: id.to_string(),
             name,
@@ -905,7 +913,9 @@ $3\tshort\t/home/me
             return;
         };
         let path = dir.path().canonicalize().unwrap();
-        let session = server.new_session("app-fix", &path, "sleep 1000").unwrap();
+        let session = server
+            .new_session("app-fix", &path, Some("sleep 1000"))
+            .unwrap();
         assert_eq!(session.name, "app-fix");
         assert!(session.id.starts_with('$') && session.pane.starts_with('%'));
 
@@ -932,7 +942,7 @@ $3\tshort\t/home/me
         let names: Vec<_> = (0..3)
             .map(|_| {
                 server
-                    .new_session("app-fix", dir.path(), "sleep 1000")
+                    .new_session("app-fix", dir.path(), Some("sleep 1000"))
                     .unwrap()
                     .name
             })
@@ -945,7 +955,9 @@ $3\tshort\t/home/me
         let Some((server, dir)) = sh_server() else {
             return;
         };
-        let session = server.new_session("app", dir.path(), "sleep 1000").unwrap();
+        let session = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
         let pid = show(&server, &session.pane, "#{pane_pid}");
         server.respawn_agent(&session.pane, "sleep 2000").unwrap();
         let after = show(&server, &session.pane, "#{pane_start_command}");
@@ -960,7 +972,9 @@ $3\tshort\t/home/me
         let Some((server, dir)) = sh_server() else {
             return;
         };
-        let session = server.new_session("app", dir.path(), "sleep 1000").unwrap();
+        let session = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
         let other = tempfile::tempdir().unwrap();
         let shell = server.new_window(&session.id, other.path(), None).unwrap();
         let tool = server
