@@ -28,6 +28,9 @@ use dialog::{Choice, Confirm, Dialog, Field, Form, Message, Outcome};
 use projects::Tree;
 use sessions::Sessions;
 
+/// The focused pane's border and title: cyan, as the `repo` tag.
+const ACCENT: Color = Color::Cyan;
+
 /// How long to wait for input before applying updates and drawing again.
 const TICK: Duration = Duration::from_millis(100);
 
@@ -668,7 +671,7 @@ impl App {
     fn render_sessions(&mut self, frame: &mut Frame, area: Rect) {
         let mut block = self.pane_block(" Sessions ", Pane::Sessions);
         if let Some(err) = self.sources.sessions_error() {
-            let style = Style::new().fg(Color::Red);
+            let style = error_style();
             block = block.title_bottom(Line::styled(format!(" {err} "), style));
         }
         self.sessions.render(frame, area, block);
@@ -678,7 +681,7 @@ impl App {
     /// the sessions' error with `sessions_error`.
     fn render_projects(&mut self, frame: &mut Frame, area: Rect, sessions_error: bool) {
         let mut block = self.pane_block(" Projects ", Pane::Worktrees);
-        let style = Style::new().fg(Color::Red);
+        let style = error_style();
         if let (Some(err), Ok(config)) = (&self.reload_error, &self.config) {
             let err = one_line(err, &config.path);
             block = block.title_bottom(Line::styled(format!(" config.toml: {err} "), style));
@@ -698,13 +701,15 @@ impl App {
         frame.render_widget(body.block(block), area);
     }
 
-    /// The focused pane's border is bold.
+    /// The focused pane's border and title are in the accent color; the other
+    /// panes are dim, borders, titles and contents.
     fn pane_block(&self, title: &'static str, pane: Pane) -> Block<'static> {
         let block = Block::bordered().title(title);
         if self.focus == pane {
-            block.border_style(Style::new().add_modifier(Modifier::BOLD))
+            let accent = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+            block.border_style(accent).title_style(accent)
         } else {
-            block
+            block.style(Style::new().add_modifier(Modifier::DIM))
         }
     }
 
@@ -761,6 +766,11 @@ fn one_line(err: &str, path: &std::path::Path) -> String {
         [only] => only.to_string(),
         [] => String::new(),
     }
+}
+
+/// Errors on a pane's border, bright even in a dim pane.
+fn error_style() -> Style {
+    Style::new().fg(Color::Red).remove_modifier(Modifier::DIM)
 }
 
 /// Seconds since the Unix epoch, like tmux's activity times.
@@ -1807,6 +1817,95 @@ unknown field `popop`, expected one of `popup`, `back`";
             .apply(Update::Sessions(Err("tmux: no server".into())));
         let lines = screen(&mut app, 60, 20);
         assert!(lines[18].starts_with("└ tmux: no server ─"), "{lines:?}");
+    }
+
+    /// The style of each cell on a `width`×`height` screen, by (x, y).
+    fn styles(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn dim(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> bool {
+        buffer[(x, y)].modifier.contains(Modifier::DIM)
+    }
+
+    fn accent(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> bool {
+        let cell = &buffer[(x, y)];
+        cell.fg == ACCENT
+            && cell.modifier.contains(Modifier::BOLD)
+            && !cell.modifier.contains(Modifier::DIM)
+    }
+
+    #[test]
+    fn the_focused_pane_stands_out_and_the_others_are_dim() {
+        let mut app = with_sessions(vec![tmux_session(
+            "$1",
+            "app-fix",
+            "/code/app.worktrees/fix",
+        )]);
+        // 100×20: Projects at (0, 0), Files at (40, 0), Sessions' top border lower down
+        let lines = screen(&mut app, 100, 20);
+        let sessions = lines
+            .iter()
+            .position(|l| l.starts_with("┌ Sessions"))
+            .unwrap() as u16;
+        let corners = [(0, 0), (0, sessions), (40, 0)];
+        let panes = [Pane::Worktrees, Pane::Sessions, Pane::Files];
+        for (i, focused) in panes.into_iter().enumerate() {
+            assert_eq!(app.focus, focused);
+            let buffer = styles(&mut app, 100, 20);
+            for (j, &(x, y)) in corners.iter().enumerate() {
+                if i == j {
+                    assert!(accent(&buffer, x, y), "{focused:?}: its border");
+                    assert!(accent(&buffer, x + 2, y), "{focused:?}: its title");
+                } else {
+                    assert!(
+                        dim(&buffer, x, y) && !accent(&buffer, x, y),
+                        "{focused:?}: {:?}",
+                        panes[j]
+                    );
+                }
+            }
+            press(&mut app, KeyCode::Tab);
+        }
+    }
+
+    #[test]
+    fn a_dim_pane_dims_its_contents_and_keeps_its_selection() {
+        let mut app = with_sessions(vec![tmux_session(
+            "$1",
+            "app-fix",
+            "/code/app.worktrees/fix",
+        )]);
+        // The selected project row, "▾ app", at (1, 1)
+        let buffer = styles(&mut app, 100, 20);
+        assert!(!dim(&buffer, 3, 1), "the focused pane's contents");
+        press(&mut app, KeyCode::Tab);
+        let buffer = styles(&mut app, 100, 20);
+        assert!(dim(&buffer, 3, 1), "now dim");
+        assert!(
+            buffer[(3, 1)].modifier.contains(Modifier::REVERSED),
+            "still selected"
+        );
+    }
+
+    #[test]
+    fn errors_stay_bright_in_a_dim_pane() {
+        let mut app = with_sessions(vec![]);
+        app.sources
+            .apply(Update::Sessions(Err("tmux: no server".into())));
+        // Projects focused: the sessions' pane, with the error, is dim
+        let lines = screen(&mut app, 60, 20);
+        let y = lines
+            .iter()
+            .position(|l| l.starts_with("└ tmux: no server"))
+            .unwrap() as u16;
+        let buffer = styles(&mut app, 60, 20);
+        assert!(dim(&buffer, 0, y), "the border");
+        let cell = &buffer[(3, y)];
+        assert_eq!(cell.fg, Color::Red);
+        assert!(!cell.modifier.contains(Modifier::DIM), "the error");
     }
 
     fn test_config() -> Config {
