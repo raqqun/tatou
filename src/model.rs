@@ -41,11 +41,7 @@ pub struct WorktreeView {
 pub struct SessionView {
     /// The target for tmux commands.
     pub id: String,
-    // Not read yet: removing a worktree names the session it kills (#24)
-    #[allow(dead_code)]
     pub name: String,
-    // Not read yet: restarting the agent respawns its pane (#22)
-    #[allow(dead_code)]
     pub agent_pane: Option<String>,
 }
 

@@ -93,8 +93,6 @@ fn check_branch_name(repo: &Path, name: &str) -> Result<()> {
 /// Removes the linked worktree `path` of `repo`; git refuses one with changes
 /// unless `force`, and its message comes back as is. The main worktree is never
 /// removed, whatever `force` says.
-// Not called yet: removing a worktree uses it (#24)
-#[allow(dead_code)]
 pub fn remove(repo: &Path, path: &Path, force: bool) -> Result<()> {
     let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if canonical(path) == canonical(&main_worktree(repo)?) {

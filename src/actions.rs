@@ -22,6 +22,19 @@ pub enum Task {
     RestartAgent(RestartAgent),
     /// A shell in a worktree, shown in the dashboard's client.
     Shell(Shell),
+    RemoveWorktree(RemoveWorktree),
+}
+
+/// A linked worktree to remove, and its session to kill once it is gone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoveWorktree {
+    pub name: String,
+    pub project: PathBuf,
+    pub path: PathBuf,
+    /// The session's id.
+    pub session: Option<String>,
+    /// Passes `--force`; only after git refused once and the user confirmed.
+    pub force: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -84,6 +97,13 @@ pub enum Event {
     OnCreateFailed(String),
     /// A session was started or changed: the agent's, or a shell's.
     Started,
+    /// git refused to remove the worktree, saying why; nothing was changed. The
+    /// removal to run, with `force`, if the user confirms.
+    RemoveRefused { remove: RemoveWorktree, why: String },
+    /// The worktree is gone, and its session.
+    Removed { project: PathBuf, name: String },
+    /// A command's whole output, to read: e.g. git refusing even a forced removal.
+    Error { title: String, output: String },
 }
 
 /// Runs `task` on a thread of its own, sending what happens to `events`.
@@ -127,6 +147,7 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
             Ok(()) => Event::Started,
             Err(err) => Event::Failed(format!("{}: {err}", shell.name)),
         }),
+        Task::RemoveWorktree(remove) => send(remove_worktree(remove, server)),
         Task::RestartAgent(restart) => {
             send(Event::Progress(format!(
                 "{}: restarting the agent",
@@ -137,6 +158,39 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
                 Err(err) => Event::Failed(format!("{}: {err}", restart.name)),
             });
         }
+    }
+}
+
+/// `git worktree remove`, then, only once it is gone, the session: a refusal
+/// leaves both as they were.
+fn remove_worktree(remove: RemoveWorktree, server: &Server) -> Event {
+    let name = remove.name.clone();
+    match git::remove(&remove.project, &remove.path, remove.force) {
+        Ok(()) => {}
+        Err(Error::Command { stderr, .. }) if !remove.force => {
+            tracing::info!(name, why = stderr, "removal refused");
+            return Event::RemoveRefused {
+                remove,
+                why: stderr,
+            };
+        }
+        Err(err) => {
+            tracing::warn!(name, %err, "removal failed");
+            let output = message(err);
+            let title = format!("{name} not removed");
+            return Event::Error { title, output };
+        }
+    }
+    tracing::info!(name, path = ?remove.path, force = remove.force, "worktree removed");
+    if let Some(session) = &remove.session
+        && let Err(err) = server.kill_session(session)
+    {
+        tracing::warn!(name, %err, "session not killed");
+        return Event::Failed(format!("{name} removed, but not its session: {err}"));
+    }
+    Event::Removed {
+        project: remove.project,
+        name,
     }
 }
 
@@ -513,5 +567,113 @@ mod tests {
         assert_eq!(sessions[0].agent_pane, None, "a shell is no agent");
         let env = server.run(&["show-environment", "-t", &sessions[0].id, "TATOU"]);
         assert_eq!(env.unwrap().stdout, "TATOU=1\n");
+    }
+
+    /// git in `repo`, without the user's config; its output.
+    fn git_out(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// The linked worktree `fix` of `repo`, with an agent's session in it.
+    fn linked(repo: &Path, server: &Server) -> (PathBuf, String) {
+        let path = git::worktree_path(repo, "fix", None);
+        git::add(repo, "fix", None, &path).unwrap();
+        let session = server
+            .new_session("app-fix", &path, Some("sleep 1000"))
+            .unwrap();
+        (path, session.id)
+    }
+
+    fn remove(repo: &Path, path: &Path, session: &str, force: bool) -> RemoveWorktree {
+        RemoveWorktree {
+            name: "fix".into(),
+            project: repo.to_path_buf(),
+            path: path.to_path_buf(),
+            session: Some(session.into()),
+            force,
+        }
+    }
+
+    #[test]
+    fn removes_the_worktree_then_its_session_and_keeps_the_branch() {
+        let (tmp, repo) = repository();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let (path, session) = linked(&repo, &server);
+        let events = events(
+            Task::RemoveWorktree(remove(&repo, &path, &session, false)),
+            &server,
+        );
+        let removed = Event::Removed {
+            project: repo.clone(),
+            name: "fix".into(),
+        };
+        assert_eq!(events, [removed]);
+        assert!(!path.exists());
+        assert_eq!(server.sessions().unwrap(), []);
+        assert_eq!(git_out(&repo, &["branch", "--list", "fix"]).trim(), "fix");
+    }
+
+    #[test]
+    fn a_dirty_worktree_is_refused_until_forced() {
+        let (tmp, repo) = repository();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let (path, session) = linked(&repo, &server);
+        fs::write(path.join("notes.md"), "draft").unwrap();
+
+        let asked = remove(&repo, &path, &session, false);
+        let refused = events(Task::RemoveWorktree(asked.clone()), &server);
+        let [Event::RemoveRefused { remove: again, why }] = &refused[..] else {
+            panic!("{refused:?}");
+        };
+        assert_eq!(again, &asked, "the same removal, to force");
+        assert!(
+            why.contains("contains modified or untracked files"),
+            "{why}"
+        );
+        assert!(path.join("notes.md").exists(), "nothing changed");
+        assert_eq!(server.sessions().unwrap().len(), 1, "the agent still runs");
+
+        let forced = RemoveWorktree {
+            force: true,
+            ..asked
+        };
+        let events = events(Task::RemoveWorktree(forced), &server);
+        assert!(matches!(events[..], [Event::Removed { .. }]), "{events:?}");
+        assert!(!path.exists());
+        assert_eq!(server.sessions().unwrap(), []);
+        assert_eq!(git_out(&repo, &["branch", "--list", "fix"]).trim(), "fix");
+    }
+
+    #[test]
+    fn a_forced_removal_git_still_refuses_shows_why() {
+        let (tmp, repo) = repository();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let (path, session) = linked(&repo, &server);
+        git_out(&repo, &["worktree", "lock", path.to_str().unwrap()]);
+        let events = events(
+            Task::RemoveWorktree(remove(&repo, &path, &session, true)),
+            &server,
+        );
+        let [Event::Error { title, output }] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(title, "fix not removed");
+        assert!(output.contains("locked"), "{output}");
+        assert!(path.exists());
+        assert_eq!(server.sessions().unwrap().len(), 1);
     }
 }

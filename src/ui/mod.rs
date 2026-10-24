@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-use crate::actions::{self, NewWorktree, RestartAgent, Shell, StartAgent, Task};
+use crate::actions::{self, NewWorktree, RemoveWorktree, RestartAgent, Shell, StartAgent, Task};
 use crate::config::{self, Config, Tmux};
 use crate::error::{Error, Result};
 use crate::git;
@@ -96,6 +96,8 @@ enum Purpose {
     Agent(AgentFor),
     /// The restart to run once confirmed.
     Restart(RestartAgent),
+    /// The removal to run once confirmed, forced or not.
+    Remove(RemoveWorktree),
     /// Only to read, e.g. a command's output.
     Notice,
 }
@@ -236,6 +238,48 @@ impl App {
                     refresh.sessions_now();
                 }
             }
+            // Forcing is a second, explicit question, never an answer by default
+            Event::RemoveRefused { remove, why } => {
+                self.progress = None;
+                let question =
+                    "Force the removal? Uncommitted changes and untracked files in it are lost.";
+                let confirm = Confirm::new(
+                    &format!("git refused to remove {}", remove.name),
+                    question,
+                    false,
+                );
+                let force = RemoveWorktree {
+                    force: true,
+                    ..remove
+                };
+                self.open_over(
+                    Dialog::Confirm(confirm.with_detail(&why)),
+                    Purpose::Remove(force),
+                    &why,
+                );
+            }
+            Event::Removed { project, name } => {
+                self.progress = None;
+                self.message = Some(format!("{name} removed; its branch stays"));
+                if let Some(refresh) = &self.refresh {
+                    refresh.worktrees_now(&project);
+                    refresh.sessions_now();
+                }
+            }
+            Event::Error { title, output } => {
+                self.progress = None;
+                let message = Dialog::Message(Message::new(&title, &output));
+                self.open_over(message, Purpose::Notice, &output);
+            }
+        }
+    }
+
+    /// Opens `dialog`, unless one is open already: then only `text`'s first line
+    /// shows, in the hint bar.
+    fn open_over(&mut self, dialog: Dialog, purpose: Purpose, text: &str) {
+        match self.dialog {
+            None => self.dialog = Some(Open { dialog, purpose }),
+            Some(_) => self.message = text.lines().next().map(String::from),
         }
     }
 
@@ -302,6 +346,7 @@ impl App {
             Action::NewWorktree if worktrees => self.open_new_worktree(),
             Action::StartAgent if worktrees => self.choose_agent(),
             Action::Shell if worktrees => self.open_shell(),
+            Action::RemoveWorktree if worktrees => self.confirm_remove(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
                     Pane::Worktrees => Pane::Files,
@@ -334,8 +379,47 @@ impl App {
             (Purpose::Restart(restart), Dialog::Confirm(_)) => {
                 self.tasks.push(Task::RestartAgent(restart));
             }
+            (Purpose::Remove(remove), Dialog::Confirm(_)) => {
+                self.tasks.push(Task::RemoveWorktree(remove));
+            }
             _ => {}
         }
+    }
+
+    /// `d` on a linked worktree: asks before removing it and closing its session.
+    fn confirm_remove(&mut self) {
+        let (Some(worktree), Some(project)) =
+            (self.tree.selected_worktree(), self.tree.selected_project())
+        else {
+            return;
+        };
+        let name = worktree.label().to_string();
+        if worktree.main {
+            self.message = Some(format!("{name} is the main worktree: it cannot be removed"));
+            return;
+        }
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let path = config::tilde(&worktree.path, home.as_deref());
+        let branch = match &worktree.branch {
+            Some(branch) => format!("branch {branch}"),
+            None => "detached".to_string(),
+        };
+        let after = match &worktree.session {
+            Some(session) => format!("Its session {} is closed; the branch stays.", session.name),
+            None => "The branch stays.".to_string(),
+        };
+        let question = format!("Remove the worktree {path} ({branch})? {after}");
+        let remove = RemoveWorktree {
+            name,
+            project: project.path.clone(),
+            path: worktree.path.clone(),
+            session: worktree.session.as_ref().map(|s| s.id.clone()),
+            force: false,
+        };
+        self.dialog = Some(Open {
+            dialog: Dialog::Confirm(Confirm::new("Remove the worktree", &question, false)),
+            purpose: Purpose::Remove(remove),
+        });
     }
 
     /// A shell in the selected worktree, in its session or a new one.
@@ -516,8 +600,12 @@ impl App {
             return &[];
         }
         match self.tree.selected_worktree() {
-            Some(worktree) if worktree.session.is_some() => &[],
-            Some(_) => &[Action::Jump],
+            Some(worktree) => match (worktree.session.is_some(), worktree.main) {
+                (true, false) => &[],
+                (true, true) => &[Action::RemoveWorktree],
+                (false, false) => &[Action::Jump],
+                (false, true) => &[Action::Jump, Action::RemoveWorktree],
+            },
             None => &WORKTREE_ACTIONS,
         }
     }
@@ -912,8 +1000,8 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(
             hint_line(&mut app),
-            "n new  s start agent  t shell  p PR  d remove  ? help  q quit",
-            "no session"
+            "n new  s start agent  t shell  p PR  ? help  q quit",
+            "no session, and the main worktree: no remove"
         );
         press(&mut app, KeyCode::Char('j'));
         assert!(hint_line(&mut app).starts_with("⏎ jump  n new"), "session");
@@ -1328,6 +1416,117 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Char('k'));
         press(&mut app, KeyCode::Char('t'));
         assert_eq!(app.tasks.len(), 2);
+    }
+
+    #[test]
+    fn d_asks_before_removing_and_no_is_the_default() {
+        let mut app = on_fix_with_a_session();
+        press(&mut app, KeyCode::Char('d'));
+        let lines = screen(&mut app, 100, 14).join("\n");
+        assert!(
+            lines.contains("Remove the worktree /code/app.worktrees/fix (branch fix)? Its session"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("app-fix is closed; the branch stays. [y/N]"),
+            "{lines}"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tasks, [], "Enter is no");
+        assert!(app.dialog.is_none());
+
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        let expected = RemoveWorktree {
+            name: "fix".into(),
+            project: "/code/app".into(),
+            path: "/code/app.worktrees/fix".into(),
+            session: Some("$3".into()),
+            force: false,
+        };
+        assert_eq!(app.tasks, [Task::RemoveWorktree(expected)]);
+    }
+
+    #[test]
+    fn the_main_worktree_is_never_offered_for_removal() {
+        let mut app = with_a_session();
+        app.config = Ok(test_config());
+        press(&mut app, KeyCode::Char('j'));
+        assert!(
+            !hint_line(&mut app).contains("d remove"),
+            "{}",
+            hint_line(&mut app)
+        );
+        press(&mut app, KeyCode::Char('d'));
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            hint_line(&mut app),
+            "main is the main worktree: it cannot be removed"
+        );
+        press(&mut app, KeyCode::Char('j'));
+        assert!(hint_line(&mut app).contains("d remove"), "a linked one");
+    }
+
+    #[test]
+    fn forcing_is_a_second_explicit_question() {
+        let mut app = on_fix_with_a_session();
+        let remove = RemoveWorktree {
+            name: "fix".into(),
+            project: "/code/app".into(),
+            path: "/code/app.worktrees/fix".into(),
+            session: None,
+            force: false,
+        };
+        let why = "fatal: '/code/app.worktrees/fix' contains modified or untracked files, use --force to delete it";
+        let refused = || actions::Event::RemoveRefused {
+            remove: remove.clone(),
+            why: why.into(),
+        };
+        event(&mut app, refused());
+        let lines = screen(&mut app, 120, 14).join("\n");
+        assert!(lines.contains("git refused to remove fix"), "{lines}");
+        assert!(
+            lines.contains("contains modified or untracked files"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("Force the removal? Uncommitted changes and untracked files in it are"),
+            "{lines}"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tasks, [], "never forced by default");
+
+        event(&mut app, refused());
+        press(&mut app, KeyCode::Char('y'));
+        let forced = RemoveWorktree {
+            force: true,
+            ..remove.clone()
+        };
+        assert_eq!(app.tasks, [Task::RemoveWorktree(forced)]);
+    }
+
+    #[test]
+    fn removal_results_show() {
+        let mut app = on_fix_with_a_session();
+        event(
+            &mut app,
+            actions::Event::Removed {
+                project: "/code/app".into(),
+                name: "fix".into(),
+            },
+        );
+        assert_eq!(hint_line(&mut app), "fix removed; its branch stays");
+        let output = "fatal: cannot remove a locked working tree\nuse 'remove -f -f' to override";
+        event(
+            &mut app,
+            actions::Event::Error {
+                title: "fix not removed".into(),
+                output: output.into(),
+            },
+        );
+        let lines = screen(&mut app, 100, 14).join("\n");
+        assert!(lines.contains("┌ fix not removed "), "{lines}");
+        assert!(lines.contains("use 'remove -f -f' to override"), "{lines}");
     }
 
     fn test_config() -> Config {
