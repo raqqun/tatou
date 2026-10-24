@@ -83,8 +83,6 @@ impl Server {
     }
 
     /// Every session on the server, sorted by name; none when the server is not running.
-    // Not called yet beyond `Refresh`, itself unused until (#14)
-    #[allow(dead_code)]
     pub fn sessions(&self) -> Result<Vec<Session>> {
         match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
             Ok(output) => Ok(parse_sessions(&output.stdout)),
@@ -95,8 +93,6 @@ impl Server {
 }
 
 /// A session on tatou's server, from the list of its panes.
-// Not read yet beyond the model, itself unused until (#14)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Session {
     /// `$1`: the target for commands, unlike the name, which can be ambiguous.
@@ -116,8 +112,6 @@ pub struct Session {
 }
 
 /// What an agent reports through `@tatou_status`.
-// Not read yet beyond the model, itself unused until (#14)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentStatus {
     Busy,

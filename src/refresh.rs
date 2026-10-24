@@ -30,15 +30,11 @@ pub enum Update {
 }
 
 /// The running workers; dropping it stops them once their current command returns.
-// Not created yet: the dashboard starts it (#14)
-#[allow(dead_code)]
 pub struct Refresh {
     sessions: Sender<()>,
     projects: HashMap<PathBuf, Sender<()>>,
 }
 
-// Not called yet: the dashboard starts it, and actions wake it (#14, #21)
-#[allow(dead_code)]
 impl Refresh {
     /// Starts listing `server`'s sessions and each project's worktrees, sending
     /// every result to `updates`; the first ones come right away.
@@ -71,12 +67,16 @@ impl Refresh {
     }
 
     /// Lists the sessions again now, e.g. after tatou started one.
+    // Not called yet: starting an agent wakes it (#19)
+    #[allow(dead_code)]
     pub fn sessions_now(&self) {
         // A worker that ended has nothing left to refresh
         let _ = self.sessions.send(());
     }
 
     /// Lists `project`'s worktrees again now, e.g. after tatou added one.
+    // Not called yet: adding a worktree wakes it (#21)
+    #[allow(dead_code)]
     pub fn worktrees_now(&self, project: &Path) {
         if let Some(wake) = self.projects.get(project) {
             let _ = wake.send(());

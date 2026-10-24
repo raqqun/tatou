@@ -91,10 +91,7 @@ fn the_dashboard_only_runs_inside_tatous_server() {
     let output = run(&mut sandbox.tatou(&["--dashboard"]));
     assert_eq!(output.status.code(), Some(1));
     assert!(text(&output.stderr).contains("run `tatou` to start it"));
-
-    let inside = "/tmp/tmux-501/tatou,1234,0";
-    let output = run(sandbox.tatou(&["--dashboard"]).env("TMUX", inside));
-    assert!(text(&output.stderr).contains("--dashboard is not implemented yet"));
+    // Not run inside: the dashboard would open the terminal running the tests
 }
 
 #[test]

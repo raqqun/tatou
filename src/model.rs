@@ -67,8 +67,6 @@ pub enum Status {
 }
 
 /// The latest result from each source, kept until the next one arrives.
-// Not created yet: the dashboard keeps it (#14)
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct Sources {
     sessions: Vec<Session>,
@@ -77,8 +75,6 @@ pub struct Sources {
     worktrees: HashMap<PathBuf, Result<Vec<Worktree>, String>>,
 }
 
-// Not called yet: the dashboard applies updates and draws the view (#14, #15)
-#[allow(dead_code)]
 impl Sources {
     pub fn apply(&mut self, update: Update) {
         match update {
@@ -93,10 +89,14 @@ impl Sources {
         }
     }
 
+    // Not called yet: the left pane draws it (#15)
+    #[allow(dead_code)]
     pub fn view(&self, config: &Config, now: u64) -> Vec<ProjectView> {
         merge(config, &self.worktrees, &self.sessions, now)
     }
 
+    // Not called yet: the left pane shows it (#15)
+    #[allow(dead_code)]
     pub fn sessions_error(&self) -> Option<&str> {
         self.sessions_error.as_deref()
     }
@@ -105,7 +105,7 @@ impl Sources {
 /// Builds the view. `worktrees` holds each project's `git worktree list`, or git's
 /// error, by project path; a project not in it yet shows no worktrees. `now` is in
 /// seconds since the Unix epoch, like `Session::activity`.
-// Not called yet beyond `Sources`, itself unused until (#14)
+// Not called yet beyond `Sources::view`, itself unused until (#15)
 #[allow(dead_code)]
 pub fn merge(
     config: &Config,

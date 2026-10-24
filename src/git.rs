@@ -6,8 +6,6 @@ use crate::error::Result;
 use crate::exec;
 
 /// A worktree as `git worktree list --porcelain` reports it.
-// Not read yet beyond the model, itself unused until (#14)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Worktree {
     /// Absolute, with symlinks resolved by git.
@@ -26,8 +24,6 @@ pub struct Worktree {
 
 /// Lists the worktrees of the repository at `repo`; the first is the main worktree.
 /// Fails with git's own message when `repo` is not a repository, or when git is missing.
-// Not called yet beyond `Refresh`, itself unused until (#14)
-#[allow(dead_code)]
 pub fn worktrees(repo: &Path) -> Result<Vec<Worktree>> {
     let repo = repo.to_string_lossy();
     let output = exec::run(

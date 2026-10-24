@@ -26,6 +26,10 @@ pub enum Error {
         needs: &'static str,
     },
 
+    /// The terminal could not be set up, drawn on or read from.
+    #[error("terminal: {0}")]
+    Terminal(io::Error),
+
     /// The program could not be started, e.g. it is not installed.
     #[error("cannot run {program}: {source}")]
     Spawn { program: String, source: io::Error },
