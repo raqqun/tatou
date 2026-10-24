@@ -82,6 +82,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 - **Right:** file tree of the selected worktree. Git markers from `git status --porcelain`: `M` modified, `A` added, `?` untracked, `D` deleted. Respects `.gitignore` by default (toggle to show ignored/hidden files). Optional filter: changed files only.
 - **Bottom:** key hints for the selected row: on a project, only what applies to a project; on a worktree without a session, no jump. A message (e.g. a failed command) replaces them until the next key. `?` shows the full keymap.
 - `Tab` moves focus between panes. The right pane hides automatically when the terminal is narrow.
+- Dialogs open over the panes and take every key while the dashboard keeps refreshing behind them: a form (Tab/↑↓ between fields, ←→ through a choice, Enter to confirm, Esc to cancel; text fields edit like a shell line, Ctrl-a/e/u/k/w included), a choice list, a `[y/N]` confirmation whose default each dialog picks, and a scrollable message for command output. Their keys are fixed and shown in the hint bar.
 - Mouse support (click to select, scroll) via crossterm.
 
 ## 7. Actions

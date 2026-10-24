@@ -1,5 +1,6 @@
 //! The dashboard: ratatui rendering and input handling only.
 
+mod dialog;
 mod projects;
 mod terminal;
 
@@ -21,6 +22,7 @@ use crate::keys::{Action, Key, Keymap, Pane};
 use crate::model::{Sources, WorktreeView};
 use crate::refresh::{ConfigWatch, Refresh, Update};
 use crate::tmux::{self, Server};
+use dialog::{Dialog, Outcome};
 use projects::Tree;
 
 /// How long to wait for input before applying updates and drawing again.
@@ -99,6 +101,8 @@ struct App {
     tree: Tree,
     keymap: Keymap,
     focus: Pane,
+    /// Takes the keys while open; drawn over the panes.
+    dialog: Option<Dialog>,
     /// Shown in place of the hints until the next key press.
     message: Option<String>,
     /// Asked for since the loop last took them.
@@ -117,6 +121,7 @@ impl App {
             tree: Tree::default(),
             keymap: Keymap::defaults(),
             focus: Pane::Worktrees,
+            dialog: None,
             message: None,
             tasks: Vec::new(),
             quit: false,
@@ -131,6 +136,12 @@ impl App {
             return;
         }
         self.message = None;
+        if let Some(dialog) = &mut self.dialog {
+            if dialog.key(key) != Outcome::Open {
+                self.answered();
+            }
+            return;
+        }
         if let Some(action) = self.keymap.action(Key::from_event(key)) {
             self.handle(action);
         }
@@ -199,6 +210,12 @@ impl App {
         }
     }
 
+    /// The open dialog was answered or cancelled. Each step that opens one acts
+    /// on its answer here, and may keep it open, e.g. to show an error in a form.
+    fn answered(&mut self) {
+        self.dialog = None;
+    }
+
     /// On a worktree, switches to its session; on a project, folds or unfolds it.
     fn jump(&mut self) {
         match self.tree.selected_worktree() {
@@ -235,6 +252,9 @@ impl App {
         self.render_projects(frame, left);
         frame.render_widget(self.pane_block(" Files ", Pane::Files), right);
         frame.render_widget(self.hint_bar(), hints);
+        if let Some(dialog) = &mut self.dialog {
+            dialog.render(frame, main);
+        }
     }
 
     /// The projects, else why there are none; reload and tmux errors at the bottom.
@@ -275,8 +295,16 @@ impl App {
         if let Some(message) = &self.message {
             return Paragraph::new(message.clone());
         }
+        let hints = match &self.dialog {
+            Some(dialog) => dialog
+                .hints()
+                .iter()
+                .map(|&(k, l)| (k.to_string(), l))
+                .collect(),
+            None => self.keymap.hints(self.focus, self.hidden()),
+        };
         let mut spans = Vec::new();
-        for (key, label) in self.keymap.hints(self.focus, self.hidden()) {
+        for (key, label) in hints {
             if !spans.is_empty() {
                 spans.push(Span::raw("  "));
             }
@@ -713,6 +741,45 @@ unknown field `popop`, expected one of `popup`, `back`";
                 path
             ),
             "No such file or directory (os error 2)"
+        );
+    }
+
+    #[test]
+    fn an_open_dialog_takes_the_keys_while_the_rest_keeps_refreshing() {
+        let mut app = showing(vec![project("/code/app", &["fix"])]);
+        let form = dialog::Form::new("New worktree", vec![dialog::Field::text("Name", "")]);
+        app.dialog = Some(Dialog::Form(form));
+        for code in [KeyCode::Char('j'), KeyCode::Char('q'), KeyCode::Tab] {
+            press(&mut app, code);
+        }
+        assert!(!app.quit, "q is typed into the form");
+        assert_eq!(app.focus, Pane::Worktrees);
+        assert_eq!(
+            app.tree.selected().cloned(),
+            Some(projects::Row::Project("/code/app".into()))
+        );
+
+        let lines = screen(&mut app, 80, 10);
+        assert!(lines.iter().any(|l| l.contains("│Name  jq")), "{lines:?}");
+        assert!(
+            lines[9].starts_with("⏎ confirm  Tab next field"),
+            "{lines:?}"
+        );
+        // Behind it, updates still arrive and are shown
+        let (updates, received) = mpsc::channel();
+        let (_failures, failed) = mpsc::channel();
+        updates
+            .send(Update::Sessions(Err("tmux: boom".into())))
+            .unwrap();
+        app.apply_all(&received, &failed);
+        assert_eq!(app.sources.sessions_error(), Some("tmux: boom"));
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.dialog.is_none());
+        press(&mut app, KeyCode::Char('j'));
+        assert_ne!(
+            app.tree.selected().cloned(),
+            Some(projects::Row::Project("/code/app".into()))
         );
     }
 
