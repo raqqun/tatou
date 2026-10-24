@@ -292,6 +292,7 @@ Depends on: 1.9
 - Validate the branch name with `git check-ref-format --branch` before running anything.
 - `remove(repo, path, force: bool)`: `git worktree remove [--force] <path>`; git's stderr is returned verbatim on failure.
 - The main worktree can never be removed.
+- `worktree_path(repo, name, worktree_dir)` gives the default path; a `/` in the name becomes `-` in the folder. A name is valid when `check-ref-format --branch` prints it back unchanged (it expands `@{-1}`), else `Error::InvalidBranch`. `--` comes before the path, so a base starting with `-` is a commit, never an option. Removing the main worktree is `Error::MainWorktree`, compared by canonical path. In unit tests, `exec` runs git with `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`.
 
 **Done when**
 - TempDir tests: add with default and custom dir, invalid name rejected, remove clean, remove dirty fails with git's message, forced remove succeeds.

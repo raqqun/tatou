@@ -124,7 +124,7 @@ git status --porcelain + ignore walk (selected worktree only) ─► file tree
 Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its own so a slow repository delays only itself; the selected worktree's files on selection change; `gh` every ~60 s and on demand. tatou's own actions wake the matching refresh at once. Commands run on background threads and send results to the UI loop over a channel.
 
 ### 8.2 Worktrees
-- Create: `git -C <repo> worktree add -b <branch> <path> <base>`. Path defaults to `<repo>/../<repo>.worktrees/<name>` (configurable).
+- Create: `git -C <repo> worktree add -b <branch> -- <path> <base>`. Path defaults to `<repo>/../<repo>.worktrees/<name>` (configurable with `worktree_dir`); a `/` in the branch name becomes `-` in the folder's, so `feature/login` goes in `feature-login`.
 - Optional per-project `on_create` command, run with `sh -c` in the new worktree.
 - Remove: kill the tmux session, then `git worktree remove <path>`. On refusal (dirty tree), show git's message; force only after explicit confirmation.
 - Worktrees created outside tatou appear automatically.
