@@ -95,7 +95,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 | `s` | Start / restart agent | choose the agent → `tmux new-session`, or confirm → `respawn-pane -k` on the agent's pane (a new window when it has none or it is gone) |
 | `t` | Open shell in worktree | `tmux new-window -t <session> -c <path>`, or a new session with just the shell; then switch to it |
 | `p` | Open PR | `gh pr view --web` |
-| `d` | Remove worktree | kill session, `git worktree remove` (confirm; force only if explicitly confirmed) |
+| `d` | Remove worktree | `git worktree remove`, then kill its session (confirm; force only if explicitly confirmed; never the main worktree; the branch stays) |
 | `a` | Add project | path dialog → write a project file in `projects/` (as `tatou add`) |
 
 ### On a file (right pane)
@@ -127,7 +127,7 @@ Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its
 ### 8.2 Worktrees
 - Create: `git -C <repo> worktree add -b <branch> -- <path> <base>`. Path defaults to `<repo>/../<repo>.worktrees/<name>` (configurable with `worktree_dir`); a `/` in the branch name becomes `-` in the folder's, so `feature/login` goes in `feature-login`.
 - Optional per-project `on_create` command, run with `sh -c` in the new worktree.
-- Remove: kill the tmux session, then `git worktree remove <path>`. On refusal (dirty tree), show git's message; force only after explicit confirmation.
+- Remove: `git worktree remove <path>`, then, once it is gone, kill the tmux session, so a refusal leaves the agent running. On refusal (dirty tree), show git's message; force only after a second, explicit confirmation. The branch is kept.
 - Worktrees created outside tatou appear automatically.
 
 ### 8.3 Sessions

@@ -176,8 +176,6 @@ impl Server {
     }
 
     /// Kills `session` (an id) and everything running in it.
-    // Not called yet: removing a worktree uses it (#24)
-    #[allow(dead_code)]
     pub fn kill_session(&self, session: &str) -> Result<()> {
         self.run(&["kill-session", "-t", session])?;
         Ok(())

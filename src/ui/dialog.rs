@@ -388,6 +388,8 @@ impl Choice {
 /// A question answered with `y` or `n`; Enter takes the default.
 pub struct Confirm {
     title: String,
+    /// Shown above the question as printed, e.g. why git refused.
+    detail: Option<String>,
     question: String,
     default: bool,
 }
@@ -396,9 +398,16 @@ impl Confirm {
     pub fn new(title: &str, question: &str, default: bool) -> Confirm {
         Confirm {
             title: title.to_string(),
+            detail: None,
             question: question.to_string(),
             default,
         }
+    }
+
+    /// With `detail` above the question, keeping its lines.
+    pub fn with_detail(mut self, detail: &str) -> Confirm {
+        self.detail = Some(detail.trim_end().to_string());
+        self
     }
 
     fn key(&mut self, key: KeyEvent) -> Outcome {
@@ -417,7 +426,13 @@ impl Confirm {
     fn render(&self, frame: &mut Frame, area: Rect) {
         let choices = if self.default { "[Y/n]" } else { "[y/N]" };
         let text = format!("{} {choices}", self.question);
-        let lines = wrap_words(&text, dialog_width(area) as usize - 2);
+        let width = dialog_width(area) as usize - 2;
+        let mut lines = Vec::new();
+        if let Some(detail) = &self.detail {
+            lines.extend(wrap(detail, width));
+            lines.push(String::new());
+        }
+        lines.extend(wrap_words(&text, width));
         let inner = open(frame, area, &self.title, lines.len() as u16);
         let lines: Vec<Line> = lines.into_iter().map(Line::raw).collect();
         frame.render_widget(Paragraph::new(lines), inner);

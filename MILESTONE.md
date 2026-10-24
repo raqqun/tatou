@@ -361,6 +361,7 @@ Depends on: 2.1, 2.2, 2.3
 - Confirm dialog naming the worktree path and branch. Then kill the session, then `git worktree remove`.
 - If git refuses, show its message and offer a second, explicit "force remove" confirmation. Never force silently. The branch is never deleted.
 - Not available on the main worktree.
+- Decided: `git worktree remove` first, and the session is killed only once it succeeded, so a refusal leaves the agent running (the reverse of the order above). Both confirmations are `[y/N]`; the second shows git's message as printed, then `Force the removal? …`. A forced removal git still refuses (a locked worktree) opens its message. `d` is hidden on the main worktree.
 
 **Done when**
 - Manual check with a dirty worktree documented in the PR.
