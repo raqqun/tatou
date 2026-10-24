@@ -174,13 +174,33 @@ mod tests {
         thread::spawn(move || poll(Duration::from_secs(3600), &woken, &updates, counter()));
         assert_eq!(count(received.recv().unwrap()), "1");
         let start = Instant::now();
-        // Three wake-ups sent together make one refresh, not three
+        wake.send(()).unwrap();
+        assert_eq!(count(received.recv().unwrap()), "2");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn wake_ups_waiting_together_make_one_refresh() {
+        let (updates, received) = mpsc::channel();
+        let (wake, woken) = mpsc::channel();
+        // Each fetch waits for the test, so the wake-ups queue up while one runs
+        let (gate, gated) = mpsc::channel::<()>();
+        let mut counter = counter();
+        let fetch = move || {
+            let _ = gated.recv();
+            counter()
+        };
+        thread::spawn(move || poll(Duration::from_secs(3600), &woken, &updates, fetch));
         for _ in 0..3 {
             wake.send(()).unwrap();
         }
+        gate.send(()).unwrap();
+        assert_eq!(count(received.recv().unwrap()), "1");
+        gate.send(()).unwrap();
         assert_eq!(count(received.recv().unwrap()), "2");
-        assert!(start.elapsed() < Duration::from_secs(5));
-        let more = received.recv_timeout(Duration::from_millis(100));
+        // Nothing left waiting: no third refresh, even with the gate open
+        gate.send(()).unwrap();
+        let more = received.recv_timeout(Duration::from_millis(200));
         assert!(more.is_err(), "{more:?}");
     }
 
