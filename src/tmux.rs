@@ -400,7 +400,7 @@ fn undo_commands(conf: &str) -> Vec<Vec<String>> {
 #[cfg(test)]
 pub mod testing {
     use std::ops::Deref;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::Server;
@@ -437,10 +437,24 @@ pub mod testing {
     }
 
     impl Drop for TestServer {
+        /// Kills the server and removes its socket, which tmux leaves behind, also
+        /// when the server exited by itself with its last session.
         fn drop(&mut self) {
             // Fails when the server already exited, which is fine
             let _ = self.0.run(&["kill-server"]);
+            if let Some(socket) = socket_file(&self.0.socket) {
+                let _ = std::fs::remove_file(socket);
+            }
         }
+    }
+
+    /// Where tmux puts the socket named `name`: `$TMUX_TMPDIR`, or `/tmp`, then
+    /// `tmux-<uid>/<name>`.
+    fn socket_file(name: &str) -> Option<PathBuf> {
+        let uid = exec::run("id", &["-u"], None).ok()?.stdout;
+        let dir = std::env::var_os("TMUX_TMPDIR").filter(|dir| !dir.is_empty());
+        let dir = dir.map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        Some(dir.join(format!("tmux-{}", uid.trim())).join(name))
     }
 }
 
