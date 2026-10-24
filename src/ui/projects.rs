@@ -41,10 +41,27 @@ impl Tree {
         self.view.is_empty()
     }
 
-    // Not read yet beyond the tests: jumping to a session uses it (#16)
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn selected(&self) -> Option<&Row> {
         self.selected.as_ref()
+    }
+
+    /// The selected worktree; `None` on a project row.
+    pub fn selected_worktree(&self) -> Option<&WorktreeView> {
+        let Some(Row::Worktree { project, path }) = &self.selected else {
+            return None;
+        };
+        let project = self.view.iter().find(|p| &p.path == project)?;
+        project.worktrees.iter().find(|w| &w.path == path)
+    }
+
+    /// Folds or unfolds the selected project.
+    pub fn toggle(&mut self) {
+        if let Some(Row::Project(path)) = &self.selected
+            && !self.collapsed.remove(path)
+        {
+            self.collapsed.insert(path.clone());
+        }
     }
 
     pub fn up(&mut self) {
@@ -153,14 +170,13 @@ fn project_item(project: &ProjectView, collapsed: bool) -> ListItem<'static> {
     ListItem::new(lines)
 }
 
-/// The status icon, then the branch, or the directory's name when detached.
+/// The status icon, then the worktree's label.
 fn worktree_item(worktree: &WorktreeView) -> ListItem<'static> {
     let (icon, style) = status_icon(worktree.status);
-    let label = worktree.branch.as_ref().unwrap_or(&worktree.name);
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(icon, style),
-        Span::raw(format!(" {label}")),
+        Span::raw(format!(" {}", worktree.label())),
     ];
     if worktree.main {
         spans.push(Span::styled("  repo", Style::new().fg(Color::Cyan)));

@@ -255,11 +255,14 @@ impl Keymap {
             .map(|(_, action)| *action)
     }
 
-    /// The hint bar for `pane`: its actions, then help and quit, each with its first key.
-    pub fn hints(&self, pane: Pane) -> Vec<(String, &'static str)> {
+    /// The hint bar for `pane`: its actions, then help and quit, each with its first
+    /// key; `hidden` are the ones that do not apply to the selection.
+    pub fn hints(&self, pane: Pane, hidden: &[Action]) -> Vec<(String, &'static str)> {
         let mut hints: Vec<(String, &'static str)> = Vec::new();
         let mut shown: Vec<Action> = Vec::new();
-        let wanted = |action: Action| action.pane() == pane || action.pane() == Pane::Any;
+        let wanted = |action: Action| {
+            (action.pane() == pane || action.pane() == Pane::Any) && !hidden.contains(&action)
+        };
         for (key, action) in &self.bindings {
             if wanted(*action) && !action.is_navigation() && !shown.contains(action) {
                 shown.push(*action);
@@ -358,7 +361,7 @@ mod tests {
     #[test]
     fn hints_show_the_focused_pane_then_help_and_quit() {
         let keymap = Keymap::defaults();
-        let worktrees: Vec<_> = keymap.hints(Pane::Worktrees);
+        let worktrees: Vec<_> = keymap.hints(Pane::Worktrees, &[]);
         let labels: Vec<_> = worktrees.iter().map(|(k, a)| format!("{k} {a}")).collect();
         assert_eq!(
             labels,
@@ -374,11 +377,17 @@ mod tests {
             ]
         );
         let files: Vec<_> = keymap
-            .hints(Pane::Files)
+            .hints(Pane::Files, &[])
             .into_iter()
             .map(|(k, _)| k)
             .collect();
         assert_eq!(files, ["e", "v", "D", "@", "y", "o", "?", "q"]);
+        let without_jump: Vec<_> = keymap
+            .hints(Pane::Worktrees, &[Action::Jump, Action::Help])
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(without_jump, ["n", "s", "t", "p", "d", "q"]);
     }
 
     #[test]
