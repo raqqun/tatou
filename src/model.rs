@@ -22,6 +22,8 @@ pub struct ProjectView {
     pub error: Option<String>,
     /// The main worktree first, as git lists it.
     pub worktrees: Vec<WorktreeView>,
+    /// The remote's default branch, `origin/main`, when it has one.
+    pub remote_default: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -72,6 +74,7 @@ pub struct Sources {
     /// Why tmux could not be read; the last sessions read are kept meanwhile.
     sessions_error: Option<String>,
     worktrees: HashMap<PathBuf, Result<Vec<Worktree>, String>>,
+    remote_defaults: HashMap<PathBuf, Option<String>>,
 }
 
 impl Sources {
@@ -82,7 +85,12 @@ impl Sources {
                 self.sessions_error = None;
             }
             Update::Sessions(Err(err)) => self.sessions_error = Some(err),
-            Update::Worktrees { project, result } => {
+            Update::Worktrees {
+                project,
+                result,
+                remote_default,
+            } => {
+                self.remote_defaults.insert(project.clone(), remote_default);
                 self.worktrees.insert(project, result);
             }
             // The UI applies it: it owns the config
@@ -91,7 +99,11 @@ impl Sources {
     }
 
     pub fn view(&self, config: &Config, now: u64) -> Vec<ProjectView> {
-        merge(config, &self.worktrees, &self.sessions, now)
+        let mut view = merge(config, &self.worktrees, &self.sessions, now);
+        for project in &mut view {
+            project.remote_default = self.remote_defaults.get(&project.path).cloned().flatten();
+        }
+        view
     }
 
     pub fn sessions_error(&self) -> Option<&str> {
@@ -116,6 +128,7 @@ pub fn merge(
             name: file_name(&project.path),
             error: project.error.clone(),
             worktrees: Vec::new(),
+            remote_default: None,
         };
         match worktrees.get(&project.path) {
             _ if project.error.is_some() => {}
@@ -275,6 +288,7 @@ mod tests {
             path: "/code/app".into(),
             name: "app".into(),
             error: None,
+            remote_default: None,
             worktrees: vec![
                 WorktreeView {
                     path: "/code/app".into(),
@@ -427,8 +441,17 @@ mod tests {
         sources.apply(Update::Worktrees {
             project: "/code/app".into(),
             result: Ok(vec![worktree("/code/app", Some("main"))]),
+            remote_default: None,
         });
         sources.apply(Update::Sessions(Ok(vec![session("$1", "s", "/code/app")])));
+        assert_eq!(sources.view(&config, NOW)[0].remote_default, None);
+        sources.apply(Update::Worktrees {
+            project: "/code/app".into(),
+            result: Ok(vec![worktree("/code/app", Some("main"))]),
+            remote_default: Some("origin/main".into()),
+        });
+        let view = sources.view(&config, NOW);
+        assert_eq!(view[0].remote_default.as_deref(), Some("origin/main"));
         let status = |sources: &Sources| sources.view(&config, NOW)[0].worktrees[0].status;
         assert_eq!(status(&sources), Status::Active);
 
@@ -443,6 +466,7 @@ mod tests {
         sources.apply(Update::Worktrees {
             project: "/code/app".into(),
             result: Err("fatal: gone".into()),
+            remote_default: None,
         });
         let view = sources.view(&config, NOW);
         assert_eq!(view[0].error.as_deref(), Some("fatal: gone"));

@@ -211,7 +211,7 @@ base = "main"
 - Unknown keys are errors, reported with the line. `[keys]` action names are checked against the keymap.
 - `[agents]` is merged with the built-in `claude` and `codex`: new names add an agent, a built-in name replaces its command. `default_agent` must name one of them. There is no built-in shell agent: shells are `t`'s job, and `s` and `n` start agents; an agent of your own may still be a shell.
 - `path` and `worktree_dir` accept `~/`; any other path must be absolute. A project whose file does not parse, or whose `path` is missing, invalid or another file's, is shown with its error, and the other projects still load.
-- `base` is optional: without it, new worktrees start from the branch checked out in the project's main worktree.
+- `base` is optional. The new-worktree form's Base follows the selected row: on a worktree, that worktree's branch; on the project (or a detached worktree), `base`, else the remote's default branch as `origin/main` (what `origin/HEAD` points to; tatou never fetches), else the branch checked out in the main worktree.
 
 ## 10. Implementation notes
 
