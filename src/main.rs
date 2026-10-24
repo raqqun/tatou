@@ -9,6 +9,7 @@ mod launcher;
 mod logging;
 mod model;
 mod platform;
+mod refresh;
 mod tmux;
 mod ui;
 

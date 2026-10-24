@@ -119,7 +119,7 @@ gh pr list --state all --json number,headRefName,state,isDraft,statusCheckRollup
                                              ─► PR badge per branch
 git status --porcelain + ignore walk (selected worktree only) ─► file tree
 ```
-Refresh: tmux every ~1s, git on selection change and every few seconds, `gh` every ~60s and on demand. Commands run on background threads and send results to the UI loop over a channel.
+Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its own so a slow repository delays only itself; the selected worktree's files on selection change; `gh` every ~60 s and on demand. tatou's own actions wake the matching refresh at once. Commands run on background threads and send results to the UI loop over a channel.
 
 ### 8.2 Worktrees
 - Create: `git -C <repo> worktree add -b <branch> <path> <base>`. Path defaults to `<repo>/../<repo>.worktrees/<name>` (configurable).
@@ -215,7 +215,7 @@ base = "main"
 - Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
 - Plain `std::thread` + `mpsc` channels for background commands; no async runtime.
 - Commands' stdout and stderr are read as UTF-8, lossily: file names that are not valid UTF-8 are not supported. Commands have no timeout; they run on background threads with stdin closed and git/gh prompts disabled, so a stuck command only stalls its own refresh.
-- Modules: `error`, `logging`, `config`, `exec`, `launcher`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `keys`, `ui`.
+- Modules: `error`, `logging`, `config`, `exec`, `launcher`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `refresh`, `keys`, `ui`.
 - Parsers for git/tmux/gh output are pure and tested against captured fixtures.
 - Runtime requirements: `git`, `tmux` (3.2+ for `display-popup` and `set-buffer -w`). Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`).
 - Versioning: every build is an alpha until a stable v1. The `VERSION` file holds the version as its git tag (`v0.1.0-alpha.N`), mirrored in `Cargo.toml`; each task's pull request bumps `N`. Merging into `main` makes CI tag that version and publish it as a GitHub pre-release with GoReleaser (Rust builder). Tags are never created by hand.
