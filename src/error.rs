@@ -34,6 +34,10 @@ pub enum Error {
     #[error("cannot run {program}: {source}")]
     Spawn { program: String, source: io::Error },
 
+    /// `git worktree list` succeeded but listed nothing, which git never does.
+    #[error("{}: git lists no worktree", path.display())]
+    NoWorktree { path: PathBuf },
+
     /// The command ran and failed; `stderr` is its own message, shown to the user as is.
     #[error("`{command}` failed ({status}): {stderr}")]
     Command {

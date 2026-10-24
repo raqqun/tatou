@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::exec;
 
 /// A worktree as `git worktree list --porcelain` reports it.
@@ -32,6 +32,17 @@ pub fn worktrees(repo: &Path) -> Result<Vec<Worktree>> {
         None,
     )?;
     Ok(parse_worktrees(&output.stdout))
+}
+
+/// The main worktree of the repository `dir` is in, whether `dir` is its root, a
+/// folder inside it or a linked worktree: git lists the main worktree first.
+pub fn main_worktree(dir: &Path) -> Result<PathBuf> {
+    match worktrees(dir)?.into_iter().next() {
+        Some(main) => Ok(main.path),
+        None => Err(Error::NoWorktree {
+            path: dir.to_path_buf(),
+        }),
+    }
 }
 
 /// Parses `git worktree list --porcelain`: one block of lines per worktree, each
@@ -216,6 +227,20 @@ mod tests {
         ];
         assert_eq!(summary, expected);
         assert_eq!(worktrees[0].head, worktrees[1].head);
+    }
+
+    #[test]
+    fn the_main_worktree_from_anywhere_in_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let repo = dir.join("app");
+        fs::create_dir_all(repo.join("src/ui")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&repo, &["worktree", "add", "-q", "-b", "fix", "../fix"]);
+        for inside in [repo.clone(), repo.join("src/ui"), dir.join("fix")] {
+            assert_eq!(main_worktree(&inside).unwrap(), repo, "{inside:?}");
+        }
     }
 
     #[test]

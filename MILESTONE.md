@@ -252,6 +252,7 @@ Depends on: 1.5, 1.9, 1.10
 - Already a project (same canonical path): says so and changes nothing.
 - Appends a `[[project]]` block with `path` (written with `~/` when under `$HOME`) to the end of `config.toml`, written atomically; the rest of the file, comments included, is left as it was. The appended file must still load (checked before replacing).
 - Prints what was added and the config path.
+- `git::main_worktree` and `config::add_project` are what 1.19 and 6.5 reuse. Already a project exits 0. Outside a repository: `tatou: cannot add <path>: <git's message>`. A symlinked `config.toml` (dotfiles) is written through to its target, keeping the link and the file's permissions; `write_atomic` moved from `tmux.rs` to `config.rs`, so `tmux.conf` gets the same.
 
 **Done when**
 - TempDir tests: add from the repository root, from a subfolder and from a linked worktree (all add the main worktree); already present; not a repository; the result loads and keeps the original text byte for byte.
