@@ -35,12 +35,7 @@ fn launch() -> Result<ExitCode> {
     let server = Server::tatou(&conf);
     server.reload(previous.as_deref())?;
 
-    // By absolute path, so the session works whatever its $PATH
-    let exe = match env::current_exe() {
-        Ok(exe) => exe.to_string_lossy().into_owned(),
-        Err(_) => "tatou".to_string(),
-    };
-    let dashboard = format!("{} --dashboard", exec::shell_quote(&exe));
+    let dashboard = tmux::dashboard_command();
 
     let nesting = tmux::nesting();
     if nesting == Nesting::Other && !confirm_nesting() {

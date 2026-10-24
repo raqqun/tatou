@@ -460,6 +460,21 @@ Depends on: 2.13
 - `TestBackend` tests: the tree with its windows and the current window's `*`; folding and unfolding; `h` from a window to its session; Enter on a window queues selecting it and the switch; the selection kept by id.
 - Manual check documented in the PR: Enter on a window lands on that window.
 
+### 2.16 Back to the dashboard when a window's program exits (#99)
+
+Depends on: 2.4, 2.5, 2.6
+
+- When the agent or shell of a window tatou opened exits, the client that was looking at that window goes back to the dashboard (tmux would show another window, or detach the client from its session's last one).
+- Decided: the commands tatou starts are wrapped, in `new_session`, `new_window` and `respawn_agent`: `<command>`, a newline (so a `# comment` at its end comments out nothing more), then a POSIX `sh` snippet run while the pane still exists, switching to `=tatou` only the clients whose current window is this pane's (`list-clients -f "#{==:#{window_id},$w}"`). A program ending in a window nobody looks at moves nobody; without a dashboard session the switch fails quietly. A shell runs as `"${SHELL:-/bin/sh}" -l`, a login shell as tmux would start it. An agent command starting with `exec` never comes back to run it. Windows opened by hand stay plain tmux.
+- The program column (2.13) still names `claude` / `zsh`: the wrapping shell leads the foreground group, and its command is what `ps` names.
+- Safety net: the generated `tmux.conf` sets `detach-on-destroy off`.
+- Found in review, and fixed here: with the safety net, `q` (which ends the dashboard's session) left the client in another session, and the back key's `switch-client -t '=tatou'` then failed. Now `q` leaves tatou: the dashboard detaches the clients looking at it (`detach-client -s =tatou`) once the terminal is restored, then ends. And the back key starts the dashboard again when it is gone: `if-shell -F '#{S:…}'` looks for a session named exactly `tatou`, `{ switch-client }` or `{ new-session -d … ; switch-client }`, braces keeping the dashboard command's quoting (`new-session -A` would attach only a terminal's client). `tmux::dashboard_command` is shared with the launcher.
+
+**Done when**
+- Unit tests: the wrapped command for an agent and for a shell; the generated conf has `detach-on-destroy off`.
+- Integration tests on a unique socket, with a control-mode client: a wrapped command exiting in the viewed window moves that client to `tatou`; one exiting in another window leaves it where it is.
+- Manual check documented in the PR: `exit` in a shell from `t`, and an agent ending, land on the dashboard.
+
 ---
 
 ## M3 — Status
