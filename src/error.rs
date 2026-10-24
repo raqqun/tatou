@@ -46,6 +46,10 @@ pub enum Error {
     #[error("{}: git lists no worktree", path.display())]
     NoWorktree { path: PathBuf },
 
+    /// tmux succeeded but printed something tatou cannot read.
+    #[error("unexpected output from tmux: `{output}`")]
+    TmuxOutput { output: String },
+
     /// The command ran and failed; `stderr` is its own message, shown to the user as is.
     #[error("`{command}` failed ({status}): {stderr}")]
     Command {

@@ -304,6 +304,7 @@ Depends on: 1.8
 - `new_session(name, path, command)`: `new-session -d -s <name> -c <path> -e TATOU=1 -P -F '#{session_id} #{pane_id}' <command>`, then set `@tatou_path` and `@tatou_agent_pane` with `-t <session_id>` (`set-option -t =<name>` fails: it takes a pane target).
 - Session names: `<repo>-<name>`, with characters tmux rejects (`.`, `:`) replaced; append `-2`, `-3`… if taken. Names are cosmetic; matching stays by path.
 - `respawn_agent(pane, command)`: `respawn-pane -k -t <pane>`; `new_window(session, path, command)`; `kill_session(id)`.
+- tmux 3.8 accepts `.` and `:` in names but reads them in targets as window and pane separators, so `session_name` replaces them with `-`, like `/` in worktree folders (2.1); a taken name is found from tmux's `duplicate session` error. `new_session` returns `NewSession { id, name, pane }`; if tagging fails, the session still matches by its start directory. `new_window` takes an optional command (none: the default shell) and returns its pane. Tests run on servers whose default shell is `/bin/sh`, and `TestServer` removes its socket file, which tmux leaves behind.
 
 **Done when**
 - Integration tests on a unique socket: create (options set, `TATOU=1` in the session environment), respawn, new window, kill; name collision handling.
