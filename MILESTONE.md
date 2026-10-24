@@ -187,6 +187,7 @@ Depends on: 1.12
 - Worker threads (`std::thread` + `mpsc`) send results to the UI loop: tmux sessions every ~1 s, git worktrees every few seconds and on demand.
 - One message enum; each result carries its project so a slow or failing project does not block others.
 - The UI loop never waits on a command; errors become visible status text and log lines.
+- In `refresh.rs`: one long-lived thread for tmux (every 1 s) and one per project (every 5 s), each woken at once on request (`recv_timeout`). Errors are logged when they appear, change or clear, not on every refresh. `model::Sources` keeps the latest result of each and builds the view; on a tmux error the last sessions read are kept.
 
 **Done when**
 - Unit test with a fake source feeding the channel; no `unwrap` on send/recv (a closed channel ends the worker quietly).

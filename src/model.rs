@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::git::Worktree;
+use crate::refresh::Update;
 use crate::tmux::{self, AgentStatus, Session};
 
 /// How long after its last output an agent without hooks still counts as active, in seconds.
@@ -65,10 +66,46 @@ pub enum Status {
     NoSession,
 }
 
+/// The latest result from each source, kept until the next one arrives.
+// Not created yet: the dashboard keeps it (#14)
+#[allow(dead_code)]
+#[derive(Debug, Default)]
+pub struct Sources {
+    sessions: Vec<Session>,
+    /// Why tmux could not be read; the last sessions read are kept meanwhile.
+    sessions_error: Option<String>,
+    worktrees: HashMap<PathBuf, Result<Vec<Worktree>, String>>,
+}
+
+// Not called yet: the dashboard applies updates and draws the view (#14, #15)
+#[allow(dead_code)]
+impl Sources {
+    pub fn apply(&mut self, update: Update) {
+        match update {
+            Update::Sessions(Ok(sessions)) => {
+                self.sessions = sessions;
+                self.sessions_error = None;
+            }
+            Update::Sessions(Err(err)) => self.sessions_error = Some(err),
+            Update::Worktrees { project, result } => {
+                self.worktrees.insert(project, result);
+            }
+        }
+    }
+
+    pub fn view(&self, config: &Config, now: u64) -> Vec<ProjectView> {
+        merge(config, &self.worktrees, &self.sessions, now)
+    }
+
+    pub fn sessions_error(&self) -> Option<&str> {
+        self.sessions_error.as_deref()
+    }
+}
+
 /// Builds the view. `worktrees` holds each project's `git worktree list`, or git's
 /// error, by project path; a project not in it yet shows no worktrees. `now` is in
 /// seconds since the Unix epoch, like `Session::activity`.
-// Not called yet: the background refresh builds the view (#13)
+// Not called yet beyond `Sources`, itself unused until (#14)
 #[allow(dead_code)]
 pub fn merge(
     config: &Config,
@@ -380,5 +417,38 @@ mod tests {
             .map(|w| (w.name.as_str(), w.main))
             .collect();
         assert_eq!(names, [("main", false)]);
+    }
+
+    #[test]
+    fn sources_keep_the_latest_result_of_each() {
+        let mut sources = Sources::default();
+        let config = config(&["/code/app"]);
+        assert!(
+            sources.view(&config, NOW)[0].worktrees.is_empty(),
+            "nothing yet"
+        );
+
+        sources.apply(Update::Worktrees {
+            project: "/code/app".into(),
+            result: Ok(vec![worktree("/code/app", Some("main"))]),
+        });
+        sources.apply(Update::Sessions(Ok(vec![session("$1", "s", "/code/app")])));
+        let status = |sources: &Sources| sources.view(&config, NOW)[0].worktrees[0].status;
+        assert_eq!(status(&sources), Status::Active);
+
+        // A tmux error is reported, and the sessions read before are kept
+        sources.apply(Update::Sessions(Err("tmux: boom".into())));
+        assert_eq!(sources.sessions_error(), Some("tmux: boom"));
+        assert_eq!(status(&sources), Status::Active);
+        sources.apply(Update::Sessions(Ok(vec![])));
+        assert_eq!(sources.sessions_error(), None);
+        assert_eq!(status(&sources), Status::NoSession);
+
+        sources.apply(Update::Worktrees {
+            project: "/code/app".into(),
+            result: Err("fatal: gone".into()),
+        });
+        let view = sources.view(&config, NOW);
+        assert_eq!(view[0].error.as_deref(), Some("fatal: gone"));
     }
 }
