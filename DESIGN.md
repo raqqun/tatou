@@ -58,6 +58,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 - **Launcher:** `tatou` — typed in any terminal. Regenerates tatou's tmux config, then attaches to the tatou server, creating the `tatou` dashboard session if needed (`tmux -L tatou -f <conf> new-session -A -s tatou "tatou --dashboard"`). Running `tatou` again from another terminal just re-attaches; from inside tatou's server, it switches to the dashboard, starting it again if its session was closed. An invalid `config.toml` stops the launch with the error. When the server is already running, the regenerated config is applied with `source-file`, after unbinding the keys the previous one bound.
 - **Dashboard:** `tatou --dashboard` — the full-screen UI, living in the `tatou` session. Selecting a worktree switches the client to that worktree's session; the "back" key (default `Alt-d`) returns to the dashboard.
 - **Popup:** `tatou --popup` — the same UI in a floating tmux popup over whatever you're doing, opened with the popup key (default `Alt-g`). Jumping to a session or launching an action closes the popup. The binding is part of tatou's generated tmux config; nothing to add by hand.
+- **Add a project:** `tatou add [path]` — adds the repository at `path` (default: the current folder) to `config.toml`. Launching `tatou` inside a repository that is not a project offers to add it, and `a` in the dashboard does the same from a path dialog.
 - **Status line:** `tatou status` — prints a short summary (e.g. `⚠2 ●3`); tatou's tmux config shows it in the status bar.
 
 **Nesting:** if `tatou` is started from inside the user's own tmux, attaching would nest two tmux servers. tatou warns and offers to attach anyway (with `TMUX` unset) or to quit; the recommended setup is a dedicated terminal tab/window for tatou.
@@ -77,7 +78,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Left:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session. PR badge: number + checks `✓ ✗ ●`.
+- **Left:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session; without hooks (§8.4), a dim `●` for recent output and a dim `○` otherwise. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
 - **Right:** file tree of the selected worktree. Git markers from `git status --porcelain`: `M` modified, `A` added, `?` untracked, `D` deleted. Respects `.gitignore` by default (toggle to show ignored/hidden files). Optional filter: changed files only.
 - **Bottom:** context-sensitive key hints; `?` shows the full keymap.
 - `Tab` moves focus between panes. The right pane hides automatically when the terminal is narrow.
@@ -94,6 +95,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 | `t` | Open shell in worktree | `tmux new-window -t <session> -c <path>` |
 | `p` | Open PR | `gh pr view --web` |
 | `d` | Remove worktree | kill session, `git worktree remove` (confirm; force only if explicitly confirmed) |
+| `a` | Add project | path dialog → append a `[[project]]` to `config.toml` (as `tatou add`) |
 
 ### On a file (right pane)
 | Default key | Action | Implemented as |
@@ -165,7 +167,7 @@ On a transition to `input` for a worktree that isn't the current tmux session: a
 
 ## 9. Configuration
 
-`$XDG_CONFIG_HOME/tatou/config.toml`, defaulting to `~/.config/tatou/config.toml` on every platform, macOS included. tatou writes only this file and the generated `tmux.conf` next to it (§8.3):
+`$XDG_CONFIG_HOME/tatou/config.toml`, defaulting to `~/.config/tatou/config.toml` on every platform, macOS included. tatou writes only this file and the generated `tmux.conf` next to it (§8.3). It writes `config.toml` in two cases only: the commented template when the file is missing, and a `[[project]]` block appended at the end when you add a project; everything else in the file is yours and left as written. A running dashboard reloads the file when it changes. A full example:
 
 ```toml
 default_agent = "claude"

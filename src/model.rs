@@ -13,8 +13,6 @@ use crate::tmux::{self, AgentStatus, Session};
 const ACTIVE_FOR: u64 = 10;
 
 /// A project from the config, with its worktrees.
-// Not read yet: the UI lists projects (#15)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct ProjectView {
     pub path: PathBuf,
@@ -26,8 +24,6 @@ pub struct ProjectView {
     pub worktrees: Vec<WorktreeView>,
 }
 
-// Not read yet: the UI lists worktrees (#15)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct WorktreeView {
     pub path: PathBuf,
@@ -52,8 +48,6 @@ pub struct SessionView {
 }
 
 /// A worktree's agent: reported by its hooks, else guessed from its window's activity.
-// Not read yet: the UI shows it (#15)
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Busy,
@@ -89,14 +83,10 @@ impl Sources {
         }
     }
 
-    // Not called yet: the left pane draws it (#15)
-    #[allow(dead_code)]
     pub fn view(&self, config: &Config, now: u64) -> Vec<ProjectView> {
         merge(config, &self.worktrees, &self.sessions, now)
     }
 
-    // Not called yet: the left pane shows it (#15)
-    #[allow(dead_code)]
     pub fn sessions_error(&self) -> Option<&str> {
         self.sessions_error.as_deref()
     }
@@ -105,8 +95,6 @@ impl Sources {
 /// Builds the view. `worktrees` holds each project's `git worktree list`, or git's
 /// error, by project path; a project not in it yet shows no worktrees. `now` is in
 /// seconds since the Unix epoch, like `Session::activity`.
-// Not called yet beyond `Sources::view`, itself unused until (#15)
-#[allow(dead_code)]
 pub fn merge(
     config: &Config,
     worktrees: &HashMap<PathBuf, Result<Vec<Worktree>, String>>,

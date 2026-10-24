@@ -214,6 +214,7 @@ Depends on: 1.14
 - Collapsible projects (`▾` / `▸`), worktrees with status icons (`●` busy, `⚠` input, `○` idle, `·` no session), branch or name, main worktree marked.
 - Navigation: `j`/`k`/arrows, `h`/`l` or Left/Right to collapse/expand, selection kept across refreshes (by path).
 - Empty state with the config path; per-project errors shown inline.
+- Project rows are selectable, tree-style: `h` on a worktree moves to its project, then folds it; `l` unfolds it, then moves to its first worktree. Folding lasts while the dashboard runs. The main worktree is tagged `repo`; without hooks, `active` and `quiet` show as a dim `●` and `○`. A project's error shows under its name, a tmux error at the bottom of the pane.
 
 **Done when**
 - `TestBackend` tests: two projects, collapsed project, each status icon, empty state.
@@ -229,11 +230,46 @@ Depends on: 1.15
 **Done when**
 - Manual check documented in the PR: jump to a session started by hand with `tmux -L tatou new-session -c <worktree>`, back with `Alt-d`.
 
-### 1.17 Minimal README for dogfooding (#17)
+### 1.17 Reload `config.toml` in the running dashboard (#67)
 
-Depends on: 1.16
+Depends on: 1.13, 1.15
 
-- What tatou is (one paragraph), requirements, `cargo install --path .`, a minimal `config.toml`, how to run, how to get back to the dashboard.
+- The dashboard checks `config.toml`'s modification time every few seconds and reloads it when it changed, so a project added by `tatou add` (1.18), at launch (1.19) or by hand appears without a restart.
+- `Refresh` starts listing new projects and stops removed ones; the selection is kept by path.
+- An invalid edit shows its error in the dashboard and keeps the last valid config, rather than emptying the screen.
+- `[tmux]` changes need `tatou` to be run again (the launcher regenerates `tmux.conf`); the dashboard says so instead of reloading the tmux server itself.
+
+**Done when**
+- Unit tests: a changed file is reloaded once, an unchanged one is not, an invalid one keeps the previous config and reports the error; new and removed projects start and stop their refresh.
+
+### 1.18 `tatou add [path]` (#68)
+
+Depends on: 1.5, 1.9, 1.10
+
+- `tatou add` (the current folder) or `tatou add <path>`: resolves the repository's main worktree (the first entry of `git worktree list`, so running it inside a linked worktree adds the main repository), and fails with git's message if the path is not in a repository.
+- Already a project (same canonical path): says so and changes nothing.
+- Appends a `[[project]]` block with `path` (written with `~/` when under `$HOME`) to the end of `config.toml`, written atomically; the rest of the file, comments included, is left as it was. The appended file must still load (checked before replacing).
+- Prints what was added and the config path.
+
+**Done when**
+- TempDir tests: add from the repository root, from a subfolder and from a linked worktree (all add the main worktree); already present; not a repository; the result loads and keeps the original text byte for byte.
+
+### 1.19 Offer to add the current repository at launch (#69)
+
+Depends on: 1.11, 1.18
+
+- `tatou` started inside a git repository that is not a project asks `Add ~/code/my-app to tatou? [Y/n]` before attaching, and adds it with 1.18's code on yes.
+- Only when stdin is a terminal; the launcher's nesting question (1.11) comes first.
+- **Decision to confirm:** how to stop asking for a repository the user declined, given tatou keeps no state file (for example a `config.toml` setting to turn the offer off, or listing declined paths in the config).
+
+**Done when**
+- Unit tests for the decision (inside a project, inside a new repository, outside any repository, no terminal); manual check documented in the PR.
+
+### 1.20 Minimal README for dogfooding (#17)
+
+Depends on: 1.16, 1.19
+
+- What tatou is (one paragraph), requirements, `cargo install --path .`, adding projects (`tatou add`, the launch offer, or `config.toml`), how to run, how to get back to the dashboard.
 
 **Done when**
 - Following the README on a clean machine gets to a working dashboard.
@@ -552,6 +588,16 @@ Depends on: 6.1
 
 **Done when**
 - `TestBackend` test: an overridden key shows up in the hint bar and the overlay.
+
+### 6.5 Add a project from the dashboard (`a`) (#70)
+
+Depends on: 2.3, 6.1, 1.17, 1.18
+
+- `a` opens a path dialog, prefilled with the folder tatou was launched from; on confirm, the same check and append as `tatou add`. The reload from 1.17 shows the new project.
+- Errors (not a repository, already a project) show in the dialog.
+
+**Done when**
+- `TestBackend` test of the dialog; unit test that confirming appends the project.
 
 ---
 
