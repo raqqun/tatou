@@ -428,10 +428,10 @@ Depends on: 2.9
 
 - Each row of the Sessions pane shows what runs in the session's current window, as tmux names its foreground program: `● app-fix  claude  app/fix`, `● notes  vim  ~/notes`.
 - Read with the sessions, in the same `list-panes -a` call: its format gains `#{window_active}`, `#{pane_active}` and `#{pane_current_command}`. Every window has an active pane; the session's is the one active in its current window. No new tmux command, no tag; it follows window switches within a refresh.
-- tmux names the process, not the agent: an agent run as a script may show as `node` or `python` (Claude Code shows as `claude`).
+- tmux names the process, and an agent may rename its: Claude Code's shows as its version (`2.1.310`). So in the agent's pane (`@tatou_agent_pane`), the row shows the program of the command tmux started it with (`#{pane_start_command}`, the format's last field: `claude` from `"claude --verbose"`, skipping `NAME=value` and `exec`, without quotes or folder); other panes, and an agent pane without a start command, show tmux's name.
 
 **Done when**
-- Parser tests on the captured `list-panes` fixture, extended with the three fields: the current window's active pane's program is the session's.
+- Parser tests on the captured `list-panes` fixture, extended with the four fields: the current window's active pane's program is the session's.
 - `TestBackend` test: the program shows between the name and the place.
 
 ---

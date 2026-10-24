@@ -24,7 +24,7 @@ const MIN_VERSION: (u32, u32) = (3, 2);
 /// The fields `sessions` reads for each pane, tab-separated; empty when an option is
 /// not set. Panes rather than sessions, because only a window's activity follows the
 /// output of its panes: `session_activity` changes on keyboard input alone.
-const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}";
+const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_start_command}";
 
 /// A tmux server: every command sent to it is `tmux -u -L <socket> -f <conf> …`.
 /// `-u` makes tmux print UTF-8 whatever the locale; without it, tabs and non-ASCII
@@ -208,8 +208,9 @@ pub struct Session {
     /// When the agent's window last printed, in seconds since the Unix epoch; for a
     /// session without an agent pane, its most recent window.
     pub activity: u64,
-    /// What runs in its current window's active pane, as tmux names the process:
-    /// `claude`, `zsh`, `vim`.
+    /// What runs in its current window's active pane: the program tmux names
+    /// (`zsh`, `vim`), or in the agent's pane, the agent's program from the command
+    /// it was started with (`claude`), as an agent may rename its process.
     pub command: Option<String>,
 }
 
@@ -276,7 +277,15 @@ fn parse_sessions(text: &str) -> Vec<Session> {
             None => panes.iter().map(|pane| pane.activity).max().unwrap_or(0),
         };
         let current = panes.iter().find(|pane| pane.current);
-        session.command = current.and_then(|pane| pane.command.clone());
+        session.command = current.and_then(|pane| {
+            // Claude Code, for one, names its process after its version
+            let agent = session.agent_pane.as_ref() == Some(&pane.id);
+            let started = pane.start_command.as_deref().and_then(program);
+            match (agent, started) {
+                (true, Some(program)) => Some(program),
+                _ => pane.command.clone(),
+            }
+        });
         result.push(session);
     }
     result
@@ -290,11 +299,14 @@ struct Pane {
     /// The active pane of the session's current window.
     current: bool,
     command: Option<String>,
+    /// What tmux started it with, as `#{pane_start_command}` prints it.
+    start_command: Option<String>,
 }
 
 /// One line: the pane's session (its activity and command not set yet) and the pane.
 fn parse_pane(line: &str) -> Option<(Session, Pane)> {
-    let fields: Vec<&str> = line.split('\t').collect();
+    // The start command comes last: a tab in it stays in it
+    let fields: Vec<&str> = line.splitn(12, '\t').collect();
     let [
         id,
         name,
@@ -307,6 +319,7 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         window_active,
         pane_active,
         command,
+        start_command,
     ] = fields[..]
     else {
         return None;
@@ -328,8 +341,56 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         // Each window has an active pane: the current one is the current window's
         current: window_active == "1" && pane_active == "1",
         command: set(command),
+        start_command: set(start_command),
     };
     Some((session, pane))
+}
+
+/// The program a pane's start command runs, without its folder: `claude` from
+/// `"claude --verbose"` or `"FOO=1 exec '/opt/my tools/claude'"`. tmux prints a
+/// command given as one string in double quotes, and one given as several
+/// arguments without them; the shell in it is read only this far: words, quotes,
+/// and leading `NAME=value` and `exec`.
+fn program(start_command: &str) -> Option<String> {
+    let command = match start_command
+        .strip_prefix('"')
+        .and_then(|c| c.strip_suffix('"'))
+    {
+        Some(quoted) => quoted.replace("\\\"", "\""),
+        None => start_command.to_string(),
+    };
+    let mut rest = command.as_str();
+    loop {
+        let (word, after) = shell_word(rest)?;
+        rest = after;
+        if word == "exec" || word.contains('=') {
+            continue;
+        }
+        let name = Path::new(&word).file_name()?.to_string_lossy().into_owned();
+        return (!name.is_empty()).then_some(name);
+    }
+}
+
+/// The first word of `text`, its quotes taken off, and what follows it.
+fn shell_word(text: &str) -> Option<(String, &str)> {
+    let text = text.trim_start();
+    let mut word = String::new();
+    let mut chars = text.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            ' ' | '\t' => return Some((word, &text[at..])),
+            '\'' | '"' => {
+                for (_, inner) in chars.by_ref() {
+                    if inner == c {
+                        break;
+                    }
+                    word.push(inner);
+                }
+            }
+            c => word.push(c),
+        }
+    }
+    (!word.is_empty()).then_some((word, ""))
 }
 
 /// Any value other than the three statuses counts as not set.
@@ -833,7 +894,8 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
                 ..created("$2", "api-docs", docs, "%2", 1792793302, "claude")
             },
             // Its agent's window, not the shell window opened later, and what runs
-            // in the active pane of its current window: vim in a split of the shell's
+            // in the active pane of its current window: vim in a split of the shell's.
+            // api-docs' agent, current, renamed its process `2.1.310`: its command says claude
             created("$1", "my-app-fix login", login, "%1", 1792793302, "vim"),
             // No agent pane: its most recent window
             plain(
@@ -851,10 +913,39 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     #[test]
     fn a_closed_agent_pane_falls_back_to_the_most_recent_window() {
         let text = "\
-$1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh
-$1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh
+$1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh\t
+$1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t
 ";
         assert_eq!(parse_sessions(text)[0].activity, 200);
+    }
+
+    #[test]
+    fn an_agent_pane_without_a_start_command_shows_its_process() {
+        // An agent pane tagged by hand: tmux started a shell there
+        let text = "$1\tapp\t/a\t\t%1\t/a\t%1\t100\t1\t1\t2.1.310\t\n";
+        assert_eq!(parse_sessions(text)[0].command.as_deref(), Some("2.1.310"));
+        // A tab in the start command stays in it
+        let text = "$1\tapp\t/a\t\t%1\t/a\t%1\t100\t1\t1\t2.1.310\t\"claude\targ\"\n";
+        assert_eq!(parse_sessions(text)[0].command.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn the_program_of_a_start_command() {
+        let cases = [
+            ("\"claude\"", Some("claude")),
+            ("\"claude --verbose\"", Some("claude")),
+            ("\"FOO=1 exec /usr/local/bin/codex\"", Some("codex")),
+            ("\"'/opt/my tools/claude' --verbose\"", Some("claude")),
+            ("\"\\\"/usr/bin/aider\\\" --yes\"", Some("aider")),
+            // Given as separate arguments: no quotes around it
+            ("sleep 4000", Some("sleep")),
+            ("\"uvx aider-chat\"", Some("uvx")),
+            ("\"\"", None),
+            ("", None),
+        ];
+        for (start, expected) in cases {
+            assert_eq!(program(start).as_deref(), expected, "{start}");
+        }
     }
 
     #[test]
@@ -865,9 +956,9 @@ $1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh
     #[test]
     fn lines_in_another_shape_are_skipped() {
         let text = "\
-$0\ttatou\t\t\t\t/home/me\t%0\t1792788783\t1\t1\ttatou
-$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh
-$2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh
+$0\ttatou\t\t\t\t/home/me\t%0\t1792788783\t1\t1\ttatou\t
+$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh\t
+$2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh\t
 $3\tshort\t/home/me
 ";
         let names: Vec<_> = parse_sessions(text).into_iter().map(|s| s.name).collect();
