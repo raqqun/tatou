@@ -434,6 +434,17 @@ Depends on: 2.9
 - Parser tests on the captured `list-panes` fixture, extended with the four fields: the current window's active pane's program is the session's.
 - `TestBackend` test: the program shows between the name and the place.
 
+### 2.14 Show which pane has the focus (#95)
+
+Depends on: 2.9
+
+- `Tab` moves the focus between Projects, Sessions and Files; a bold border alone was hard to see.
+- Unfocused panes are drawn dim (the block's base style, which their borders, titles and contents inherit); the focused pane keeps full brightness, with its border and title in cyan and bold, as the `repo` tag.
+- The selection highlight stays visible in a dim pane. Error titles on borders (config reload, tmux) stay bright red. Dialogs are unchanged.
+
+**Done when**
+- `TestBackend` tests on the buffer's styles: the focused pane's border and title in the color, the others dim, for each of the three panes after `Tab`; contents dim with their pane, the selection kept; errors bright.
+
 ---
 
 ## M3 — Status
