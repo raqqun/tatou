@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-use crate::actions::{self, NewWorktree, Task};
+use crate::actions::{self, NewWorktree, RestartAgent, StartAgent, Task};
 use crate::config::{self, Config, Tmux};
 use crate::error::{Error, Result};
 use crate::git;
@@ -23,7 +23,7 @@ use crate::keys::{Action, Key, Keymap, Pane};
 use crate::model::{Sources, WorktreeView};
 use crate::refresh::{ConfigWatch, Refresh, Update};
 use crate::tmux::{self, Server};
-use dialog::{Dialog, Field, Form, Message, Outcome};
+use dialog::{Choice, Confirm, Dialog, Field, Form, Message, Outcome};
 use projects::Tree;
 
 /// How long to wait for input before applying updates and drawing again.
@@ -92,8 +92,23 @@ enum Purpose {
     NewWorktree {
         project: PathBuf,
     },
+    /// The agent to start in a worktree, or to restart in its session.
+    Agent(AgentFor),
+    /// The restart to run once confirmed.
+    Restart(RestartAgent),
     /// Only to read, e.g. a command's output.
     Notice,
+}
+
+/// The worktree `s` was pressed on.
+struct AgentFor {
+    path: PathBuf,
+    /// Its label, for the dialogs and progress.
+    name: String,
+    /// The session name to give a new session.
+    session_name: String,
+    /// Its session's id and agent pane, when it has a session.
+    session: Option<(String, Option<String>)>,
 }
 
 struct App {
@@ -285,6 +300,7 @@ impl App {
             Action::Expand if worktrees => self.tree.expand(),
             Action::Jump if worktrees => self.jump(),
             Action::NewWorktree if worktrees => self.open_new_worktree(),
+            Action::StartAgent if worktrees => self.choose_agent(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
                     Pane::Worktrees => Pane::Files,
@@ -302,11 +318,78 @@ impl App {
         let Some(open) = self.dialog.take() else {
             return;
         };
-        if let (Purpose::NewWorktree { project }, Dialog::Form(form), Outcome::Submit) =
-            (open.purpose, open.dialog, outcome)
-        {
-            self.create_worktree(project, form);
+        if outcome != Outcome::Submit {
+            return;
         }
+        match (open.purpose, open.dialog) {
+            (Purpose::NewWorktree { project }, Dialog::Form(form)) => {
+                self.create_worktree(project, form);
+            }
+            (Purpose::Agent(target), Dialog::Choice(choice)) => {
+                if let Some(agent) = choice.selected() {
+                    self.agent_chosen(target, agent);
+                }
+            }
+            (Purpose::Restart(restart), Dialog::Confirm(_)) => {
+                self.tasks.push(Task::RestartAgent(restart));
+            }
+            _ => {}
+        }
+    }
+
+    /// `s` on a worktree: which agent, `default_agent` chosen first.
+    fn choose_agent(&mut self) {
+        let (Some(worktree), Some(project), Ok(config)) = (
+            self.tree.selected_worktree(),
+            self.tree.selected_project(),
+            &self.config,
+        ) else {
+            return;
+        };
+        let name = worktree.label().to_string();
+        let target = AgentFor {
+            path: worktree.path.clone(),
+            session_name: tmux::session_name(&project.name, &name),
+            session: (worktree.session.as_ref()).map(|s| (s.id.clone(), s.agent_pane.clone())),
+            name,
+        };
+        let agents = config.agents.keys().cloned().collect();
+        let title = format!("Agent for {}", target.name);
+        let choice = Choice::new(&title, agents, &config.default_agent);
+        self.dialog = Some(Open {
+            dialog: Dialog::Choice(choice),
+            purpose: Purpose::Agent(target),
+        });
+    }
+
+    /// Starts `agent` for a worktree without a session; with one, asks first,
+    /// as restarting ends the agent running there.
+    fn agent_chosen(&mut self, target: AgentFor, agent: &str) {
+        let Some(command) = self.config.as_ref().ok().and_then(|c| c.agents.get(agent)) else {
+            return;
+        };
+        let command = command.clone();
+        let Some((session, pane)) = target.session else {
+            self.tasks.push(Task::StartAgent(StartAgent {
+                name: target.name,
+                path: target.path,
+                session: target.session_name,
+                command,
+            }));
+            return;
+        };
+        let question = format!("Restart {agent} in {}?", target.name);
+        let restart = RestartAgent {
+            name: target.name,
+            path: target.path,
+            session,
+            pane,
+            command,
+        };
+        self.dialog = Some(Open {
+            dialog: Dialog::Confirm(Confirm::new("Restart the agent", &question, true)),
+            purpose: Purpose::Restart(restart),
+        });
     }
 
     /// The form for a new worktree in the selected row's project: name, base
@@ -1128,6 +1211,79 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Char('n'));
         assert!(app.dialog.is_none());
         assert_eq!(hint_line(&mut app), "app: fatal: not a git repository");
+    }
+
+    /// `with_a_session`, the `fix` worktree selected.
+    fn on_fix_with_a_session() -> App {
+        let mut app = with_a_session();
+        app.config = Ok(test_config());
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        app
+    }
+
+    #[test]
+    fn s_asks_which_agent_then_starts_it_without_a_session() {
+        let mut app = with_a_session();
+        app.config = Ok(test_config());
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('s'));
+        let lines = screen(&mut app, 80, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("┌ Agent for main ")),
+            "{lines:?}"
+        );
+        // default_agent is chosen first: Enter keeps it
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        let expected = StartAgent {
+            name: "main".into(),
+            path: "/code/app".into(),
+            session: "app-main".into(),
+            command: "codex".into(),
+        };
+        assert_eq!(app.tasks, [Task::StartAgent(expected)]);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn s_on_a_session_confirms_before_restarting() {
+        let mut app = on_fix_with_a_session();
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Enter);
+        let lines = screen(&mut app, 80, 12);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Restart claude in fix? [Y/n]")),
+            "{lines:?}"
+        );
+        assert_eq!(app.tasks, [], "not before it is confirmed");
+        press(&mut app, KeyCode::Enter);
+        let expected = RestartAgent {
+            name: "fix".into(),
+            path: "/code/app.worktrees/fix".into(),
+            session: "$3".into(),
+            pane: None,
+            command: "claude".into(),
+        };
+        assert_eq!(app.tasks, [Task::RestartAgent(expected)]);
+
+        // No, or Esc: nothing restarts
+        let mut app = on_fix_with_a_session();
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.tasks, []);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn s_does_nothing_on_a_project() {
+        let mut app = with_a_session();
+        app.config = Ok(test_config());
+        press(&mut app, KeyCode::Char('s'));
+        assert!(app.dialog.is_none());
     }
 
     fn test_config() -> Config {

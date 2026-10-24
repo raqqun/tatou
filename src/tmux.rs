@@ -135,10 +135,14 @@ impl Server {
         })
     }
 
+    /// Tags `pane` as `session`'s agent pane, for the agent's hooks and restarts.
+    pub fn set_agent_pane(&self, session: &str, pane: &str) -> Result<()> {
+        self.run(&["set-option", "-t", session, "@tatou_agent_pane", pane])?;
+        Ok(())
+    }
+
     /// Restarts `pane` (`%4`) with `command`, killing what runs in it; the pane
     /// keeps its id and folder.
-    // Not called yet: restarting an agent uses it (#22)
-    #[allow(dead_code)]
     pub fn respawn_agent(&self, pane: &str, command: &str) -> Result<()> {
         self.run(&["respawn-pane", "-k", "-t", pane, command])?;
         Ok(())
@@ -146,8 +150,6 @@ impl Server {
 
     /// Opens a window in `session` (an id) in `path`, running `command`, or the
     /// default shell; it becomes the session's current window. Returns its pane.
-    // Not called yet: opening a shell uses it (#23)
-    #[allow(dead_code)]
     pub fn new_window(&self, session: &str, path: &Path, command: Option<&str>) -> Result<String> {
         let dir = path.to_string_lossy();
         let mut args = vec![

@@ -339,6 +339,7 @@ Depends on: 2.2, 2.3
 
 - No session: create one as in 2.4 with the default agent.
 - Session exists: confirm, then `respawn-pane -k` on `@tatou_agent_pane`; if that pane no longer exists, open a new window with the agent and update `@tatou_agent_pane`.
+- `s` asks for the agent every time, in a choice list with `default_agent` selected (no memory of the last one). The restart confirmation is `Restart <agent> in <worktree>? [Y/n]`, Enter meaning yes. A session started by hand, without `@tatou_agent_pane`, gets the agent in a new window too, so nothing the user started is killed; tmux's `can't find pane` tells a pane that is gone.
 
 **Done when**
 - Integration test for the pane-gone fallback on a unique socket.

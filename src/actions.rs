@@ -16,6 +16,30 @@ pub enum Task {
     /// Shows the session with this id in the dashboard's client.
     Switch(String),
     NewWorktree(NewWorktree),
+    /// An agent in a new session, for a worktree that has none.
+    StartAgent(StartAgent),
+    /// The agent of a session, started again.
+    RestartAgent(RestartAgent),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct StartAgent {
+    /// The worktree's label, for progress.
+    pub name: String,
+    pub path: PathBuf,
+    pub session: String,
+    pub command: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct RestartAgent {
+    pub name: String,
+    pub path: PathBuf,
+    /// The session's id.
+    pub session: String,
+    /// `@tatou_agent_pane`, unless the session was started by hand.
+    pub pane: Option<String>,
+    pub command: String,
 }
 
 /// A worktree to create, with its project's `on_create` and an agent to start in it.
@@ -76,7 +100,45 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
             }
         }
         Task::NewWorktree(new) => new_worktree(&new, server, &send),
+        Task::StartAgent(start) => {
+            send(Event::Progress(format!(
+                "{}: starting the agent",
+                start.name
+            )));
+            let started = server.new_session(&start.session, &start.path, &start.command);
+            send(match started {
+                Ok(_) => Event::Started,
+                Err(err) => Event::Failed(format!("{}: {err}", start.name)),
+            });
+        }
+        Task::RestartAgent(restart) => {
+            send(Event::Progress(format!(
+                "{}: restarting the agent",
+                restart.name
+            )));
+            send(match restart_agent(&restart, server) {
+                Ok(()) => Event::Started,
+                Err(err) => Event::Failed(format!("{}: {err}", restart.name)),
+            });
+        }
     }
+}
+
+/// Respawns the agent's pane; without one, or when it is gone, starts the agent
+/// in a new window of the session and makes that the agent's pane, so that
+/// nothing the user started is killed.
+fn restart_agent(restart: &RestartAgent, server: &Server) -> crate::error::Result<()> {
+    if let Some(pane) = &restart.pane {
+        match server.respawn_agent(pane, &restart.command) {
+            Ok(()) => return Ok(()),
+            Err(Error::Command { stderr, .. }) if stderr.starts_with("can't find pane") => {
+                tracing::info!(pane, "agent pane gone: starting the agent in a new window");
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    let pane = server.new_window(&restart.session, &restart.path, Some(&restart.command))?;
+    server.set_agent_pane(&restart.session, &pane)
 }
 
 /// `git worktree add`, then `on_create` in the new worktree, then the agent's
@@ -254,5 +316,118 @@ mod tests {
         assert_eq!(events.last(), Some(&Event::Started));
         assert!(path.exists());
         assert_eq!(server.sessions().unwrap().len(), 1);
+    }
+
+    /// `format` for `target`, from tmux.
+    fn show(server: &Server, target: &str, format: &str) -> String {
+        let output = server.run(&["display-message", "-p", "-t", target, format]);
+        output.unwrap().stdout.trim_end().to_string()
+    }
+
+    fn restart(path: &Path, session: &str, pane: Option<&str>) -> Task {
+        Task::RestartAgent(RestartAgent {
+            name: "fix".into(),
+            path: path.to_path_buf(),
+            session: session.into(),
+            pane: pane.map(String::from),
+            command: "sleep 2000".into(),
+        })
+    }
+
+    #[test]
+    fn starts_an_agent_in_a_new_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let start = Task::StartAgent(StartAgent {
+            name: "fix".into(),
+            path: tmp.path().to_path_buf(),
+            session: "app-fix".into(),
+            command: "sleep 1000".into(),
+        });
+        let events = events(start, &server);
+        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
+        let sessions = server.sessions().unwrap();
+        assert_eq!(sessions[0].name, "app-fix");
+        assert!(sessions[0].agent_pane.is_some());
+    }
+
+    #[test]
+    fn restarts_the_agent_in_its_pane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let session = server
+            .new_session("app-fix", tmp.path(), "sleep 1000")
+            .unwrap();
+        let events = events(
+            restart(tmp.path(), &session.id, Some(&session.pane)),
+            &server,
+        );
+        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
+        assert_eq!(
+            show(&server, &session.pane, "#{pane_start_command}"),
+            "\"sleep 2000\""
+        );
+        assert_eq!(show(&server, &session.id, "#{session_windows}"), "1");
+    }
+
+    #[test]
+    fn a_gone_agent_pane_gets_a_new_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let session = server
+            .new_session("app-fix", tmp.path(), "sleep 1000")
+            .unwrap();
+        // A shell keeps the session alive once the agent's pane is closed
+        server.new_window(&session.id, tmp.path(), None).unwrap();
+        server.run(&["kill-pane", "-t", &session.pane]).unwrap();
+
+        let events = events(
+            restart(tmp.path(), &session.id, Some(&session.pane)),
+            &server,
+        );
+        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
+        let agent = server.sessions().unwrap()[0].agent_pane.clone().unwrap();
+        assert_ne!(agent, session.pane, "the new window's pane");
+        assert_eq!(
+            show(&server, &agent, "#{pane_start_command}"),
+            "\"sleep 2000\""
+        );
+        assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
+    }
+
+    #[test]
+    fn a_session_started_by_hand_keeps_its_panes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let dir = tmp.path().to_str().unwrap();
+        let args = [
+            "new-session",
+            "-d",
+            "-c",
+            dir,
+            "-P",
+            "-F",
+            "#{session_id} #{pane_id}",
+        ];
+        let output = server.run(&args).unwrap().stdout;
+        let (id, shell) = output.trim_end().split_once(' ').unwrap();
+
+        let events = events(restart(tmp.path(), id, None), &server);
+        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
+        assert_eq!(
+            show(&server, id, "#{session_windows}"),
+            "2",
+            "the shell is still there"
+        );
+        let agent = server.sessions().unwrap()[0].agent_pane.clone().unwrap();
+        assert_ne!(agent, shell);
     }
 }

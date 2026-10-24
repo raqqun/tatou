@@ -25,10 +25,7 @@ pub enum Outcome {
 
 pub enum Dialog {
     Form(Form),
-    // Not used yet: start agent and remove ask with them (#22, #24)
-    #[allow(dead_code)]
     Choice(Choice),
-    #[allow(dead_code)]
     Confirm(Confirm),
     Message(Message),
 }
@@ -345,21 +342,20 @@ pub struct Choice {
 }
 
 impl Choice {
-    // Not used yet: start agent and remove ask with them (#22, #24)
-    #[allow(dead_code)]
-    pub fn new(title: &str, options: Vec<String>) -> Choice {
+    /// `options` with the one equal to `selected` chosen, else the first.
+    pub fn new(title: &str, options: Vec<String>, selected: &str) -> Choice {
+        let selected = options.iter().position(|o| o == selected).unwrap_or(0);
         Choice {
             title: title.to_string(),
             options,
-            list: ListState::default().with_selected(Some(0)),
+            list: ListState::default().with_selected(Some(selected)),
         }
     }
 
     /// The option chosen; `None` when there are none.
-    // Not used yet: start agent and remove ask with them (#22, #24)
-    #[allow(dead_code)]
-    pub fn selected(&self) -> Option<usize> {
-        self.list.selected().filter(|&i| i < self.options.len())
+    pub fn selected(&self) -> Option<&str> {
+        let index = self.list.selected()?;
+        self.options.get(index).map(String::as_str)
     }
 
     fn key(&mut self, key: KeyEvent) -> Outcome {
@@ -397,8 +393,6 @@ pub struct Confirm {
 }
 
 impl Confirm {
-    // Not used yet: start agent and remove ask with them (#22, #24)
-    #[allow(dead_code)]
     pub fn new(title: &str, question: &str, default: bool) -> Confirm {
         Confirm {
             title: title.to_string(),
@@ -766,10 +760,10 @@ mod tests {
     #[test]
     fn a_choice_list_moves_and_chooses() {
         let options = vec!["claude".to_string(), "codex".to_string()];
-        let mut choice = Choice::new("Agent", options);
+        let mut choice = Choice::new("Agent", options, "claude");
         assert_eq!(choice.key(key(KeyCode::Char('j'))), Outcome::Open);
         assert_eq!(choice.key(key(KeyCode::Down)), Outcome::Open);
-        assert_eq!(choice.selected(), Some(1), "stops at the last");
+        assert_eq!(choice.selected(), Some("codex"), "stops at the last");
         let mut dialog = Dialog::Choice(choice);
         assert_eq!(
             screen(&mut dialog, 30, 8),
@@ -781,7 +775,9 @@ mod tests {
             ]
         );
         assert_eq!(dialog.key(key(KeyCode::Enter)), Outcome::Submit);
-        assert!(Choice::new("None", vec![]).selected().is_none());
+        assert!(Choice::new("None", vec![], "x").selected().is_none());
+        let preselected = Choice::new("Agent", vec!["a".into(), "b".into()], "b");
+        assert_eq!(preselected.selected(), Some("b"));
     }
 
     #[test]
