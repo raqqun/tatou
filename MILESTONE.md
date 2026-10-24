@@ -445,6 +445,21 @@ Depends on: 2.9
 **Done when**
 - `TestBackend` tests on the buffer's styles: the focused pane's border and title in the color, the others dim, for each of the three panes after `Tab`; contents dim with their pane, the selection kept; errors bright.
 
+### 2.15 Sessions pane as a tree of sessions and their windows (#97)
+
+Depends on: 2.13
+
+- The Sessions pane becomes a tree, like Projects: every session (as in 2.9), and under each, its windows: index, the program in the foreground of its active pane (as in 2.13), `*` on the session's current window.
+- Sessions start unfolded; `j`/`k` move over sessions and windows; `h`/`l` fold and unfold, `h` on a window moves to its session, `l` on an unfolded session moves to its first window. Folding lasts while the dashboard runs.
+- `Enter` on a session jumps to it; on a window, `select-window -t <window id>`, then the jump to its session (`Task::Window`).
+- The selection follows its session or window by id across refreshes; the pane's height counts the visible rows, up to a third of the column as before.
+- `list-panes -a`'s format gains `#{window_id}` and `#{window_index}`; each window is named by its active pane.
+
+**Done when**
+- Parser tests: windows per session, in index order, each with its active pane's program.
+- `TestBackend` tests: the tree with its windows and the current window's `*`; folding and unfolding; `h` from a window to its session; Enter on a window queues selecting it and the switch; the selection kept by id.
+- Manual check documented in the PR: Enter on a window lands on that window.
+
 ---
 
 ## M3 — Status
