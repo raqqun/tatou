@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "tatou"
-version = "0.1.0-alpha.32"
+version = "0.1.0-alpha.33"
 dependencies = [
  "crossterm",
  "ratatui",
