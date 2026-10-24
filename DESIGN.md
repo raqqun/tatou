@@ -56,7 +56,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its own generated tmux config** (§8.3). Same binary, same UI:
 
 - **Launcher:** `tatou` — typed in any terminal. Regenerates tatou's tmux config, then attaches to the tatou server, creating the `tatou` dashboard session if needed (`tmux -L tatou -f <conf> new-session -A -s tatou "tatou --dashboard"`). Running `tatou` again from another terminal just re-attaches; from inside tatou's server, it switches to the dashboard, starting it again if its session was closed. An invalid `config.toml` stops the launch with the error. When the server is already running, the regenerated config is applied with `source-file`, after unbinding the keys the previous one bound.
-- **Dashboard:** `tatou --dashboard` — the full-screen UI, living in the `tatou` session. Selecting a worktree switches the client to that worktree's session; the "back" key (default `Alt-d`) returns to the dashboard.
+- **Dashboard:** `tatou --dashboard` — the full-screen UI, living in the `tatou` session. Selecting a worktree switches the client to that worktree's session; the "back" key (default `Alt-d`) returns to the dashboard, starting it again if its session is gone. `q` leaves tatou: the clients looking at the dashboard detach, back to the terminal they came from, every agent and shell keeps running, and `tatou` attaches again; the dashboard ends with its session.
 - **Popup:** `tatou --popup` — the same UI in a floating tmux popup over whatever you're doing, opened with the popup key (default `Alt-g`). Jumping to a session or launching an action closes the popup. The binding is part of tatou's generated tmux config; nothing to add by hand.
 - **Add a project:** `tatou add [path]` — adds the repository at `path` (default: the current folder) as a file in `projects/` (§9). Launching `tatou` inside a repository that is not a project offers to add it (`Add ~/code/my-app to tatou? [Y/n]`, asked again next time after a no), and `a` in the dashboard does the same from a path dialog.
 - **Status line:** `tatou status` — prints a short summary (e.g. `⚠2 ●3`); tatou's tmux config shows it in the status bar.
@@ -143,7 +143,7 @@ Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its
 **Generated config.** `~/.config/tatou/tmux.conf` is written by tatou at every launch from `config.toml`, and is never edited by hand. It contains:
 - Settings agents need: `escape-time 10`, `extended-keys on` (e.g. Shift+Enter), `focus-events on`, `set-clipboard on`, `allow-passthrough on`, `mouse on`, a large `history-limit`, true-colour terminal features.
 - `detach-on-destroy off`: a session that ends moves its clients to another session, never out of tmux.
-- tatou's bindings: popup key, back-to-dashboard key, and any `[keys.tmux]` entries from config.
+- tatou's bindings: popup key, back-to-dashboard key (`if-shell -F` on a session named exactly `tatou`: switch to it, else start it detached and switch), and any `[keys.tmux]` entries from config.
 - A status bar showing `#(tatou status)`.
 - As its last line: `source-file -q ~/.config/tatou/tmux.local.conf`, the user's own overrides (created by the user, never by tatou). Optionally, `inherit_user_conf = true` also sources the user's own tmux config first: `~/.tmux.conf` and `$XDG_CONFIG_HOME/tmux/tmux.conf`, the files tmux itself loads.
 

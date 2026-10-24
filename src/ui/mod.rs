@@ -59,7 +59,7 @@ pub fn run() -> Result<()> {
     let refresh = Refresh::start(server.clone(), watch, &projects, &updates);
     let (events, happened) = mpsc::channel();
 
-    let (mut terminal, _guard) = terminal::enter().map_err(Error::Terminal)?;
+    let (mut terminal, guard) = terminal::enter().map_err(Error::Terminal)?;
     let mut app = App::new(config);
     // Dropped with the app when the dashboard ends, which stops the workers
     app.refresh = Some(refresh);
@@ -82,8 +82,20 @@ pub fn run() -> Result<()> {
         app.apply_all(&received, &happened);
         app.update_view(unix_now());
         if app.quit {
+            drop(guard);
+            leave(&server);
             return Ok(());
         }
+    }
+}
+
+/// `q`: leaves tatou. The clients looking at the dashboard detach, back to the
+/// terminal they were attached from; every agent and shell keeps running, and
+/// `tatou` attaches again. Then the dashboard ends, and its session with it.
+fn leave(server: &Server) {
+    let dashboard = format!("={}", tmux::DASHBOARD);
+    if let Err(err) = server.run(&["detach-client", "-s", &dashboard]) {
+        tracing::warn!(%err, "cannot detach from the dashboard");
     }
 }
 
@@ -2012,6 +2024,56 @@ unknown field `popop`, expected one of `popup`, `back`";
         let cell = &buffer[(3, y)];
         assert_eq!(cell.fg, Color::Red);
         assert!(!cell.modifier.contains(Modifier::DIM), "the error");
+    }
+
+    #[test]
+    fn leaving_detaches_the_dashboards_clients_and_keeps_every_session() {
+        use crate::tmux::testing::{Client, TestServer, client_on};
+        let Some(server) = TestServer::new() else {
+            return;
+        };
+        for name in [tmux::DASHBOARD, "work"] {
+            server
+                .run(&["new-session", "-d", "-s", name, "sleep 1000"])
+                .unwrap();
+        }
+        let _on_dashboard = Client::attach(&server, &format!("={}", tmux::DASHBOARD));
+        let _on_work = Client::attach(&server, "=work");
+        let both = |s: &str| s.lines().count() == 2;
+        assert_eq!(client_count(&server, both), 2);
+
+        leave(&server);
+        assert_eq!(client_count(&server, |s| s.lines().count() == 1), 1);
+        assert_eq!(
+            client_on(&server, |s| s == "work"),
+            "work",
+            "the other client stays"
+        );
+        let names: Vec<_> = server
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(
+            names,
+            [tmux::DASHBOARD, "work"],
+            "every session keeps running"
+        );
+    }
+
+    /// How many clients the server has, once `until` holds of their list, within 5 s.
+    fn client_count(server: &Server, until: impl Fn(&str) -> bool) -> usize {
+        let mut clients = String::new();
+        for _ in 0..50 {
+            let output = server.run(&["list-clients", "-F", "#{client_session}"]);
+            clients = output.map(|o| o.stdout).unwrap_or_default();
+            if until(&clients) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        clients.lines().count()
     }
 
     fn test_config() -> Config {
