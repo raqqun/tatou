@@ -142,6 +142,7 @@ Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its
 
 **Generated config.** `~/.config/tatou/tmux.conf` is written by tatou at every launch from `config.toml`, and is never edited by hand. It contains:
 - Settings agents need: `escape-time 10`, `extended-keys on` (e.g. Shift+Enter), `focus-events on`, `set-clipboard on`, `allow-passthrough on`, `mouse on`, a large `history-limit`, true-colour terminal features.
+- `detach-on-destroy off`: a session that ends moves its clients to another session, never out of tmux.
 - tatou's bindings: popup key, back-to-dashboard key, and any `[keys.tmux]` entries from config.
 - A status bar showing `#(tatou status)`.
 - As its last line: `source-file -q ~/.config/tatou/tmux.local.conf`, the user's own overrides (created by the user, never by tatou). Optionally, `inherit_user_conf = true` also sources the user's own tmux config first: `~/.tmux.conf` and `$XDG_CONFIG_HOME/tmux/tmux.conf`, the files tmux itself loads.
@@ -152,7 +153,7 @@ tmux -L tatou new-session -d -s <repo>-<name> -c <path> -e TATOU=1 -P -F '#{sess
 tmux -L tatou set-option -t <session_id> @tatou_path <path>
 tmux -L tatou set-option -t <session_id> @tatou_agent_pane <pane_id>
 ```
-Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`, comparing paths with symlinks resolved), never by parsing names; the dashboard's own `tatou` session is never a worktree's. Sessions are targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
+Every command tatou starts in a window (an agent, a shell, a restart) runs as `<command>`, a newline, then a POSIX `sh` snippet that, while the pane still exists, sends the clients whose current window is this pane's back to the dashboard (`list-clients -f "#{==:#{window_id},…}"`, then `switch-client -c … -t '=tatou'`); so leaving an agent or a shell lands on the dashboard, and a program ending in a window nobody looks at moves nobody. A shell runs as `"${SHELL:-/bin/sh}" -l`. Windows opened by hand stay plain tmux. Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`, comparing paths with symlinks resolved), never by parsing names; the dashboard's own `tatou` session is never a worktree's. Sessions are targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
 
 ### 8.4 Agent status
 Agents report their own state by setting a tmux option; `$TMUX` inside a session points at the tatou server and session, `TATOU=1` makes it a no-op elsewhere.

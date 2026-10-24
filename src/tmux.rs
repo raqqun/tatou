@@ -19,6 +19,20 @@ const SOCKET: &str = "tatou";
 /// The session the dashboard runs in.
 pub const DASHBOARD: &str = "tatou";
 
+/// POSIX `sh` run after each command tatou starts in a window, while its pane
+/// still exists: the clients whose current window is this pane's go back to the
+/// dashboard. Only those, so a program ending elsewhere moves nobody; without a
+/// dashboard session, the switch fails quietly.
+const BACK_TO_DASHBOARD: &str = r##"w=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}'); for c in $(tmux list-clients -f "#{==:#{window_id},$w}" -F '#{client_name}'); do tmux switch-client -c "$c" -t '=tatou' 2>/dev/null; done"##;
+
+/// The shell code a window tatou opens runs: `command`, or without one the user's
+/// shell as a login shell (as tmux starts it), then `BACK_TO_DASHBOARD`. A newline,
+/// not `;`, ends the command, so a `# comment` at its end comments out nothing more.
+fn returning(command: Option<&str>) -> String {
+    let command = command.unwrap_or(r#""${SHELL:-/bin/sh}" -l"#);
+    format!("{command}\n{BACK_TO_DASHBOARD}")
+}
+
 /// The oldest tmux tatou supports, as (major, minor).
 const MIN_VERSION: (u32, u32) = (3, 2);
 
@@ -107,13 +121,14 @@ impl Server {
         command: Option<&str>,
     ) -> Result<NewSession> {
         let dir = path.to_string_lossy();
+        let run = returning(command);
         let mut n = 1;
         let (name, output) = loop {
             let name = match n {
                 1 => name.to_string(),
                 n => format!("{name}-{n}"),
             };
-            let mut args = vec![
+            let args = [
                 "new-session",
                 "-d",
                 "-s",
@@ -125,8 +140,8 @@ impl Server {
                 "-P",
                 "-F",
                 "#{session_id} #{pane_id}",
+                &run,
             ];
-            args.extend(command);
             match self.run(&args) {
                 Ok(output) => break (name, output.stdout),
                 Err(Error::Command { stderr, .. }) if stderr.starts_with("duplicate session") => {
@@ -161,7 +176,8 @@ impl Server {
     /// Restarts `pane` (`%4`) with `command`, killing what runs in it; the pane
     /// keeps its id and folder.
     pub fn respawn_agent(&self, pane: &str, command: &str) -> Result<()> {
-        self.run(&["respawn-pane", "-k", "-t", pane, command])?;
+        let run = returning(Some(command));
+        self.run(&["respawn-pane", "-k", "-t", pane, &run])?;
         Ok(())
     }
 
@@ -169,7 +185,8 @@ impl Server {
     /// default shell; it becomes the session's current window. Returns its pane.
     pub fn new_window(&self, session: &str, path: &Path, command: Option<&str>) -> Result<String> {
         let dir = path.to_string_lossy();
-        let mut args = vec![
+        let run = returning(command);
+        let args = [
             "new-window",
             "-t",
             session,
@@ -178,8 +195,8 @@ impl Server {
             "-P",
             "-F",
             "#{pane_id}",
+            &run,
         ];
-        args.extend(command);
         let output = self.run(&args)?;
         Ok(output.stdout.trim_end().to_string())
     }
@@ -599,6 +616,8 @@ fn conf(tmux: &config::Tmux, user_confs: &[PathBuf], local_conf: &Path) -> Strin
         .map(String::from),
     );
     lines.push(format!("set-option -g history-limit {HISTORY_LIMIT}"));
+    // A session that ends moves its clients to another one, never out of tmux
+    lines.push("set-option -g detach-on-destroy off".to_string());
 
     lines.push(String::new());
     lines.push("# tatou's bindings".to_string());
@@ -763,6 +782,7 @@ set-option -as terminal-features ',*:RGB'
 set-option -g mouse on
 set-option -gq allow-passthrough on
 set-option -g history-limit 50000
+set-option -g detach-on-destroy off
 
 # tatou's bindings
 bind-key -n 'M-d' switch-client -t '=tatou'
@@ -1175,8 +1195,10 @@ $3\tshort\t/home/me
         assert_eq!(sessions[0].path, path);
         let env = server.run(&["show-environment", "-t", &session.id, "TATOU"]);
         assert_eq!(env.unwrap().stdout, "TATOU=1\n");
+        // The command, then the way back to the dashboard
         let command = show(&server, &session.pane, "#{pane_start_command}");
-        assert_eq!(command, "\"sleep 1000\"");
+        assert!(command.starts_with("\"sleep 1000\\n"), "{command}");
+        assert!(command.contains("switch-client"), "{command}");
     }
 
     #[test]
@@ -1206,10 +1228,105 @@ $3\tshort\t/home/me
         let pid = show(&server, &session.pane, "#{pane_pid}");
         server.respawn_agent(&session.pane, "sleep 2000").unwrap();
         let after = show(&server, &session.pane, "#{pane_start_command}");
-        assert_eq!(after, "\"sleep 2000\"");
+        assert!(after.starts_with("\"sleep 2000\\n"), "{after}");
         assert_ne!(show(&server, &session.pane, "#{pane_pid}"), pid);
         let path = show(&server, &session.pane, "#{pane_current_path}");
         assert_eq!(Path::new(&path), dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn started_commands_go_back_to_the_dashboard_after() {
+        let agent = returning(Some("claude # with a comment"));
+        assert_eq!(
+            agent,
+            format!("claude # with a comment\n{BACK_TO_DASHBOARD}")
+        );
+        let shell = returning(None);
+        assert_eq!(
+            shell,
+            format!("\"${{SHELL:-/bin/sh}}\" -l\n{BACK_TO_DASHBOARD}")
+        );
+    }
+
+    /// A control-mode client of `server` on `session`, as a terminal would be;
+    /// it detaches when dropped.
+    struct Client(std::process::Child);
+
+    impl Client {
+        fn attach(server: &Server, session: &str) -> Client {
+            let args = server.args(&["-C", "attach", "-t", session]);
+            let child = std::process::Command::new("tmux")
+                .args(args)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            Client(child)
+        }
+    }
+
+    impl Drop for Client {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// The session the server's one client shows, once it has one, within 5 s
+    /// once `until` holds.
+    fn client_on(server: &Server, until: impl Fn(&str) -> bool) -> String {
+        let mut session = String::new();
+        for _ in 0..50 {
+            let output = server.run(&["list-clients", "-F", "#{client_session}"]);
+            session = output
+                .map(|o| o.stdout.trim().to_string())
+                .unwrap_or_default();
+            if until(&session) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        session
+    }
+
+    #[test]
+    fn a_program_ending_in_the_window_one_looks_at_goes_back_to_the_dashboard() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        server
+            .run(&["new-session", "-d", "-s", DASHBOARD, "sleep 1000"])
+            .unwrap();
+        let work = server
+            .new_session("work", dir.path(), Some("sleep 1"))
+            .unwrap();
+        let _client = Client::attach(&server, &work.id);
+        assert_eq!(client_on(&server, |s| s == "work"), "work");
+        // sleep ends after a second, then the client goes back
+        assert_eq!(client_on(&server, |s| s == DASHBOARD), DASHBOARD);
+    }
+
+    #[test]
+    fn a_program_ending_in_another_window_moves_nobody() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        server
+            .run(&["new-session", "-d", "-s", DASHBOARD, "sleep 1000"])
+            .unwrap();
+        let work = server
+            .new_session("work", dir.path(), Some("sleep 1"))
+            .unwrap();
+        // The client looks at a shell in a second window
+        server.new_window(&work.id, dir.path(), None).unwrap();
+        let _client = Client::attach(&server, &work.id);
+        assert_eq!(client_on(&server, |s| s == "work"), "work");
+        // Long after the agent's window closed: still there
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        assert_eq!(client_on(&server, |_| true), "work");
+        let windows = server.sessions().unwrap();
+        let work = windows.iter().find(|s| s.name == "work").unwrap();
+        assert_eq!(work.windows.len(), 1, "the agent's window closed");
     }
 
     #[test]
