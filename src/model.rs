@@ -89,6 +89,8 @@ impl Sources {
             Update::Worktrees { project, result } => {
                 self.worktrees.insert(project, result);
             }
+            // The UI applies it: it owns the config
+            Update::Config(_) => {}
         }
     }
 

@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::Deserialize;
 
@@ -68,7 +69,7 @@ pub struct Config {
     pub projects: Vec<Project>,
 }
 
-#[derive(Debug, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tmux {
     pub popup: String,
@@ -141,13 +142,28 @@ struct ProjectFile {
     on_create: Option<String>,
 }
 
+/// `<config dir>/config.toml`.
+pub fn path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.toml"))
+}
+
 /// Loads `<config dir>/config.toml`, first writing the commented template if it
 /// does not exist.
 pub fn load() -> Result<Config> {
-    let path = config_dir()?.join("config.toml");
+    let path = path()?;
     write_template(&path)?;
+    reload(&path)
+}
+
+/// Loads `path` again after it changed; unlike `load`, never writes it.
+pub fn reload(path: &Path) -> Result<Config> {
     let home = env::var_os("HOME").map(PathBuf::from);
-    load_from(&path, home.as_deref())
+    load_from(path, home.as_deref())
+}
+
+/// When `path` was last modified; `None` when it cannot be read.
+pub fn modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
 pub fn load_from(path: &Path, home: Option<&Path>) -> Result<Config> {
