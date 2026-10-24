@@ -82,6 +82,12 @@ impl Server {
         }
     }
 
+    /// Shows `session` (an id: `$3`) in the client this process runs in: the one
+    /// showing the dashboard, found by tmux from `$TMUX`.
+    pub fn switch_client(&self, session: &str) -> Result<()> {
+        self.run(&["switch-client", "-t", session]).map(|_| ())
+    }
+
     /// Every session on the server, sorted by name; none when the server is not running.
     pub fn sessions(&self) -> Result<Vec<Session>> {
         match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
@@ -769,6 +775,20 @@ $3\tshort\t/home/me
             "error connecting to /tmp/tmux-0/tatou (Permission denied)"
         ));
         assert!(!no_server("unknown option -- F"));
+    }
+
+    #[test]
+    fn switching_without_a_client_reports_tmux_error() {
+        let Some(server) = TestServer::new() else {
+            return;
+        };
+        let output = server.run(&["new-session", "-d", "-P", "-F", "#{session_id}"]);
+        let id = output.unwrap().stdout.trim_end().to_string();
+        // No client is attached in a test; jumping for real is the PR's manual check
+        match server.switch_client(&id) {
+            Err(Error::Command { stderr, .. }) => assert!(!stderr.is_empty()),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

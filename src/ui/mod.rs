@@ -4,7 +4,8 @@ mod projects;
 mod terminal;
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{self, Event, KeyEventKind};
@@ -17,7 +18,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use crate::config::{self, Config};
 use crate::error::{Error, Result};
 use crate::keys::{Action, Key, Keymap, Pane};
-use crate::model::Sources;
+use crate::model::{Sources, WorktreeView};
 use crate::refresh::{Refresh, Update};
 use crate::tmux::{self, Server};
 use projects::Tree;
@@ -25,19 +26,29 @@ use projects::Tree;
 /// How long to wait for input before applying updates and drawing again.
 const TICK: Duration = Duration::from_millis(100);
 
+/// The worktree actions, hidden from the hint bar on a project row.
+const WORKTREE_ACTIONS: [Action; 5] = [
+    Action::Jump,
+    Action::StartAgent,
+    Action::Shell,
+    Action::OpenPr,
+    Action::RemoveWorktree,
+];
+
 /// Runs the dashboard until the user quits.
 pub fn run() -> Result<()> {
     let config = config::load().map_err(|err| err.to_string());
     let (updates, received) = mpsc::channel();
+    let server = Server::tatou(&tmux::conf_path()?);
     // Dropped when the dashboard ends, which stops the workers
     let _refresh = match &config {
         Ok(config) => {
             let projects: Vec<PathBuf> = config.projects.iter().map(|p| p.path.clone()).collect();
-            let server = Server::tatou(&tmux::conf_path()?);
-            Some(Refresh::start(server, &projects, &updates))
+            Some(Refresh::start(server.clone(), &projects, &updates))
         }
         Err(_) => None,
     };
+    let (failures, failed) = mpsc::channel();
 
     let (mut terminal, _guard) = terminal::enter().map_err(Error::Terminal)?;
     let mut app = App::new(config);
@@ -54,12 +65,22 @@ pub fn run() -> Result<()> {
         if event::poll(TICK).map_err(Error::Terminal)? {
             app.input(event::read().map_err(Error::Terminal)?);
         }
-        app.apply_all(&received);
+        for task in app.tasks.drain(..) {
+            start(task, &server, &failures);
+        }
+        app.apply_all(&received, &failed);
         app.update_view(unix_now());
         if app.quit {
             return Ok(());
         }
     }
+}
+
+/// A command the UI asks for; the loop runs it on a thread of its own.
+#[derive(Debug, PartialEq)]
+enum Task {
+    /// Shows the session with this id in the dashboard's client.
+    Switch(String),
 }
 
 struct App {
@@ -69,6 +90,10 @@ struct App {
     tree: Tree,
     keymap: Keymap,
     focus: Pane,
+    /// Shown in place of the hints until the next key press.
+    message: Option<String>,
+    /// Asked for since the loop last took them.
+    tasks: Vec<Task>,
     quit: bool,
 }
 
@@ -80,23 +105,32 @@ impl App {
             tree: Tree::default(),
             keymap: Keymap::defaults(),
             focus: Pane::Worktrees,
+            message: None,
+            tasks: Vec::new(),
             quit: false,
         }
     }
 
     fn input(&mut self, event: Event) {
-        if let Event::Key(key) = event
-            && key.kind == KeyEventKind::Press
-            && let Some(action) = self.keymap.action(Key::from_event(key))
-        {
+        let Event::Key(key) = event else {
+            return;
+        };
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        self.message = None;
+        if let Some(action) = self.keymap.action(Key::from_event(key)) {
             self.handle(action);
         }
     }
 
-    /// Applies every update that has arrived, without waiting for more.
-    fn apply_all(&mut self, received: &Receiver<Update>) {
+    /// Applies every update and task failure that has arrived, without waiting for more.
+    fn apply_all(&mut self, received: &Receiver<Update>, failed: &Receiver<String>) {
         while let Ok(update) = received.try_recv() {
             self.sources.apply(update);
+        }
+        while let Ok(failure) = failed.try_recv() {
+            self.message = Some(failure);
         }
     }
 
@@ -115,6 +149,7 @@ impl App {
             Action::Down if worktrees => self.tree.down(),
             Action::Collapse if worktrees => self.tree.collapse(),
             Action::Expand if worktrees => self.tree.expand(),
+            Action::Jump if worktrees => self.jump(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
                     Pane::Worktrees => Pane::Files,
@@ -123,6 +158,33 @@ impl App {
             }
             // Each is filled in by its own step
             _ => {}
+        }
+    }
+
+    /// On a worktree, switches to its session; on a project, folds or unfolds it.
+    fn jump(&mut self) {
+        match self.tree.selected_worktree() {
+            Some(WorktreeView {
+                session: Some(session),
+                ..
+            }) => self.tasks.push(Task::Switch(session.id.clone())),
+            // Starting an agent comes with `s` (#22)
+            Some(worktree) => {
+                self.message = Some(format!("No session for {} yet", worktree.label()));
+            }
+            None => self.tree.toggle(),
+        }
+    }
+
+    /// The actions that do not apply to the selected row.
+    fn hidden(&self) -> &'static [Action] {
+        if self.focus != Pane::Worktrees {
+            return &[];
+        }
+        match self.tree.selected_worktree() {
+            Some(worktree) if worktree.session.is_some() => &[],
+            Some(_) => &[Action::Jump],
+            None => &WORKTREE_ACTIONS,
         }
     }
 
@@ -166,9 +228,13 @@ impl App {
         }
     }
 
+    /// The message, else the keys that apply to the selection.
     fn hint_bar(&self) -> Paragraph<'static> {
+        if let Some(message) = &self.message {
+            return Paragraph::new(message.clone());
+        }
         let mut spans = Vec::new();
-        for (key, label) in self.keymap.hints(self.focus) {
+        for (key, label) in self.keymap.hints(self.focus, self.hidden()) {
             if !spans.is_empty() {
                 spans.push(Span::raw("  "));
             }
@@ -176,6 +242,28 @@ impl App {
             spans.push(Span::raw(format!(" {label}")));
         }
         Paragraph::new(Line::from(spans))
+    }
+}
+
+/// Runs `task` on a thread of its own; its error, if any, goes to `failures`.
+fn start(task: Task, server: &Server, failures: &Sender<String>) {
+    let server = server.clone();
+    let failed = failures.clone();
+    let started = thread::Builder::new()
+        .name("task".to_string())
+        .spawn(move || {
+            let result = match &task {
+                Task::Switch(session) => server.switch_client(session),
+            };
+            if let Err(err) = result {
+                tracing::warn!(?task, %err, "task failed");
+                // The dashboard has ended: nobody to tell
+                let _ = failed.send(err.to_string());
+            }
+        });
+    if let Err(err) = started {
+        tracing::error!(%err, "cannot start a task thread");
+        let _ = failures.send(format!("cannot start a thread: {err}"));
     }
 }
 
@@ -193,7 +281,7 @@ mod tests {
 
     use super::projects::tests::{project, worktree};
     use super::*;
-    use crate::model::{ProjectView, Status};
+    use crate::model::{ProjectView, SessionView, Status};
 
     fn app() -> App {
         App::new(Err("not loaded".into()))
@@ -254,7 +342,7 @@ mod tests {
             "│▾ web                       ││                                            │",
             "│  · main  repo              ││                                            │",
             "└────────────────────────────┘└────────────────────────────────────────────┘",
-            "⏎ jump  n new  s start agent  t shell  p PR  d remove  ? help  q quit",
+            "n new  ? help  q quit",
         ];
         assert_eq!(screen(&mut app, 76, 8), expected);
     }
@@ -395,13 +483,84 @@ mod tests {
     fn updates_are_applied_without_waiting() {
         let mut app = app();
         let (updates, received) = mpsc::channel();
+        let (failures, failed) = mpsc::channel();
         updates
             .send(Update::Sessions(Err("tmux: boom".into())))
             .unwrap();
-        app.apply_all(&received);
+        failures.send("can't find session: $9".to_string()).unwrap();
+        app.apply_all(&received, &failed);
         assert_eq!(app.sources.sessions_error(), Some("tmux: boom"));
+        assert_eq!(app.message.as_deref(), Some("can't find session: $9"));
         // Nothing more to apply: returns at once
-        app.apply_all(&received);
+        app.apply_all(&received, &failed);
+    }
+
+    /// `app` with a session on its `fix` worktree and none on its main one.
+    fn with_a_session() -> App {
+        let mut app_project = project("/code/app", &["fix"]);
+        app_project.worktrees[1].session = Some(SessionView {
+            id: "$3".into(),
+            name: "app-fix".into(),
+            agent_pane: None,
+        });
+        showing(vec![app_project])
+    }
+
+    fn hint_line(app: &mut App) -> String {
+        screen(app, 100, 6)[5].clone()
+    }
+
+    #[test]
+    fn enter_switches_to_the_worktrees_session() {
+        let mut app = with_a_session();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tasks, [Task::Switch("$3".into())]);
+        assert_eq!(app.message, None);
+    }
+
+    #[test]
+    fn enter_without_a_session_says_so_until_the_next_key() {
+        let mut app = with_a_session();
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tasks, []);
+        assert_eq!(hint_line(&mut app), "No session for main yet");
+        press(&mut app, KeyCode::Char('x'));
+        assert!(
+            hint_line(&mut app).starts_with("n new"),
+            "back to the hints"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_project_folds_and_unfolds_it() {
+        let mut app = with_a_session();
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(projects_pane(&mut app, 6), ["▸ app", "", ""]);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            projects_pane(&mut app, 6)[0..2],
+            ["▾ app", "  · main  repo"]
+        );
+        assert_eq!(app.tasks, []);
+    }
+
+    #[test]
+    fn the_hints_follow_the_selected_row() {
+        let mut app = with_a_session();
+        assert_eq!(hint_line(&mut app), "n new  ? help  q quit", "project");
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            hint_line(&mut app),
+            "n new  s start agent  t shell  p PR  d remove  ? help  q quit",
+            "no session"
+        );
+        press(&mut app, KeyCode::Char('j'));
+        assert!(hint_line(&mut app).starts_with("⏎ jump  n new"), "session");
+        press(&mut app, KeyCode::Tab);
+        assert!(hint_line(&mut app).starts_with("e edit"), "files");
     }
 
     fn test_config() -> Config {

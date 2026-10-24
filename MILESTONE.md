@@ -226,6 +226,7 @@ Depends on: 1.15
 - `Enter` on a worktree with a session: `switch-client -t <session_id>`.
 - Without a session: a message in the hint bar (starting agents comes in 2.5).
 - Hint bar shows the keys available in the current context.
+- `switch-client` runs on a thread of its own; without `-c`, tmux finds the dashboard's client from `$TMUX`. A failure shows tmux's message in the hint bar and goes to the log. Enter on a project row folds or unfolds it. The hint bar shows only `n`, `?` and `q` on a project row, and no jump on a worktree without a session; a message replaces it until the next key.
 
 **Done when**
 - Manual check documented in the PR: jump to a session started by hand with `tmux -L tatou new-session -c <worktree>`, back with `Alt-d`.

@@ -37,14 +37,23 @@ pub struct WorktreeView {
     pub status: Status,
 }
 
-// Not read yet: jumping to a session uses it (#16)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct SessionView {
     /// The target for tmux commands.
     pub id: String,
+    // Not read yet: removing a worktree names the session it kills (#24)
+    #[allow(dead_code)]
     pub name: String,
+    // Not read yet: restarting the agent respawns its pane (#22)
+    #[allow(dead_code)]
     pub agent_pane: Option<String>,
+}
+
+impl WorktreeView {
+    /// What the UI calls it: its branch, or its directory's name when detached.
+    pub fn label(&self) -> &str {
+        self.branch.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// A worktree's agent: reported by its hooks, else guessed from its window's activity.
