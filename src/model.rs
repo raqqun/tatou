@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::git::Worktree;
 use crate::refresh::Update;
 use crate::tmux::{self, AgentStatus, Session};
@@ -52,6 +52,18 @@ impl WorktreeView {
     pub fn label(&self) -> &str {
         self.branch.as_deref().unwrap_or(&self.name)
     }
+}
+
+/// A session on tatou's server, for the Sessions pane.
+#[derive(Debug, PartialEq)]
+pub struct SessionRow {
+    /// The target for tmux commands.
+    pub id: String,
+    pub name: String,
+    pub status: Status,
+    /// What it is for: `project/worktree` when it belongs to one, else the
+    /// folder it started in, with `~/`.
+    pub place: String,
 }
 
 /// A worktree's agent: reported by its hooks, else guessed from its window's activity.
@@ -108,6 +120,36 @@ impl Sources {
 
     pub fn sessions_error(&self) -> Option<&str> {
         self.sessions_error.as_deref()
+    }
+
+    /// Every session but the dashboard's, in tmux's order (by name), with the
+    /// worktree each belongs to in `projects`, the view built from these sources.
+    pub fn session_rows(
+        &self,
+        projects: &[ProjectView],
+        now: u64,
+        home: Option<&Path>,
+    ) -> Vec<SessionRow> {
+        let mut places = HashMap::new();
+        for project in projects {
+            for worktree in &project.worktrees {
+                if let Some(session) = &worktree.session {
+                    let place = format!("{}/{}", project.name, worktree.label());
+                    places.insert(session.id.as_str(), place);
+                }
+            }
+        }
+        let mine = self.sessions.iter().filter(|s| s.name != tmux::DASHBOARD);
+        mine.map(|session| SessionRow {
+            id: session.id.clone(),
+            name: session.name.clone(),
+            status: status(session, now),
+            place: match places.get(session.id.as_str()) {
+                Some(place) => place.clone(),
+                None => config::tilde(&session.path, home),
+            },
+        })
+        .collect()
     }
 }
 

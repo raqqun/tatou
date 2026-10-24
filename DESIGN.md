@@ -72,16 +72,19 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 │   ⚠ new-api       #45 ●         │       main.rs                             │
 │   ○ refactor-db                 │   ? notes.md                              │
 │ ▸ website                       │   Cargo.toml                              │
-│                                 │                                           │
+├ Sessions ───────────────────────┤                                           │
+│ ● my-app-fix-login  my-app/fix… │                                           │
+│ ○ notes  ~/notes                │                                           │
 ├─────────────────────────────────┴───────────────────────────────────────────┤
 │ ⏎ jump  n new  d remove  e edit  v view  D diff  @ send to agent  ? help    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Left:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session; without hooks (§8.4), a dim `●` for recent output and a dim `○` otherwise. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
+- **Left, below:** every session on tatou's server but the dashboard's, each with its status and the `project/worktree` it belongs to, or the folder it started in when it belongs to none; `Enter` jumps to it. As tall as its sessions, up to a third of the column (scrolling past that), one line saying "No sessions" when there are none, and not drawn when a third of the column has no room for a row. tmux's errors show on its bottom border.
 - **Right:** file tree of the selected worktree. Git markers from `git status --porcelain`: `M` modified, `A` added, `?` untracked, `D` deleted. Respects `.gitignore` by default (toggle to show ignored/hidden files). Optional filter: changed files only.
 - **Bottom:** key hints for the selected row: on a project, only what applies to a project; on a worktree without a session, no jump. A message (e.g. a failed command) replaces them until the next key. `?` shows the full keymap.
-- `Tab` moves focus between panes. The right pane hides automatically when the terminal is narrow.
+- `Tab` moves focus between panes: projects, sessions, files. The right pane hides automatically when the terminal is narrow.
 - Dialogs open over the panes and take every key while the dashboard keeps refreshing behind them: a form (Tab/↑↓ between fields, ←→ through a choice, Enter to confirm, Esc to cancel; text fields edit like a shell line, Ctrl-a/e/u/k/w included), a choice list, a `[y/N]` confirmation whose default each dialog picks, and a scrollable message for command output. Their keys are fixed and shown in the hint bar.
 - Mouse support (click to select, scroll) via crossterm.
 

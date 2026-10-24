@@ -212,7 +212,7 @@ fn worktree_item(worktree: &WorktreeView) -> ListItem<'static> {
 }
 
 /// Guessed statuses, from activity without hooks, are dim.
-fn status_icon(status: Status) -> (&'static str, Style) {
+pub fn status_icon(status: Status) -> (&'static str, Style) {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match status {
         Status::Busy => ("●", Style::new()),

@@ -385,6 +385,18 @@ Depends on: 1.16, 1.6
 
 Found while using M2; each is an issue on the M2 milestone.
 
+### 2.9 Sessions pane below Projects (#85)
+
+Depends on: 1.16
+
+- The left column splits: **Projects** on top, **Sessions** below, listing every session on tatou's server except the dashboard's, including sessions that match no worktree: its status icon, its name, and dimmed, the `project/worktree` it belongs to, or the folder it started in (with `~/`).
+- `j`/`k` and arrows move; `Enter` jumps (`switch-client`, as in 1.16). `Tab` cycles Projects → Sessions → Files. The selection follows its session by id across refreshes.
+- Decided: Sessions is as tall as its rows, up to a third of the column, and scrolls past that; with none, one line says "No sessions". When a third of the column has no room for one row (a terminal under about ten rows), it is not drawn, so the projects keep theirs. tmux's errors move to its bottom border (to the projects' when it is not drawn).
+- The rows come from the sessions already listed (1.13): `Sources::session_rows`.
+
+**Done when**
+- `TestBackend` tests: sessions matched and unmatched, the dashboard's session left out, no sessions, the third of the column; `Enter` queues the switch; `Tab` cycles the three panes; the selection follows its session.
+
 ### 2.11 Drop the built-in `shell` agent (#87)
 
 Depends on: 2.5
