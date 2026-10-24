@@ -315,6 +315,7 @@ Depends on: 1.15
 
 - Reusable modal widgets: text input (with cursor, backspace, Esc to cancel), choice list, yes/no confirm, scrollable message (for git errors).
 - Modals take focus; the background keeps refreshing.
+- In `ui/dialog.rs`. Several values are one `Form` of text and choice fields (2.4: name, base, agent in one dialog), so a single text input is a one-field form; a form can show an error and stay open (2.4, 6.5). Text editing: ←/→, Home/End, Backspace, Delete, Ctrl-a/e/u/k/w, by characters. Confirm: `y`/`n`, Enter takes the dialog's default, Esc is no. Messages wrap by character, keeping command output as printed. Keys are fixed, not in the keymap; the hint bar shows them. `App::answered` is where each step acts on its dialog.
 
 **Done when**
 - `TestBackend` tests for each dialog's rendering; unit tests for the text input editing.
