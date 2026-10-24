@@ -397,6 +397,19 @@ Depends on: 2.5
 - Config unit tests: the built-in agents without `shell`; a user-defined `shell` still works and can be `default_agent`.
 - UI tests: the `s` choice and the `n` form list no `shell` by default.
 
+### 2.12 New worktree base from the selected row (#88)
+
+Depends on: 2.4
+
+- The `n` form's **Base** follows the selected row:
+  - **On a worktree row** (the main one too): that worktree's branch, so the new worktree starts from it.
+  - **On a project row**, or a detached worktree: the project's `base` setting first, then the remote's default branch as `origin/main` (the remote-tracking branch, as of the last fetch; tatou never fetches), then the branch checked out in the main worktree.
+- `git::remote_default` reads `origin/HEAD` (`symbolic-ref --quiet`: exit 1 means not set) on the project's refresh thread, with its worktrees; the model keeps it on the project's view.
+
+**Done when**
+- git tests in a TempDir with a local "remote": `origin/HEAD` read, and its absence handled.
+- UI tests: the Base prefilled on a project row and on a worktree row, and for a detached worktree.
+
 ---
 
 ## M3 — Status

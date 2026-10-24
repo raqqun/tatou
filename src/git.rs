@@ -45,6 +45,26 @@ pub fn main_worktree(dir: &Path) -> Result<PathBuf> {
     }
 }
 
+/// The remote's default branch, as `origin/main`: what `origin/HEAD` points to,
+/// set by `git clone` (or `git remote set-head origin -a`). `None` when it is not set.
+pub fn remote_default(repo: &Path) -> Result<Option<String>> {
+    let repo = repo.to_string_lossy();
+    let args = [
+        "-C",
+        &repo,
+        "symbolic-ref",
+        "--quiet",
+        "--short",
+        "refs/remotes/origin/HEAD",
+    ];
+    match exec::run("git", &args, None) {
+        Ok(output) => Ok(Some(output.stdout.trim_end().to_string())),
+        // `--quiet`: exit 1, saying nothing, when it is not set
+        Err(Error::Command { status, .. }) if status.code() == Some(1) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 /// Where a new worktree goes: `<worktree_dir>/<name>` when the project sets
 /// `worktree_dir`, else `<repo>.worktrees/<name>` next to the repository. A `/` in
 /// the branch name becomes `-`, so every worktree is a direct child of the folder.
@@ -437,6 +457,20 @@ mod tests {
             }
         }
         assert!(repo.join(".git").exists());
+    }
+
+    #[test]
+    fn the_remote_default_comes_from_origin_head() {
+        let (_tmp, dir, remote) = repository();
+        // A remote whose default branch is not main
+        git(&remote, &["branch", "-m", "trunk"]);
+        git(&dir, &["clone", "-q", "app", "clone"]);
+        assert_eq!(
+            remote_default(&dir.join("clone")).unwrap().as_deref(),
+            Some("origin/trunk")
+        );
+        assert_eq!(remote_default(&remote).unwrap(), None, "no remote");
+        assert!(remote_default(&dir).is_err(), "not a repository");
     }
 
     #[test]

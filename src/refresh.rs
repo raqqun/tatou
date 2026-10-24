@@ -29,6 +29,8 @@ pub enum Update {
     Worktrees {
         project: PathBuf,
         result: Result<Vec<Worktree>, String>,
+        /// The remote's default branch, `origin/main`, when it has one.
+        remote_default: Option<String>,
     },
     /// `config.toml` changed and was loaded again.
     Config(Result<Config, String>),
@@ -135,9 +137,15 @@ fn spawn_project(project: PathBuf, updates: &Sender<Update>) -> Sender<()> {
     spawn("refresh-git", WORKTREES_EVERY, updates.clone(), move || {
         let result = git::worktrees(&project).map_err(|err| err.to_string());
         log_change(&mut last_error, &result, &what);
+        // Only a default for new worktrees: without one, the main worktree's branch
+        let remote_default = match &result {
+            Ok(_) => git::remote_default(&project).ok().flatten(),
+            Err(_) => None,
+        };
         Some(Update::Worktrees {
             project: project.clone(),
             result,
+            remote_default,
         })
     })
 }
@@ -329,11 +337,15 @@ mod tests {
                     assert_eq!(result.unwrap(), [], "no server yet: no sessions");
                     seen.insert("tmux".to_string(), true);
                 }
-                Update::Worktrees { project, result } if project == good => {
+                Update::Worktrees {
+                    project, result, ..
+                } if project == good => {
                     assert_eq!(result.unwrap().len(), 1, "the main worktree");
                     seen.insert("good".to_string(), true);
                 }
-                Update::Worktrees { project, result } => {
+                Update::Worktrees {
+                    project, result, ..
+                } => {
                     assert_eq!(project, broken);
                     let err = result.unwrap_err();
                     assert!(err.contains("cannot change to"), "{err}");

@@ -493,8 +493,10 @@ impl App {
         });
     }
 
-    /// The form for a new worktree in the selected row's project: name, base
-    /// (the project's, else its main worktree's branch) and agent.
+    /// The form for a new worktree in the selected row's project: name, base and
+    /// agent. On a worktree, the base is its branch; on the project, or a detached
+    /// worktree, the project's `base`, else its remote's default branch
+    /// (`origin/main`), else the branch checked out in its main worktree.
     fn open_new_worktree(&mut self) {
         let (Some(view), Ok(config)) = (self.tree.selected_project(), &self.config) else {
             return;
@@ -506,12 +508,12 @@ impl App {
         }
         let project = config.projects.iter().find(|p| p.path == view.path);
         let main_branch = view.worktrees.iter().find(|w| w.main);
-        let base = match project.and_then(|p| p.base.clone()) {
-            Some(base) => base,
-            None => main_branch
-                .and_then(|w| w.branch.clone())
-                .unwrap_or_default(),
-        };
+        let worktree_branch = self.tree.selected_worktree().and_then(|w| w.branch.clone());
+        let base = worktree_branch
+            .or_else(|| project.and_then(|p| p.base.clone()))
+            .or_else(|| view.remote_default.clone())
+            .or_else(|| main_branch.and_then(|w| w.branch.clone()))
+            .unwrap_or_default();
         let agents = config.agents.keys().cloned().collect();
         let fields = vec![
             Field::text("Name", ""),
@@ -1194,6 +1196,38 @@ unknown field `popop`, expected one of `popup`, `back`";
             ["", "develop", "claude"],
             "the project's base"
         );
+    }
+
+    /// The Base the `n` form starts with, with the selection `moves` rows down from
+    /// the project, in a project with a `fix` worktree and a detached `spike`.
+    fn base_after(base: Option<&str>, remote_default: Option<&str>, moves: usize) -> String {
+        let mut app = with_a_project(base);
+        let mut view = project("/code/app", &["fix"]);
+        view.worktrees
+            .push(worktree("/code/app.worktrees/spike", None, Status::Idle));
+        view.remote_default = remote_default.map(String::from);
+        app.tree.set_view(vec![view]);
+        for _ in 0..moves {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        press(&mut app, KeyCode::Char('n'));
+        form_values(&mut app)[1].clone()
+    }
+
+    #[test]
+    fn the_base_follows_the_selected_row() {
+        // On the project: its base, else the remote's default, else the main branch
+        assert_eq!(
+            base_after(Some("develop"), Some("origin/main"), 0),
+            "develop"
+        );
+        assert_eq!(base_after(None, Some("origin/main"), 0), "origin/main");
+        assert_eq!(base_after(None, None, 0), "main");
+        // On a worktree: its branch, the main one's too
+        assert_eq!(base_after(Some("develop"), Some("origin/main"), 1), "main");
+        assert_eq!(base_after(Some("develop"), Some("origin/main"), 2), "fix");
+        // Detached: the project's default
+        assert_eq!(base_after(None, Some("origin/main"), 3), "origin/main");
     }
 
     #[test]

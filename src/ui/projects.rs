@@ -254,6 +254,7 @@ pub mod tests {
             name: path.rsplit('/').next().unwrap_or(path).into(),
             error: None,
             worktrees: std::iter::once(main).chain(linked).collect(),
+            remote_default: None,
         }
     }
 
