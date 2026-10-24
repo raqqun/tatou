@@ -78,7 +78,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Left:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session. PR badge: number + checks `✓ ✗ ●`.
+- **Left:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session; without hooks (§8.4), a dim `●` for recent output and a dim `○` otherwise. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
 - **Right:** file tree of the selected worktree. Git markers from `git status --porcelain`: `M` modified, `A` added, `?` untracked, `D` deleted. Respects `.gitignore` by default (toggle to show ignored/hidden files). Optional filter: changed files only.
 - **Bottom:** context-sensitive key hints; `?` shows the full keymap.
 - `Tab` moves focus between panes. The right pane hides automatically when the terminal is narrow.

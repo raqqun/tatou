@@ -1,15 +1,16 @@
 //! The dashboard: ratatui rendering and input handling only.
 
+mod projects;
 mod terminal;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
@@ -19,6 +20,7 @@ use crate::keys::{Action, Key, Keymap, Pane};
 use crate::model::Sources;
 use crate::refresh::{Refresh, Update};
 use crate::tmux::{self, Server};
+use projects::Tree;
 
 /// How long to wait for input before applying updates and drawing again.
 const TICK: Duration = Duration::from_millis(100);
@@ -53,6 +55,7 @@ pub fn run() -> Result<()> {
             app.input(event::read().map_err(Error::Terminal)?);
         }
         app.apply_all(&received);
+        app.update_view(unix_now());
         if app.quit {
             return Ok(());
         }
@@ -63,6 +66,7 @@ struct App {
     /// The error is shown in place of the projects.
     config: std::result::Result<Config, String>,
     sources: Sources,
+    tree: Tree,
     keymap: Keymap,
     focus: Pane,
     quit: bool,
@@ -73,6 +77,7 @@ impl App {
         App {
             config,
             sources: Sources::default(),
+            tree: Tree::default(),
             keymap: Keymap::defaults(),
             focus: Pane::Worktrees,
             quit: false,
@@ -95,9 +100,21 @@ impl App {
         }
     }
 
+    /// Rebuilds the left pane from the latest sources; `now` dates agents' activity.
+    fn update_view(&mut self, now: u64) {
+        if let Ok(config) = &self.config {
+            self.tree.set_view(self.sources.view(config, now));
+        }
+    }
+
     fn handle(&mut self, action: Action) {
+        let worktrees = self.focus == Pane::Worktrees;
         match action {
             Action::Quit => self.quit = true,
+            Action::Up if worktrees => self.tree.up(),
+            Action::Down if worktrees => self.tree.down(),
+            Action::Collapse if worktrees => self.tree.collapse(),
+            Action::Expand if worktrees => self.tree.expand(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
                     Pane::Worktrees => Pane::Files,
@@ -109,7 +126,7 @@ impl App {
         }
     }
 
-    fn render(&self, frame: &mut Frame) {
+    fn render(&mut self, frame: &mut Frame) {
         let [main, hints] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
         let [left, right] =
@@ -120,12 +137,22 @@ impl App {
         frame.render_widget(self.hint_bar(), hints);
     }
 
-    fn render_projects(&self, frame: &mut Frame, area: Rect) {
-        let block = self.pane_block(" Projects ", Pane::Worktrees);
-        let body = match &self.config {
-            Ok(_) => Paragraph::new(""),
-            Err(err) => Paragraph::new(err.as_str()).wrap(Wrap { trim: false }),
+    /// The projects, else why there are none; a tmux error at the bottom.
+    fn render_projects(&mut self, frame: &mut Frame, area: Rect) {
+        let mut block = self.pane_block(" Projects ", Pane::Worktrees);
+        if let Some(err) = self.sources.sessions_error() {
+            let style = Style::new().fg(Color::Red);
+            block = block.title_bottom(Line::styled(format!(" {err} "), style));
+        }
+        let message = match &self.config {
+            Ok(_) if !self.tree.is_empty() => return self.tree.render(frame, area, block),
+            Ok(config) => format!(
+                "No projects yet. Add a [[project]] with its path to {}",
+                config.path.display()
+            ),
+            Err(err) => err.clone(),
         };
+        let body = Paragraph::new(message).wrap(Wrap { trim: false });
         frame.render_widget(body.block(block), area);
     }
 
@@ -152,13 +179,21 @@ impl App {
     }
 }
 
+/// Seconds since the Unix epoch, like tmux's activity times.
+fn unix_now() -> u64 {
+    let since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
+    since_epoch.map_or(0, |elapsed| elapsed.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    use super::projects::tests::{project, worktree};
     use super::*;
+    use crate::model::{ProjectView, Status};
 
     fn app() -> App {
         App::new(Err("not loaded".into()))
@@ -169,7 +204,7 @@ mod tests {
     }
 
     /// The text on screen, one string per line, styles left out.
-    fn screen(app: &App, width: u16, height: u16) -> Vec<String> {
+    fn screen(app: &mut App, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| app.render(frame)).unwrap();
         let buffer = terminal.backend().buffer();
@@ -181,23 +216,157 @@ mod tests {
             .collect()
     }
 
+    /// The left pane's text inside its borders, on a 100-column screen.
+    fn projects_pane(app: &mut App, height: u16) -> Vec<String> {
+        let lines = screen(app, 100, height);
+        let inner = &lines[1..height as usize - 2];
+        inner
+            .iter()
+            .map(|line| {
+                line.chars()
+                    .skip(1)
+                    .take(38)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The dashboard showing `view`.
+    fn showing(view: Vec<ProjectView>) -> App {
+        let mut app = App::new(Ok(test_config()));
+        app.tree.set_view(view);
+        app
+    }
+
     #[test]
-    fn renders_the_empty_frame() {
-        let app = App::new(Ok(test_config()));
+    fn lists_two_projects_and_their_worktrees() {
+        let mut app = showing(vec![
+            project("/code/app", &["fix-login"]),
+            project("/code/web", &[]),
+        ]);
         let expected = [
             "┌ Projects ──────────────────┐┌ Files ─────────────────────────────────────┐",
-            "│                            ││                                            │",
-            "│                            ││                                            │",
+            "│▾ app                       ││                                            │",
+            "│  · main  repo              ││                                            │",
+            "│  · fix-login               ││                                            │",
+            "│▾ web                       ││                                            │",
+            "│  · main  repo              ││                                            │",
             "└────────────────────────────┘└────────────────────────────────────────────┘",
             "⏎ jump  n new  s start agent  t shell  p PR  d remove  ? help  q quit",
         ];
-        assert_eq!(screen(&app, 76, 5), expected);
+        assert_eq!(screen(&mut app, 76, 8), expected);
+    }
+
+    #[test]
+    fn a_collapsed_project_hides_its_worktrees() {
+        let mut app = showing(vec![
+            project("/code/app", &["fix-login"]),
+            project("/code/web", &[]),
+        ]);
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(
+            projects_pane(&mut app, 7),
+            ["▸ app", "▾ web", "  · main  repo", ""]
+        );
+    }
+
+    #[test]
+    fn each_status_has_its_icon() {
+        let statuses = [
+            ("busy", Status::Busy),
+            ("input", Status::Input),
+            ("idle", Status::Idle),
+            ("active", Status::Active),
+            ("quiet", Status::Quiet),
+            ("none", Status::NoSession),
+        ];
+        let mut app_project = project("/code/app", &[]);
+        app_project.worktrees = statuses
+            .iter()
+            .map(|(name, status)| worktree(&format!("/code/{name}"), Some(name), *status))
+            .collect();
+        let mut app = showing(vec![app_project]);
+        assert_eq!(
+            projects_pane(&mut app, 10)[1..],
+            [
+                "  ● busy",
+                "  ⚠ input",
+                "  ○ idle",
+                "  ● active",
+                "  ○ quiet",
+                "  · none"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_detached_worktree_shows_its_name() {
+        let detached = worktree("/code/app.worktrees/spike", None, Status::Idle);
+        let mut app_project = project("/code/app", &[]);
+        app_project.worktrees.push(detached);
+        let lines = projects_pane(&mut showing(vec![app_project]), 6);
+        assert_eq!(lines[2], "  ○ spike");
+    }
+
+    #[test]
+    fn project_errors_show_under_the_project() {
+        let mut broken = project("/code/broken", &[]);
+        broken.worktrees.clear();
+        broken.error = Some("fatal: not a git repository\nhint: check the path".into());
+        let mut app = showing(vec![broken, project("/code/web", &[])]);
+        assert_eq!(
+            projects_pane(&mut app, 7)[..4],
+            [
+                "▾ broken",
+                "    fatal: not a git repository",
+                "    hint: check the path",
+                "▾ web"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tmux_error_shows_at_the_bottom_of_the_pane() {
+        let mut app = showing(vec![project("/code/app", &[])]);
+        app.sources
+            .apply(Update::Sessions(Err("tmux: no server".into())));
+        let lines = screen(&mut app, 60, 5);
+        assert!(lines[3].starts_with("└ tmux: no server ─"), "{lines:?}");
+    }
+
+    #[test]
+    fn without_projects_shows_the_config_path() {
+        let mut config = test_config();
+        config.path = "/home/me/.config/tatou/config.toml".into();
+        let mut app = App::new(Ok(config));
+        assert_eq!(
+            projects_pane(&mut app, 7),
+            [
+                "No projects yet. Add a [[project]]",
+                "with its path to",
+                "/home/me/.config/tatou/config.toml",
+                ""
+            ]
+        );
+    }
+
+    #[test]
+    fn moving_applies_to_the_focused_pane_only() {
+        let mut app = showing(vec![project("/code/app", &["fix"])]);
+        press(&mut app, KeyCode::Char('j'));
+        let selected = app.tree.selected().cloned();
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.tree.selected().cloned(), selected);
     }
 
     #[test]
     fn a_config_error_shows_in_place_of_the_projects() {
-        let app = App::new(Err("config.toml: unknown field `popop`".into()));
-        let lines = screen(&app, 100, 6);
+        let mut app = App::new(Err("config.toml: unknown field `popop`".into()));
+        let lines = screen(&mut app, 100, 6);
         assert!(lines[1].contains("config.toml: unknown field"), "{lines:?}");
     }
 
@@ -206,7 +375,7 @@ mod tests {
         let mut app = app();
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Files);
-        let lines = screen(&app, 80, 4);
+        let lines = screen(&mut app, 80, 4);
         assert!(lines[3].starts_with("e edit  v view  D diff"), "{lines:?}");
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Worktrees);

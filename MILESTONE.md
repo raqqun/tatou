@@ -214,6 +214,7 @@ Depends on: 1.14
 - Collapsible projects (`▾` / `▸`), worktrees with status icons (`●` busy, `⚠` input, `○` idle, `·` no session), branch or name, main worktree marked.
 - Navigation: `j`/`k`/arrows, `h`/`l` or Left/Right to collapse/expand, selection kept across refreshes (by path).
 - Empty state with the config path; per-project errors shown inline.
+- Project rows are selectable, tree-style: `h` on a worktree moves to its project, then folds it; `l` unfolds it, then moves to its first worktree. Folding lasts while the dashboard runs. The main worktree is tagged `repo`; without hooks, `active` and `quiet` show as a dim `●` and `○`. A project's error shows under its name, a tmux error at the bottom of the pane.
 
 **Done when**
 - `TestBackend` tests: two projects, collapsed project, each status icon, empty state.
