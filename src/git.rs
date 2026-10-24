@@ -45,6 +45,77 @@ pub fn main_worktree(dir: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Where a new worktree goes: `<worktree_dir>/<name>` when the project sets
+/// `worktree_dir`, else `<repo>.worktrees/<name>` next to the repository. A `/` in
+/// the branch name becomes `-`, so every worktree is a direct child of the folder.
+// Not called yet: the new-worktree dialog uses it (#21)
+#[allow(dead_code)]
+pub fn worktree_path(repo: &Path, name: &str, worktree_dir: Option<&Path>) -> PathBuf {
+    let folder = name.replace('/', "-");
+    match worktree_dir {
+        Some(dir) => dir.join(folder),
+        None => {
+            let mut dir = repo.as_os_str().to_owned();
+            dir.push(".worktrees");
+            PathBuf::from(dir).join(folder)
+        }
+    }
+}
+
+/// Creates the worktree `path` of `repo` on a new branch `name`, starting from
+/// `base`, or from the branch checked out in the main worktree. The name is checked
+/// first; git's message comes back as is when it refuses, e.g. a branch that exists.
+// Not called yet: the new-worktree dialog uses it (#21)
+#[allow(dead_code)]
+pub fn add(repo: &Path, name: &str, base: Option<&str>, path: &Path) -> Result<()> {
+    check_branch_name(repo, name)?;
+    let (repo, path) = (repo.to_string_lossy(), path.to_string_lossy());
+    // `--` ends the options, so a base starting with `-` is never read as one
+    let mut args = vec!["-C", &repo, "worktree", "add", "-b", name, "--", &path];
+    args.extend(base);
+    exec::run("git", &args, None)?;
+    Ok(())
+}
+
+/// A valid branch name is one `git check-ref-format --branch` prints back as is:
+/// it also expands `@{-1}` to the branch checked out before, which is not a name.
+fn check_branch_name(repo: &Path, name: &str) -> Result<()> {
+    let repo = repo.to_string_lossy();
+    let invalid = || Error::InvalidBranch {
+        name: name.to_string(),
+    };
+    let args = ["-C", &repo, "check-ref-format", "--branch", name];
+    match exec::run("git", &args, None) {
+        Ok(output) if output.stdout.trim_end_matches('\n') == name => Ok(()),
+        Ok(_) => Err(invalid()),
+        // Exit 128 is git's no; anything else, e.g. a missing repository, says why
+        Err(Error::Command { status, .. }) if status.code() == Some(128) => Err(invalid()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Removes the linked worktree `path` of `repo`; git refuses one with changes
+/// unless `force`, and its message comes back as is. The main worktree is never
+/// removed, whatever `force` says.
+// Not called yet: removing a worktree uses it (#24)
+#[allow(dead_code)]
+pub fn remove(repo: &Path, path: &Path, force: bool) -> Result<()> {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if canonical(path) == canonical(&main_worktree(repo)?) {
+        return Err(Error::MainWorktree {
+            path: path.to_path_buf(),
+        });
+    }
+    let (repo, path) = (repo.to_string_lossy(), path.to_string_lossy());
+    let mut args = vec!["-C", &repo, "worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.extend(["--", &path]);
+    exec::run("git", &args, None)?;
+    Ok(())
+}
+
 /// Parses `git worktree list --porcelain`: one block of lines per worktree, each
 /// block starting with `worktree <path>` and ending with an empty line. Lines git
 /// may add in later versions are ignored. Paths are printed as is, so one with a
@@ -241,6 +312,137 @@ mod tests {
         for inside in [repo.clone(), repo.join("src/ui"), dir.join("fix")] {
             assert_eq!(main_worktree(&inside).unwrap(), repo, "{inside:?}");
         }
+    }
+
+    /// A repository at `<dir>/app` with one commit, and `dir`, canonical.
+    fn repository() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let repo = dir.join("app");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        (tmp, dir, repo)
+    }
+
+    fn head(dir: &Path) -> String {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn worktrees_go_next_to_the_repository_or_in_worktree_dir() {
+        let repo = Path::new("/code/app");
+        assert_eq!(
+            worktree_path(repo, "fix-login", None),
+            Path::new("/code/app.worktrees/fix-login")
+        );
+        assert_eq!(
+            worktree_path(repo, "feature/login", Some(Path::new("/wt"))),
+            Path::new("/wt/feature-login")
+        );
+    }
+
+    #[test]
+    fn adds_a_worktree_on_a_new_branch() {
+        let (_tmp, dir, repo) = repository();
+        let path = worktree_path(&repo, "feature/login", None);
+        add(&repo, "feature/login", None, &path).unwrap();
+        let worktrees = worktrees(&repo).unwrap();
+        assert_eq!(worktrees[1].path, dir.join("app.worktrees/feature-login"));
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feature/login"));
+        assert_eq!(head(&path), head(&repo), "from the main worktree's branch");
+
+        // In a folder of its own, from a base
+        git(&repo, &["branch", "base"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "later"]);
+        let custom = dir.join("elsewhere");
+        let path = worktree_path(&repo, "fix", Some(&custom));
+        add(&repo, "fix", Some("base"), &path).unwrap();
+        assert_eq!(path, custom.join("fix"));
+        assert_ne!(head(&path), head(&repo), "from base, not main");
+    }
+
+    #[test]
+    fn invalid_names_are_rejected_before_anything_runs() {
+        let (_tmp, dir, repo) = repository();
+        // `@{-1}` is the branch checked out before: valid to git, but not a name
+        git(&repo, &["checkout", "-q", "-b", "other"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        for name in ["a..b", "-x", "with space", "", "HEAD", "@{-1}", "x.lock"] {
+            let path = dir.join("wt");
+            let err = add(&repo, name, None, &path).unwrap_err();
+            assert!(
+                matches!(&err, Error::InvalidBranch { name: n } if n == name),
+                "{name:?}: {err:?}"
+            );
+            assert!(!path.exists(), "{name:?}");
+        }
+        assert_eq!(worktrees(&repo).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn git_says_why_it_cannot_add() {
+        let (_tmp, dir, repo) = repository();
+        let err = add(&repo, "main", None, &dir.join("wt")).unwrap_err();
+        let Error::Command { stderr, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert!(stderr.contains("already exists"), "{stderr}");
+        // A base is a commit, never an option
+        let err = add(&repo, "x", Some("--detach"), &dir.join("wt")).unwrap_err();
+        let Error::Command { stderr, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert!(stderr.contains("invalid reference: --detach"), "{stderr}");
+    }
+
+    #[test]
+    fn removes_a_clean_worktree_and_a_dirty_one_only_when_forced() {
+        let (_tmp, _dir, repo) = repository();
+        let clean = worktree_path(&repo, "clean", None);
+        let dirty = worktree_path(&repo, "dirty", None);
+        add(&repo, "clean", None, &clean).unwrap();
+        add(&repo, "dirty", None, &dirty).unwrap();
+        fs::write(dirty.join("notes.md"), "draft").unwrap();
+
+        remove(&repo, &clean, false).unwrap();
+        assert!(!clean.exists());
+
+        let err = remove(&repo, &dirty, false).unwrap_err();
+        let Error::Command { stderr, .. } = err else {
+            panic!("{err:?}");
+        };
+        assert!(
+            stderr.contains("contains modified or untracked files"),
+            "{stderr}"
+        );
+        assert!(dirty.join("notes.md").exists(), "left as it was");
+
+        remove(&repo, &dirty, true).unwrap();
+        assert!(!dirty.exists());
+        assert_eq!(worktrees(&repo).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_main_worktree_is_never_removed() {
+        let (_tmp, dir, repo) = repository();
+        let linked = worktree_path(&repo, "fix", None);
+        add(&repo, "fix", None, &linked).unwrap();
+        // However it is named, and from a linked worktree too
+        let through_link = dir.join("link");
+        std::os::unix::fs::symlink(&repo, &through_link).unwrap();
+        for (from, main) in [(&repo, &repo), (&linked, &through_link)] {
+            for force in [false, true] {
+                let err = remove(from, main, force).unwrap_err();
+                assert!(matches!(err, Error::MainWorktree { .. }), "{err:?}");
+            }
+        }
+        assert!(repo.join(".git").exists());
     }
 
     #[test]

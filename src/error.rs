@@ -34,6 +34,14 @@ pub enum Error {
     #[error("cannot run {program}: {source}")]
     Spawn { program: String, source: io::Error },
 
+    /// Rejected by `git check-ref-format --branch`, before anything else runs.
+    #[error("`{name}` is not a valid branch name")]
+    InvalidBranch { name: String },
+
+    /// Removing it would remove the repository itself.
+    #[error("{} is the repository's main worktree; it cannot be removed", path.display())]
+    MainWorktree { path: PathBuf },
+
     /// `git worktree list` succeeded but listed nothing, which git never does.
     #[error("{}: git lists no worktree", path.display())]
     NoWorktree { path: PathBuf },
