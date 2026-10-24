@@ -381,6 +381,23 @@ Depends on: 1.16, 1.6
 **Done when**
 - Unit test on the generated binding; manual check from a worktree session documented in the PR.
 
+### Post-milestone fixes
+
+Found while using M2; each is an issue on the M2 milestone.
+
+### 2.10 `t` reuses the worktree's shell (#86)
+
+Depends on: 2.6
+
+- `t` switches to the worktree's shell window when its session has one tatou opened, instead of opening another; only the first `t` creates it (a window in the session, or a session with just the shell, as in 2.6).
+- tatou tags the shell's pane on the session with `@tatou_shell_pane`, as it tags the agent's with `@tatou_agent_pane`. `t` reads it with `show-options` when it runs, so it is always current; the refresh's `list-panes` does not need it.
+- The shell closed: tmux's `can't find pane` on selecting it, and the next `t` opens a new one and tags it.
+- What was first reported as `t` starting a new session was a new window each time, listed in tmux's status bar (windows: prefix `n`/`p`, a number, or `w`).
+
+**Done when**
+- Integration tests on a unique socket: a second `t` switches to the same window; after the shell is closed, a new one is tagged; a session without a tagged shell gets one window.
+- Manual check documented in the PR: `t`, `Alt-d`, `t` lands in the same shell.
+
 ---
 
 ## M3 — Status

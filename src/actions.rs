@@ -194,12 +194,16 @@ fn remove_worktree(remove: RemoveWorktree, server: &Server) -> Event {
     }
 }
 
-/// A new window with a shell in the worktree's session, or a new session with
-/// one, without an agent pane, then shows it.
+/// Shows the worktree's shell: the one tagged in its session when it is still
+/// there, else a new window, tagged; without a session, a new one with just the
+/// shell, which is no agent.
 fn open_shell(shell: &Shell, server: &Server) -> crate::error::Result<()> {
     let session = match &shell.session {
         Some(session) => {
-            server.new_window(session, &shell.path, None)?;
+            if !reuse_shell(session, server)? {
+                let pane = server.new_window(session, &shell.path, None)?;
+                server.set_shell_pane(session, &pane)?;
+            }
             session.clone()
         }
         None => {
@@ -209,6 +213,21 @@ fn open_shell(shell: &Shell, server: &Server) -> crate::error::Result<()> {
         }
     };
     server.switch_client(&session)
+}
+
+/// Selects `session`'s tagged shell; false when it has none, or it was closed.
+fn reuse_shell(session: &str, server: &Server) -> crate::error::Result<bool> {
+    let Some(pane) = server.shell_pane(session)? else {
+        return Ok(false);
+    };
+    match server.select_pane(&pane) {
+        Ok(()) => Ok(true),
+        Err(Error::Command { stderr, .. }) if stderr.starts_with("can't find pane") => {
+            tracing::info!(pane, "shell pane gone: opening a new one");
+            Ok(false)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Respawns the agent's pane; without one, or when it is gone, starts the agent
@@ -541,15 +560,66 @@ mod tests {
         let session = server
             .new_session("app-fix", tmp.path(), Some("sleep 1000"))
             .unwrap();
-        let events = events(shell(tmp.path(), Some(&session.id)), &server);
-        assert!(not_shown(&events), "{events:?}");
+        let first = events(shell(tmp.path(), Some(&session.id)), &server);
+        assert!(not_shown(&first), "{first:?}");
         assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
         // The shell is the session's current window; the agent's pane is still the agent
         let current = show(&server, &session.id, "#{pane_id}");
         assert_ne!(current, session.pane);
         assert_eq!(show(&server, &current, "#{pane_start_command}"), "");
         let agent = server.sessions().unwrap()[0].agent_pane.clone();
-        assert_eq!(agent, Some(session.pane));
+        assert_eq!(agent, Some(session.pane.clone()));
+        assert_eq!(
+            server.shell_pane(&session.id).unwrap(),
+            Some(current.clone()),
+            "tagged"
+        );
+
+        // Again, from another window: back to the same shell, no new window
+        server.select_pane(&session.pane).unwrap();
+        events(shell(tmp.path(), Some(&session.id)), &server);
+        assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
+        assert_eq!(show(&server, &session.id, "#{pane_id}"), current);
+    }
+
+    #[test]
+    fn a_closed_shell_is_opened_again_and_tagged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let session = server
+            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
+            .unwrap();
+        events(shell(tmp.path(), Some(&session.id)), &server);
+        let first = server.shell_pane(&session.id).unwrap().unwrap();
+        server.run(&["kill-pane", "-t", &first]).unwrap();
+
+        events(shell(tmp.path(), Some(&session.id)), &server);
+        let second = server.shell_pane(&session.id).unwrap().unwrap();
+        assert_ne!(second, first);
+        assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
+        assert_eq!(show(&server, &session.id, "#{pane_id}"), second);
+    }
+
+    #[test]
+    fn a_session_started_by_hand_gets_a_tagged_shell_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let dir = tmp.path().to_str().unwrap();
+        let output = server.run(&["new-session", "-d", "-c", dir, "-P", "-F", "#{session_id}"]);
+        let id = output.unwrap().stdout.trim_end().to_string();
+        events(shell(tmp.path(), Some(&id)), &server);
+        events(shell(tmp.path(), Some(&id)), &server);
+        assert_eq!(
+            show(&server, &id, "#{session_windows}"),
+            "2",
+            "one shell window added"
+        );
+        let tagged = server.shell_pane(&id).unwrap();
+        assert_eq!(tagged, Some(show(&server, &id, "#{pane_id}")));
     }
 
     #[test]
@@ -565,6 +635,11 @@ mod tests {
         assert_eq!(sessions[0].name, "app-fix");
         assert_eq!(sessions[0].tatou_path.as_deref(), Some(tmp.path()));
         assert_eq!(sessions[0].agent_pane, None, "a shell is no agent");
+        let shell_pane = server.shell_pane(&sessions[0].id).unwrap();
+        assert_eq!(
+            shell_pane,
+            Some(show(&server, &sessions[0].id, "#{pane_id}"))
+        );
         let env = server.run(&["show-environment", "-t", &sessions[0].id, "TATOU"]);
         assert_eq!(env.unwrap().stdout, "TATOU=1\n");
     }

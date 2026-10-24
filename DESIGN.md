@@ -93,7 +93,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 | `Enter` | Jump to agent | `tmux switch-client -t <session>` |
 | `n` | New worktree | dialog → `git worktree add`, `on_create`, `tmux new-session` |
 | `s` | Start / restart agent | choose the agent → `tmux new-session`, or confirm → `respawn-pane -k` on the agent's pane (a new window when it has none or it is gone) |
-| `t` | Open shell in worktree | `tmux new-window -t <session> -c <path>`, or a new session with just the shell; then switch to it |
+| `t` | Open shell in worktree | its shell window (`@tatou_shell_pane`) if still open, else `tmux new-window -t <session> -c <path>`, or a new session with just the shell; then switch to it |
 | `p` | Open PR | `gh pr view --web` |
 | `d` | Remove worktree | `git worktree remove`, then kill its session (confirm; force only if explicitly confirmed; never the main worktree; the branch stays) |
 | `a` | Add project | path dialog → write a project file in `projects/` (as `tatou add`) |
@@ -145,7 +145,7 @@ tmux -L tatou new-session -d -s <repo>-<name> -c <path> -e TATOU=1 -P -F '#{sess
 tmux -L tatou set-option -t <session_id> @tatou_path <path>
 tmux -L tatou set-option -t <session_id> @tatou_agent_pane <pane_id>
 ```
-Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`, comparing paths with symlinks resolved), never by parsing names; the dashboard's own `tatou` session is never a worktree's. Sessions are targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
+The shell `t` opens is tagged the same way, `@tatou_shell_pane`, so the next `t` goes back to it rather than opening another; a session `t` creates has just that shell and no agent pane. Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`, comparing paths with symlinks resolved), never by parsing names; the dashboard's own `tatou` session is never a worktree's. Sessions are targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
 
 ### 8.4 Agent status
 Agents report their own state by setting a tmux option; `$TMUX` inside a session points at the tatou server and session, `TATOU=1` makes it a no-op elsewhere.

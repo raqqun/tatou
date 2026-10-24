@@ -89,7 +89,8 @@ impl Server {
     /// Starts `command`, an agent, in a new detached session in `path`, named
     /// `name`, or `name-2`, `name-3`, … when taken; without a command, the default
     /// shell. `TATOU=1` in its environment lets the agent's hooks report to tatou;
-    /// `@tatou_path` tags it, and `@tatou_agent_pane` the agent's pane, if any.
+    /// `@tatou_path` tags it, and `@tatou_agent_pane` the agent's pane, or
+    /// without a command, `@tatou_shell_pane` the shell's.
     /// tmux runs `command` with its default shell, like any config command.
     pub fn new_session(
         &self,
@@ -131,11 +132,13 @@ impl Server {
         };
         // By id: `-t =<name>` is read as a pane here. Should this fail, the session
         // still matches its worktree by its start directory
-        let mut tags = vec!["set-option", "-t", id, "@tatou_path", &dir];
-        if command.is_some() {
-            tags.extend([";", "set-option", "-t", id, "@tatou_agent_pane", pane]);
-        }
-        self.run(&tags)?;
+        let pane_option = match command {
+            Some(_) => "@tatou_agent_pane",
+            None => "@tatou_shell_pane",
+        };
+        let tag_path = ["set-option", "-t", id, "@tatou_path", &dir];
+        let tag_pane = ["set-option", "-t", id, pane_option, pane];
+        self.run(&[&tag_path[..], &[";"], &tag_pane[..]].concat())?;
         Ok(NewSession {
             id: id.to_string(),
             name,
@@ -146,6 +149,26 @@ impl Server {
     /// Tags `pane` as `session`'s agent pane, for the agent's hooks and restarts.
     pub fn set_agent_pane(&self, session: &str, pane: &str) -> Result<()> {
         self.run(&["set-option", "-t", session, "@tatou_agent_pane", pane])?;
+        Ok(())
+    }
+
+    /// Tags `pane` as `session`'s shell, which `t` goes back to.
+    pub fn set_shell_pane(&self, session: &str, pane: &str) -> Result<()> {
+        self.run(&["set-option", "-t", session, "@tatou_shell_pane", pane])?;
+        Ok(())
+    }
+
+    /// `session`'s shell pane, `@tatou_shell_pane`; `None` when not set.
+    pub fn shell_pane(&self, session: &str) -> Result<Option<String>> {
+        let output = self.run(&["show-options", "-t", session, "-qv", "@tatou_shell_pane"])?;
+        let pane = output.stdout.trim_end();
+        Ok((!pane.is_empty()).then(|| pane.to_string()))
+    }
+
+    /// Makes `pane` the current one of its window, and that window its session's
+    /// current one. Fails with tmux's `can't find pane` when it is gone.
+    pub fn select_pane(&self, pane: &str) -> Result<()> {
+        self.run(&["select-window", "-t", pane, ";", "select-pane", "-t", pane])?;
         Ok(())
     }
 
