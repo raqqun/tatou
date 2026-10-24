@@ -122,7 +122,14 @@ fn dashboard() -> ExitCode {
         eprintln!("tatou: the dashboard runs inside tatou's tmux server; run `tatou` to start it");
         return ExitCode::FAILURE;
     }
-    not_implemented("--dashboard", 14)
+    match ui::run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            tracing::error!(%err, "dashboard failed");
+            eprintln!("tatou: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Placeholder until the command's own step fills it in.

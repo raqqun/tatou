@@ -200,6 +200,8 @@ Depends on: 1.10, 1.13
 - Event loop: `crossterm::event::poll` with a short timeout, then drain the refresh channel, then render.
 - `keys.rs` with an `Action` enum and the hard-coded default keymap from DESIGN §7; the UI dispatches actions, never raw keys (so 6.1 only adds overrides). Quit with `q` / `Ctrl-c`.
 - Layout frame: left pane, (empty) right pane, bottom hint bar.
+- Terminal handling is tatou's own (`ui/terminal.rs`) rather than `ratatui::init`, whose panic hook leaves mouse capture on. It restores once only: a second "leave alternate screen" after a panic moved the cursor back over the panic message. A panic in a background thread is logged instead of printed over the UI.
+- The loop waits up to 100 ms for input, applies updates, and redraws every tick. Every action has its `[keys]` name, a hint label and its pane; the hint bar lists the focused pane's actions. In debug builds, `TATOU_PANIC=1` panics after the first frame, for the restore check.
 
 **Done when**
 - After a forced panic in a debug build, the terminal is usable again.

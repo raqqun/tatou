@@ -55,8 +55,6 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 "#;
 
 /// The configuration, with defaults applied and paths resolved.
-// Not read yet beyond `tmux` and the model, itself unused until (#14)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Config {
     /// Where it was loaded from, shown in the UI's empty state.
@@ -105,8 +103,6 @@ pub struct Keys {
     pub actions: BTreeMap<String, String>,
 }
 
-// Not read yet beyond the model: the dashboard and worktree creation use it (#14, #21)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Project {
     /// Canonical when the directory exists, else as written with `~` expanded.
@@ -154,7 +150,7 @@ pub fn load() -> Result<Config> {
     load_from(&path, home.as_deref())
 }
 
-fn load_from(path: &Path, home: Option<&Path>) -> Result<Config> {
+pub fn load_from(path: &Path, home: Option<&Path>) -> Result<Config> {
     let text = fs::read_to_string(path).map_err(|source| Error::Io {
         path: path.to_path_buf(),
         source,
