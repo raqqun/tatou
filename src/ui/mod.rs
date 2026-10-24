@@ -1656,6 +1656,7 @@ unknown field `popop`, expected one of `popup`, `back`";
             agent_pane: None,
             path: path.into(),
             activity: NOW,
+            command: None,
         }
     }
 
@@ -1728,6 +1729,21 @@ unknown field `popop`, expected one of `popup`, `back`";
             ["● app-fix  app/fix", "● notes  ~/notes"],
             "its worktree, else its folder"
         );
+    }
+
+    #[test]
+    fn a_session_shows_what_runs_in_its_current_window() {
+        let running = |command: &str| tmux::Session {
+            command: Some(command.into()),
+            ..tmux_session("$1", "app-fix", "/code/app.worktrees/fix")
+        };
+        let mut app = with_sessions(vec![running("claude")]);
+        assert_eq!(sessions_pane(&mut app, 20), ["● app-fix  claude  app/fix"]);
+        // Another window, or another program: the next refresh says so
+        app.sources
+            .apply(Update::Sessions(Ok(vec![running("zsh")])));
+        app.update_view(NOW);
+        assert_eq!(sessions_pane(&mut app, 20), ["● app-fix  zsh  app/fix"]);
     }
 
     #[test]

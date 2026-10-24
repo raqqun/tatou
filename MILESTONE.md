@@ -422,6 +422,18 @@ Depends on: 2.4
 - git tests in a TempDir with a local "remote": `origin/HEAD` read, and its absence handled.
 - UI tests: the Base prefilled on a project row and on a worktree row, and for a detached worktree.
 
+### 2.13 Sessions pane shows the program in each session's current window (#93)
+
+Depends on: 2.9
+
+- Each row of the Sessions pane shows what runs in the session's current window, as tmux names its foreground program: `● app-fix  claude  app/fix`, `● notes  vim  ~/notes`.
+- Read with the sessions, in the same `list-panes -a` call: its format gains `#{window_active}`, `#{pane_active}` and `#{pane_current_command}`. Every window has an active pane; the session's is the one active in its current window. No new tmux command, no tag; it follows window switches within a refresh.
+- tmux names a program by its file, and Claude Code's file is named after its version (`~/.local/share/claude/versions/2.1.310`, started through the link `~/.local/bin/claude`), so `#{pane_current_command}` shows `2.1.310`. So the program comes from `ps -A -o pid=,ppid=,pgid=,tpgid=,tty=,args=`, once per refresh: for the current pane's terminal (`#{pane_tty}`), the leader of its foreground process group, or the leader's command in the group when the leader is a shell (`sh -c 'cd x && claude'`), by the name it was started under (its first argument, without folder or a login shell's `-`). `claude` typed by hand in a shell shows as `claude` too. Without `ps`, or nothing for that terminal, tmux's name.
+
+**Done when**
+- Parser tests on the captured `list-panes` fixture, extended with the four fields: the current window's active pane's program is the session's.
+- `TestBackend` test: the program shows between the name and the place.
+
 ---
 
 ## M3 — Status
