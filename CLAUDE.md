@@ -18,7 +18,7 @@ Read `DESIGN.md` before starting any feature. Its philosophy section is the deci
 - `serde` + `toml` for config; paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), macOS included, honouring `$XDG_*` when set
 - `thiserror` for errors, `tracing` + `tracing-subscriber` (`fmt` only) for logs (to `$XDG_STATE_HOME/tatou/tatou.log`, rotated at startup past 1 MiB, never to the terminal)
 - `std::thread` + `mpsc` for background work; no async runtime
-- External tools, called as commands: `git`, `tmux` ≥ 3.2 (required), `gh` (optional); notifications via `notify-send` (Linux) or `osascript` (macOS)
+- External tools, called as commands: `git`, `tmux` ≥ 3.2 (required), `gh` (optional), `ps` (POSIX, to name what runs in each pane); notifications via `notify-send` (Linux) or `osascript` (macOS)
 - Releases: GoReleaser with the Rust builder (`.goreleaser.yaml`); GitHub Actions, one file per workflow in `.github/workflows/` (`test.yaml`, `release.yaml`)
 
 Keep the dependency list short. Before adding a crate, check whether the standard library or one of the external tools already does the job.

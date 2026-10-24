@@ -61,6 +61,8 @@ pub struct SessionRow {
     pub id: String,
     pub name: String,
     pub status: Status,
+    /// What runs in its current window: `claude`, `zsh`.
+    pub command: Option<String>,
     /// What it is for: `project/worktree` when it belongs to one, else the
     /// folder it started in, with `~/`.
     pub place: String,
@@ -144,6 +146,7 @@ impl Sources {
             id: session.id.clone(),
             name: session.name.clone(),
             status: status(session, now),
+            command: session.command.clone(),
             place: match places.get(session.id.as_str()) {
                 Some(place) => place.clone(),
                 None => config::tilde(&session.path, home),
@@ -292,6 +295,7 @@ mod tests {
             agent_pane: None,
             path: path.into(),
             activity: NOW,
+            command: None,
         }
     }
 
