@@ -239,6 +239,7 @@ Depends on: 1.13, 1.15
 - `Refresh` starts listing new projects and stops removed ones; the selection is kept by path.
 - An invalid edit shows its error in the dashboard and keeps the last valid config, rather than emptying the screen.
 - `[tmux]` changes need `tatou` to be run again (the launcher regenerates `tmux.conf`); the dashboard says so instead of reloading the tmux server itself.
+- A worker in `refresh.rs` checks the modification time every 2 s and loads the file on a change, so the UI thread never reads it; the time is taken before the dashboard's own load, so an edit made meanwhile is not missed. Refresh now starts with an invalid config too, which recovers once fixed. The reload error shows on the Projects pane's bottom border, the reason first, as `config.toml: <reason> (line, column)`; the `[tmux]` notice is a hint-bar message, given once per change and not when `[tmux]` goes back to what tatou was launched with.
 
 **Done when**
 - Unit tests: a changed file is reloaded once, an unchanged one is not, an invalid one keeps the previous config and reports the error; new and removed projects start and stop their refresh.

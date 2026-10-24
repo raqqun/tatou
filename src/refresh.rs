@@ -1,22 +1,25 @@
 //! Background refresh: worker threads list tmux's sessions and each project's
-//! worktrees, and send the results to the UI loop over one channel.
+//! worktrees, watch `config.toml`, and send the results to the UI loop over one
+//! channel.
 //!
-//! One thread for tmux and one per project, so a slow or broken repository only
-//! delays itself. Each refreshes on its interval, or at once when woken (after
-//! tatou itself changed something). A worker ends quietly when the UI drops the
-//! receiving end, or drops `Refresh`.
+//! One thread for tmux, one per project, so a slow or broken repository only
+//! delays itself, and one for the config. Each refreshes on its interval, or at
+//! once when woken (after tatou itself changed something). A worker ends quietly
+//! when the UI drops the receiving end, or drops `Refresh`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use crate::config::{self, Config};
 use crate::git::{self, Worktree};
 use crate::tmux::{Server, Session};
 
 const SESSIONS_EVERY: Duration = Duration::from_secs(1);
 const WORKTREES_EVERY: Duration = Duration::from_secs(5);
+const CONFIG_EVERY: Duration = Duration::from_secs(2);
 
 /// A result from one source; it says what it is about, so sources never wait on
 /// each other. Errors are messages for the UI.
@@ -27,42 +30,63 @@ pub enum Update {
         project: PathBuf,
         result: Result<Vec<Worktree>, String>,
     },
+    /// `config.toml` changed and was loaded again.
+    Config(Result<Config, String>),
 }
 
 /// The running workers; dropping it stops them once their current command returns.
 pub struct Refresh {
+    /// For the workers of projects added later.
+    updates: Sender<Update>,
     sessions: Sender<()>,
     projects: HashMap<PathBuf, Sender<()>>,
+    /// Never woken; dropping it stops the config's worker.
+    _config: Sender<()>,
 }
 
 impl Refresh {
-    /// Starts listing `server`'s sessions and each project's worktrees, sending
-    /// every result to `updates`; the first ones come right away.
-    pub fn start(server: Server, projects: &[PathBuf], updates: &Sender<Update>) -> Refresh {
+    /// Starts listing `server`'s sessions and each project's worktrees, and
+    /// watching the config, sending every result to `updates`; the first sessions
+    /// and worktrees come right away.
+    pub fn start(
+        server: Server,
+        mut watch: ConfigWatch,
+        projects: &[PathBuf],
+        updates: &Sender<Update>,
+    ) -> Refresh {
         let mut last_error = None;
         let sessions = spawn("refresh-tmux", SESSIONS_EVERY, updates.clone(), move || {
             let result = server.sessions().map_err(|err| err.to_string());
             log_change(&mut last_error, &result, "tmux sessions");
-            Update::Sessions(result)
+            Some(Update::Sessions(result))
         });
-        let mut wakes = HashMap::new();
-        for project in projects {
-            let path = project.clone();
-            let what = path.display().to_string();
-            let mut last_error = None;
-            let wake = spawn("refresh-git", WORKTREES_EVERY, updates.clone(), move || {
-                let result = git::worktrees(&path).map_err(|err| err.to_string());
-                log_change(&mut last_error, &result, &what);
-                Update::Worktrees {
-                    project: path.clone(),
-                    result,
-                }
-            });
-            wakes.insert(project.clone(), wake);
-        }
-        Refresh {
+        let config = spawn("refresh-config", CONFIG_EVERY, updates.clone(), move || {
+            let result = watch.check()?;
+            match &result {
+                Ok(_) => tracing::info!("config reloaded"),
+                Err(err) => tracing::warn!(err, "config reload failed"),
+            }
+            Some(Update::Config(result))
+        });
+        let mut refresh = Refresh {
+            updates: updates.clone(),
             sessions,
-            projects: wakes,
+            projects: HashMap::new(),
+            _config: config,
+        };
+        refresh.set_projects(projects);
+        refresh
+    }
+
+    /// Lists `projects` from now on: starts the new ones and stops the ones gone.
+    pub fn set_projects(&mut self, projects: &[PathBuf]) {
+        // Dropping a project's wake-up sender ends its worker
+        self.projects.retain(|path, _| projects.contains(path));
+        for project in projects {
+            if !self.projects.contains_key(project) {
+                let wake = spawn_project(project.clone(), &self.updates);
+                self.projects.insert(project.clone(), wake);
+            }
         }
     }
 
@@ -84,12 +108,49 @@ impl Refresh {
     }
 }
 
+/// Notices that `config.toml` changed, by its modification time.
+pub struct ConfigWatch {
+    path: PathBuf,
+    seen: Option<SystemTime>,
+}
+
+impl ConfigWatch {
+    /// Watches `path`, as it was when modified at `seen`.
+    pub fn new(path: PathBuf, seen: Option<SystemTime>) -> ConfigWatch {
+        ConfigWatch { path, seen }
+    }
+
+    /// The file loaded again, when it changed since the last check.
+    fn check(&mut self) -> Option<Result<Config, String>> {
+        let modified = config::modified(&self.path);
+        if modified == self.seen {
+            return None;
+        }
+        self.seen = modified;
+        Some(config::reload(&self.path).map_err(|err| err.to_string()))
+    }
+}
+
+/// Starts the worker listing `project`'s worktrees; returns the sender that wakes it.
+fn spawn_project(project: PathBuf, updates: &Sender<Update>) -> Sender<()> {
+    let what = project.display().to_string();
+    let mut last_error = None;
+    spawn("refresh-git", WORKTREES_EVERY, updates.clone(), move || {
+        let result = git::worktrees(&project).map_err(|err| err.to_string());
+        log_change(&mut last_error, &result, &what);
+        Some(Update::Worktrees {
+            project: project.clone(),
+            result,
+        })
+    })
+}
+
 /// Starts a thread running `poll`, and returns the sender that wakes it.
 fn spawn(
     name: &str,
     interval: Duration,
     updates: Sender<Update>,
-    fetch: impl FnMut() -> Update + Send + 'static,
+    fetch: impl FnMut() -> Option<Update> + Send + 'static,
 ) -> Sender<()> {
     let (wake, woken) = mpsc::channel();
     let started = thread::Builder::new()
@@ -102,15 +163,18 @@ fn spawn(
 }
 
 /// Sends `fetch()` now, then again every `interval` or as soon as woken; several
-/// wake-ups waiting count as one. Returns when either channel is closed.
+/// wake-ups waiting count as one. `None` is nothing new to send. Returns when
+/// either channel is closed.
 fn poll(
     interval: Duration,
     woken: &Receiver<()>,
     updates: &Sender<Update>,
-    mut fetch: impl FnMut() -> Update,
+    mut fetch: impl FnMut() -> Option<Update>,
 ) {
     loop {
-        if updates.send(fetch()).is_err() {
+        if let Some(update) = fetch()
+            && updates.send(update).is_err()
+        {
             return;
         }
         match woken.recv_timeout(interval) {
@@ -143,11 +207,11 @@ mod tests {
     use crate::tmux::testing::TestServer;
 
     /// A fake source: each fetch sends the number of fetches so far as a session list.
-    fn counter() -> impl FnMut() -> Update {
+    fn counter() -> impl FnMut() -> Option<Update> {
         let mut n = 0;
         move || {
             n += 1;
-            Update::Sessions(Err(n.to_string()))
+            Some(Update::Sessions(Err(n.to_string())))
         }
     }
 
@@ -256,6 +320,7 @@ mod tests {
         let (updates, received) = mpsc::channel();
         let refresh = Refresh::start(
             Server::clone(&server),
+            ConfigWatch::new(dir.path().join("config.toml"), None),
             &[good.clone(), broken.clone()],
             &updates,
         );
@@ -277,8 +342,66 @@ mod tests {
                     assert!(err.contains("cannot change to"), "{err}");
                     seen.insert("missing".to_string(), true);
                 }
+                Update::Config(result) => panic!("no config, no change: {result:?}"),
             }
         }
         drop(refresh);
+    }
+
+    #[test]
+    fn new_projects_start_and_removed_ones_stop() {
+        let Some(server) = TestServer::new() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        let watch = ConfigWatch::new(dir.path().join("config.toml"), None);
+        let (updates, received) = mpsc::channel();
+        let mut refresh = Refresh::start(Server::clone(&server), watch, &[first], &updates);
+        refresh.set_projects(std::slice::from_ref(&second));
+        // The second project's worktrees come right away, though they fail
+        let listed = received.iter().find_map(|update| match update {
+            Update::Worktrees { project, .. } if project == second => Some(project),
+            _ => None,
+        });
+        assert_eq!(listed, Some(second.clone()));
+        // The first one's wake-up sender is gone, which ends its worker
+        let watched: Vec<_> = refresh.projects.keys().collect();
+        assert_eq!(watched, [&second]);
+    }
+
+    /// Writes `text` to `path`, dated `secs` after the epoch, so that two writes in
+    /// a row never share a modification time.
+    fn write_at(path: &Path, text: &str, secs: u64) {
+        fs::write(path, text).unwrap();
+        let file = fs::File::options().write(true).open(path).unwrap();
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        file.set_modified(time).unwrap();
+    }
+
+    #[test]
+    fn a_changed_config_is_loaded_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        write_at(&path, "", 1_000);
+        let mut watch = ConfigWatch::new(path.clone(), config::modified(&path));
+        assert!(
+            watch.check().is_none(),
+            "unchanged since the dashboard loaded it"
+        );
+
+        write_at(&path, "default_agent = \"codex\"\n", 2_000);
+        let config = watch.check().unwrap().unwrap();
+        assert_eq!(config.default_agent, "codex");
+        assert!(watch.check().is_none(), "loaded once");
+
+        write_at(&path, "popop = 1\n", 3_000);
+        let err = watch.check().unwrap().unwrap_err();
+        assert!(err.contains("unknown field `popop`"), "{err}");
+        assert!(watch.check().is_none(), "reported once");
+
+        fs::remove_file(&path).unwrap();
+        let err = watch.check().unwrap().unwrap_err();
+        assert!(err.contains("No such file"), "{err}");
     }
 }

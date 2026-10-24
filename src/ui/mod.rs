@@ -15,11 +15,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, Tmux};
 use crate::error::{Error, Result};
 use crate::keys::{Action, Key, Keymap, Pane};
 use crate::model::{Sources, WorktreeView};
-use crate::refresh::{Refresh, Update};
+use crate::refresh::{ConfigWatch, Refresh, Update};
 use crate::tmux::{self, Server};
 use projects::Tree;
 
@@ -37,21 +37,24 @@ const WORKTREE_ACTIONS: [Action; 5] = [
 
 /// Runs the dashboard until the user quits.
 pub fn run() -> Result<()> {
+    let path = config::path()?;
+    // Before loading, so that a change made meanwhile is loaded again
+    let seen = config::modified(&path);
     let config = config::load().map_err(|err| err.to_string());
     let (updates, received) = mpsc::channel();
     let server = Server::tatou(&tmux::conf_path()?);
-    // Dropped when the dashboard ends, which stops the workers
-    let _refresh = match &config {
-        Ok(config) => {
-            let projects: Vec<PathBuf> = config.projects.iter().map(|p| p.path.clone()).collect();
-            Some(Refresh::start(server.clone(), &projects, &updates))
-        }
-        Err(_) => None,
+    let projects = match &config {
+        Ok(config) => project_paths(config),
+        Err(_) => Vec::new(),
     };
+    let watch = ConfigWatch::new(path, seen);
+    let refresh = Refresh::start(server.clone(), watch, &projects, &updates);
     let (failures, failed) = mpsc::channel();
 
     let (mut terminal, _guard) = terminal::enter().map_err(Error::Terminal)?;
     let mut app = App::new(config);
+    // Dropped with the app when the dashboard ends, which stops the workers
+    app.refresh = Some(refresh);
     // Debug builds only: checks that a panic leaves the terminal usable
     let panic_after_first_frame =
         cfg!(debug_assertions) && std::env::var_os("TATOU_PANIC").is_some();
@@ -84,8 +87,14 @@ enum Task {
 }
 
 struct App {
-    /// The error is shown in place of the projects.
+    /// The error is shown in place of the projects, until a valid config is loaded.
     config: std::result::Result<Config, String>,
+    /// Why the config could not be loaded again; the last valid one stays meanwhile.
+    reload_error: Option<String>,
+    /// The `[tmux]` that `tmux.conf` was generated from, at launch.
+    launched_tmux: Option<Tmux>,
+    /// `None` in tests.
+    refresh: Option<Refresh>,
     sources: Sources,
     tree: Tree,
     keymap: Keymap,
@@ -100,7 +109,10 @@ struct App {
 impl App {
     fn new(config: std::result::Result<Config, String>) -> App {
         App {
+            launched_tmux: config.as_ref().ok().map(|config| config.tmux.clone()),
             config,
+            reload_error: None,
+            refresh: None,
             sources: Sources::default(),
             tree: Tree::default(),
             keymap: Keymap::defaults(),
@@ -127,11 +139,37 @@ impl App {
     /// Applies every update and task failure that has arrived, without waiting for more.
     fn apply_all(&mut self, received: &Receiver<Update>, failed: &Receiver<String>) {
         while let Ok(update) = received.try_recv() {
-            self.sources.apply(update);
+            match update {
+                Update::Config(result) => self.reload(result),
+                update => self.sources.apply(update),
+            }
         }
         while let Ok(failure) = failed.try_recv() {
             self.message = Some(failure);
         }
+    }
+
+    /// Takes the config loaded again after it changed; an invalid one keeps the
+    /// last valid one on screen.
+    fn reload(&mut self, result: std::result::Result<Config, String>) {
+        let config = match result {
+            Ok(config) => config,
+            Err(err) if self.config.is_ok() => return self.reload_error = Some(err),
+            Err(err) => return self.config = Err(err),
+        };
+        // Only the launcher writes tmux.conf, and reloads the server with it
+        let launched = self
+            .launched_tmux
+            .get_or_insert_with(|| config.tmux.clone());
+        let previous = self.config.as_ref().ok().map(|config| &config.tmux);
+        if config.tmux != *launched && previous != Some(&config.tmux) {
+            self.message = Some("[tmux] changed: run `tatou` again to apply it".to_string());
+        }
+        if let Some(refresh) = &mut self.refresh {
+            refresh.set_projects(&project_paths(&config));
+        }
+        self.config = Ok(config);
+        self.reload_error = None;
     }
 
     /// Rebuilds the left pane from the latest sources; `now` dates agents' activity.
@@ -199,11 +237,15 @@ impl App {
         frame.render_widget(self.hint_bar(), hints);
     }
 
-    /// The projects, else why there are none; a tmux error at the bottom.
+    /// The projects, else why there are none; reload and tmux errors at the bottom.
     fn render_projects(&mut self, frame: &mut Frame, area: Rect) {
         let mut block = self.pane_block(" Projects ", Pane::Worktrees);
+        let style = Style::new().fg(Color::Red);
+        if let (Some(err), Ok(config)) = (&self.reload_error, &self.config) {
+            let err = one_line(err, &config.path);
+            block = block.title_bottom(Line::styled(format!(" config.toml: {err} "), style));
+        }
         if let Some(err) = self.sources.sessions_error() {
-            let style = Style::new().fg(Color::Red);
             block = block.title_bottom(Line::styled(format!(" {err} "), style));
         }
         let message = match &self.config {
@@ -242,6 +284,31 @@ impl App {
             spans.push(Span::raw(format!(" {label}")));
         }
         Paragraph::new(Line::from(spans))
+    }
+}
+
+fn project_paths(config: &Config) -> Vec<PathBuf> {
+    config.projects.iter().map(|p| p.path.clone()).collect()
+}
+
+/// A config error in one line, for a border, where it may be cut: without the
+/// file's path, and from a TOML error, why and then where, leaving out the excerpt.
+/// toml's errors start with `TOML parse error at <position>` and end with the reason.
+fn one_line(err: &str, path: &std::path::Path) -> String {
+    let prefix = format!("{}: ", path.display());
+    let err = err.strip_prefix(&prefix).unwrap_or(err);
+    let lines: Vec<&str> = err
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    match lines[..] {
+        [first, .., last] => {
+            let position = first.strip_prefix("TOML parse error at ").unwrap_or(first);
+            format!("{last} ({position})")
+        }
+        [only] => only.to_string(),
+        [] => String::new(),
     }
 }
 
@@ -561,6 +628,92 @@ mod tests {
         assert!(hint_line(&mut app).starts_with("⏎ jump  n new"), "session");
         press(&mut app, KeyCode::Tab);
         assert!(hint_line(&mut app).starts_with("e edit"), "files");
+    }
+
+    /// Applies `result` as if `config.toml` had just been loaded again.
+    fn reload(app: &mut App, result: std::result::Result<Config, String>) {
+        let (updates, received) = mpsc::channel();
+        let (_failures, failed) = mpsc::channel();
+        updates.send(Update::Config(result)).unwrap();
+        app.apply_all(&received, &failed);
+    }
+
+    const TOML_ERROR: &str = "/c/config.toml: TOML parse error at line 4, column 1
+  |
+4 | popop = \"M-g\"
+  | ^^^^^
+unknown field `popop`, expected one of `popup`, `back`";
+
+    #[test]
+    fn an_invalid_reload_keeps_the_last_config_and_shows_why() {
+        let mut config = test_config();
+        config.path = "/c/config.toml".into();
+        let mut app = showing(vec![project("/code/app", &[])]);
+        app.config = Ok(config);
+        reload(&mut app, Err(TOML_ERROR.into()));
+        assert!(app.config.is_ok());
+        let lines = screen(&mut app, 200, 5);
+        assert!(lines[1].starts_with("│▾ app"), "still listed: {lines:?}");
+        assert!(
+            // Cut at the pane's width
+            lines[3].starts_with("└ config.toml: unknown field `popop`, expected one of"),
+            "{lines:?}"
+        );
+        // Fixed: the error goes away
+        reload(&mut app, Ok(test_config()));
+        assert_eq!(app.reload_error, None);
+        assert!(screen(&mut app, 200, 5)[3].starts_with("└──"));
+    }
+
+    #[test]
+    fn a_valid_config_replaces_an_invalid_one() {
+        let mut app = App::new(Err("config.toml: broken".into()));
+        reload(&mut app, Err("config.toml: still broken".into()));
+        assert_eq!(
+            app.config.as_ref().err().map(String::as_str),
+            Some("config.toml: still broken")
+        );
+        reload(&mut app, Ok(test_config()));
+        assert!(app.config.is_ok());
+        assert_eq!(app.reload_error, None);
+    }
+
+    #[test]
+    fn a_tmux_change_says_to_run_tatou_again_once() {
+        let mut app = App::new(Ok(test_config()));
+        reload(&mut app, Ok(test_config()));
+        assert_eq!(app.message, None, "nothing changed");
+
+        let changed = || {
+            let mut config = test_config();
+            config.tmux.back = "M-b".into();
+            config
+        };
+        reload(&mut app, Ok(changed()));
+        let expected = "[tmux] changed: run `tatou` again to apply it";
+        assert_eq!(app.message.as_deref(), Some(expected));
+        app.message = None;
+        reload(&mut app, Ok(changed()));
+        assert_eq!(app.message, None, "said once");
+        // Back to what tmux.conf has: nothing to apply
+        reload(&mut app, Ok(test_config()));
+        assert_eq!(app.message, None);
+    }
+
+    #[test]
+    fn config_errors_fit_on_one_line() {
+        let path = std::path::Path::new("/c/config.toml");
+        assert_eq!(
+            one_line(TOML_ERROR, path),
+            "unknown field `popop`, expected one of `popup`, `back` (line 4, column 1)"
+        );
+        assert_eq!(
+            one_line(
+                "/c/config.toml: No such file or directory (os error 2)",
+                path
+            ),
+            "No such file or directory (os error 2)"
+        );
     }
 
     fn test_config() -> Config {
