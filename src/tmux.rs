@@ -1,6 +1,7 @@
 //! tatou's own tmux server: its generated `tmux.conf`, sessions, options,
 //! switch/popup/window/send-keys, and output parsing.
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -24,7 +25,15 @@ const MIN_VERSION: (u32, u32) = (3, 2);
 /// The fields `sessions` reads for each pane, tab-separated; empty when an option is
 /// not set. Panes rather than sessions, because only a window's activity follows the
 /// output of its panes: `session_activity` changes on keyboard input alone.
-const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_start_command}";
+const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}";
+
+/// What `ps` lists of each process, to tell what runs in the foreground of each
+/// pane's terminal; the same columns on Linux and macOS.
+const PS_ARGS: [&str; 3] = ["-A", "-o", "pid=,ppid=,pgid=,tpgid=,tty=,args="];
+
+/// Shells: in the foreground of a pane with a command of theirs in the same
+/// group (`sh -c 'cd x && claude'`), that command is what runs.
+const SHELLS: [&str; 8] = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh"];
 
 /// A tmux server: every command sent to it is `tmux -u -L <socket> -f <conf> …`.
 /// `-u` makes tmux print UTF-8 whatever the locale; without it, tabs and non-ASCII
@@ -184,7 +193,7 @@ impl Server {
     /// Every session on the server, sorted by name; none when the server is not running.
     pub fn sessions(&self) -> Result<Vec<Session>> {
         match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
-            Ok(output) => Ok(parse_sessions(&output.stdout)),
+            Ok(output) => Ok(parse_sessions(&output.stdout, &foreground_programs())),
             Err(Error::Command { stderr, .. }) if no_server(&stderr) => Ok(Vec::new()),
             Err(err) => Err(err),
         }
@@ -208,9 +217,9 @@ pub struct Session {
     /// When the agent's window last printed, in seconds since the Unix epoch; for a
     /// session without an agent pane, its most recent window.
     pub activity: u64,
-    /// What runs in its current window's active pane: the program tmux names
-    /// (`zsh`, `vim`), or in the agent's pane, the agent's program from the command
-    /// it was started with (`claude`), as an agent may rename its process.
+    /// What runs in the foreground of its current window's active pane, by the
+    /// name it was started under (`claude`, `zsh`, `vim`), as a program's own name
+    /// may differ: Claude Code's executable is named after its version.
     pub command: Option<String>,
 }
 
@@ -250,7 +259,7 @@ fn no_server(stderr: &str) -> bool {
 /// Parses `list-panes -a -F PANE_FORMAT` output into sessions, in the order they
 /// first appear. A line in another shape, such as one with a tab or a newline inside
 /// a path, is skipped so the other sessions still show.
-fn parse_sessions(text: &str) -> Vec<Session> {
+fn parse_sessions(text: &str, programs: &HashMap<String, String>) -> Vec<Session> {
     // Each session with its panes
     let mut sessions: Vec<(Session, Vec<Pane>)> = Vec::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
@@ -278,13 +287,9 @@ fn parse_sessions(text: &str) -> Vec<Session> {
         };
         let current = panes.iter().find(|pane| pane.current);
         session.command = current.and_then(|pane| {
-            // Claude Code, for one, names its process after its version
-            let agent = session.agent_pane.as_ref() == Some(&pane.id);
-            let started = pane.start_command.as_deref().and_then(program);
-            match (agent, started) {
-                (true, Some(program)) => Some(program),
-                _ => pane.command.clone(),
-            }
+            let tty = pane.tty.trim_start_matches("/dev/");
+            // tmux's own name for it, when ps had nothing to say
+            programs.get(tty).cloned().or_else(|| pane.command.clone())
         });
         result.push(session);
     }
@@ -299,14 +304,13 @@ struct Pane {
     /// The active pane of the session's current window.
     current: bool,
     command: Option<String>,
-    /// What tmux started it with, as `#{pane_start_command}` prints it.
-    start_command: Option<String>,
+    /// Its terminal: `/dev/ttys012`, `/dev/pts/3`.
+    tty: String,
 }
 
 /// One line: the pane's session (its activity and command not set yet) and the pane.
 fn parse_pane(line: &str) -> Option<(Session, Pane)> {
-    // The start command comes last: a tab in it stays in it
-    let fields: Vec<&str> = line.splitn(12, '\t').collect();
+    let fields: Vec<&str> = line.split('\t').collect();
     let [
         id,
         name,
@@ -319,7 +323,7 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         window_active,
         pane_active,
         command,
-        start_command,
+        tty,
     ] = fields[..]
     else {
         return None;
@@ -341,56 +345,82 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         // Each window has an active pane: the current one is the current window's
         current: window_active == "1" && pane_active == "1",
         command: set(command),
-        start_command: set(start_command),
+        tty: tty.to_string(),
     };
     Some((session, pane))
 }
 
-/// The program a pane's start command runs, without its folder: `claude` from
-/// `"claude --verbose"` or `"FOO=1 exec '/opt/my tools/claude'"`. tmux prints a
-/// command given as one string in double quotes, and one given as several
-/// arguments without them; the shell in it is read only this far: words, quotes,
-/// and leading `NAME=value` and `exec`.
-fn program(start_command: &str) -> Option<String> {
-    let command = match start_command
-        .strip_prefix('"')
-        .and_then(|c| c.strip_suffix('"'))
-    {
-        Some(quoted) => quoted.replace("\\\"", "\""),
-        None => start_command.to_string(),
-    };
-    let mut rest = command.as_str();
-    loop {
-        let (word, after) = shell_word(rest)?;
-        rest = after;
-        if word == "exec" || word.contains('=') {
-            continue;
+/// What runs in the foreground of each terminal, by terminal (`ttys012`): see
+/// `parse_processes`. None when `ps` cannot be run; tmux's names stand in then.
+fn foreground_programs() -> HashMap<String, String> {
+    match exec::run("ps", &PS_ARGS, None) {
+        Ok(output) => parse_processes(&output.stdout),
+        Err(err) => {
+            tracing::debug!(%err, "ps failed: tmux names the programs");
+            HashMap::new()
         }
-        let name = Path::new(&word).file_name()?.to_string_lossy().into_owned();
-        return (!name.is_empty()).then_some(name);
     }
 }
 
-/// The first word of `text`, its quotes taken off, and what follows it.
-fn shell_word(text: &str) -> Option<(String, &str)> {
-    let text = text.trim_start();
-    let mut word = String::new();
-    let mut chars = text.char_indices();
-    while let Some((at, c)) = chars.next() {
-        match c {
-            ' ' | '\t' => return Some((word, &text[at..])),
-            '\'' | '"' => {
-                for (_, inner) in chars.by_ref() {
-                    if inner == c {
-                        break;
-                    }
-                    word.push(inner);
-                }
-            }
-            c => word.push(c),
-        }
+/// A process from `ps`.
+struct Process {
+    pid: u32,
+    ppid: u32,
+    pgid: u32,
+    /// The foreground process group of its terminal.
+    tpgid: u32,
+    tty: String,
+    /// The name it was started under, its first argument, without its folder, or
+    /// a login shell's leading `-`.
+    program: String,
+}
+
+/// Parses `ps PS_ARGS` into each terminal's foreground program: the leader of its
+/// foreground process group, or when that is a shell running a command of its own
+/// in the group, that command. By the name each was started under, which a
+/// program's file may not have: Claude Code's executable is named after its
+/// version, its link `claude`.
+fn parse_processes(text: &str) -> HashMap<String, String> {
+    let processes: Vec<Process> = text.lines().filter_map(parse_process).collect();
+    let mut programs = HashMap::new();
+    for leader in processes.iter().filter(|p| p.pid == p.tpgid) {
+        let child = processes
+            .iter()
+            .find(|p| p.ppid == leader.pid && p.pgid == leader.pgid);
+        let program = match child {
+            Some(child) if SHELLS.contains(&leader.program.as_str()) => &child.program,
+            _ => &leader.program,
+        };
+        programs.insert(leader.tty.clone(), program.clone());
     }
-    (!word.is_empty()).then_some((word, ""))
+    programs
+}
+
+/// One line of `ps`: five numbers and names, then the command line; none for a
+/// process without a terminal (`??` on macOS, `?` on Linux).
+fn parse_process(line: &str) -> Option<Process> {
+    let mut rest = line;
+    let mut field = || {
+        let trimmed = rest.trim_start();
+        let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        rest = &trimmed[end..];
+        Some(&trimmed[..end]).filter(|f| !f.is_empty())
+    };
+    let (pid, ppid, pgid, tpgid) = (field()?, field()?, field()?, field()?);
+    let tty = field()?;
+    let first = field()?;
+    if tty.starts_with('?') || tty == "-" {
+        return None;
+    }
+    let name = Path::new(first.trim_start_matches('-')).file_name()?;
+    Some(Process {
+        pid: pid.parse().ok()?,
+        ppid: ppid.parse().ok()?,
+        pgid: pgid.parse().ok()?,
+        tpgid: tpgid.parse().ok()?,
+        tty: tty.to_string(),
+        program: name.to_string_lossy().into_owned(),
+    })
 }
 
 /// Any value other than the three statuses counts as not set.
@@ -871,6 +901,7 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     #[test]
     fn parses_sessions_from_their_panes() {
         let text = include_str!("../tests/fixtures/tmux/panes.txt");
+        let programs = parse_processes(include_str!("../tests/fixtures/ps/processes.txt"));
         let plain = |id: &str, name: &str, path: &str, activity, command: &str| Session {
             id: id.into(),
             name: name.into(),
@@ -895,7 +926,7 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
             },
             // Its agent's window, not the shell window opened later, and what runs
             // in the active pane of its current window: vim in a split of the shell's.
-            // api-docs' agent, current, renamed its process `2.1.310`: its command says claude
+            // api-docs' agent, tmux's `2.1.310`, runs as claude
             created("$1", "my-app-fix login", login, "%1", 1792793302, "vim"),
             // No agent pane: its most recent window
             plain(
@@ -907,7 +938,13 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
             ),
             plain("$0", "tatou", "/home/me", 1792793302, "tatou"),
         ];
-        assert_eq!(parse_sessions(text), expected);
+        assert_eq!(parse_sessions(text, &programs), expected);
+        // Without ps, tmux's names
+        let names: Vec<_> = parse_sessions(text, &HashMap::new())
+            .into_iter()
+            .map(|s| s.command.unwrap())
+            .collect();
+        assert_eq!(names, ["2.1.310", "vim", "less", "tatou"]);
     }
 
     #[test]
@@ -916,41 +953,50 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
 $1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh\t
 $1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t
 ";
-        assert_eq!(parse_sessions(text)[0].activity, 200);
+        assert_eq!(parse_sessions(text, &HashMap::new())[0].activity, 200);
     }
 
     #[test]
-    fn an_agent_pane_without_a_start_command_shows_its_process() {
-        // An agent pane tagged by hand: tmux started a shell there
-        let text = "$1\tapp\t/a\t\t%1\t/a\t%1\t100\t1\t1\t2.1.310\t\n";
-        assert_eq!(parse_sessions(text)[0].command.as_deref(), Some("2.1.310"));
-        // A tab in the start command stays in it
-        let text = "$1\tapp\t/a\t\t%1\t/a\t%1\t100\t1\t1\t2.1.310\t\"claude\targ\"\n";
-        assert_eq!(parse_sessions(text)[0].command.as_deref(), Some("claude"));
+    fn each_terminal_runs_its_foreground_program_by_the_name_it_was_started_under() {
+        let programs = parse_processes(include_str!("../tests/fixtures/ps/processes.txt"));
+        let program = |tty: &str| programs.get(tty).map(String::as_str);
+        // A link named claude, to a file named after its version
+        assert_eq!(
+            program("ttys002"),
+            Some("claude"),
+            "not its helper in the group"
+        );
+        assert_eq!(program("ttys001"), Some("claude"));
+        // A login shell's job in the foreground, and the login shell at its prompt
+        assert_eq!(program("ttys005"), Some("vim"));
+        assert_eq!(program("ttys004"), Some("zsh"));
+        // A shell running a command of its own in the same group
+        assert_eq!(program("ttys003"), Some("claude"));
+        assert_eq!(program("ttys006"), Some("less"));
+        assert_eq!(program("ttys000"), Some("tatou"));
+        // Seven terminals: the processes without one, as launchd, name none
+        assert_eq!(programs.len(), 7);
     }
 
     #[test]
-    fn the_program_of_a_start_command() {
-        let cases = [
-            ("\"claude\"", Some("claude")),
-            ("\"claude --verbose\"", Some("claude")),
-            ("\"FOO=1 exec /usr/local/bin/codex\"", Some("codex")),
-            ("\"'/opt/my tools/claude' --verbose\"", Some("claude")),
-            ("\"\\\"/usr/bin/aider\\\" --yes\"", Some("aider")),
-            // Given as separate arguments: no quotes around it
-            ("sleep 4000", Some("sleep")),
-            ("\"uvx aider-chat\"", Some("uvx")),
-            ("\"\"", None),
-            ("", None),
-        ];
-        for (start, expected) in cases {
-            assert_eq!(program(start).as_deref(), expected, "{start}");
-        }
+    fn a_program_started_through_a_link_goes_by_the_links_name() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        // As Claude Code: tmux names the file, ps the link it was started through
+        let link = dir.path().join("claude");
+        std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
+        let command = format!("{} 1000", link.display());
+        server
+            .new_session("app", dir.path(), Some(&command))
+            .unwrap();
+        let sessions = server.sessions().unwrap();
+        assert_eq!(sessions[0].command.as_deref(), Some("claude"));
     }
 
     #[test]
     fn no_output_is_no_sessions() {
-        assert_eq!(parse_sessions(""), []);
+        assert_eq!(parse_sessions("", &HashMap::new()), []);
     }
 
     #[test]
@@ -961,7 +1007,10 @@ $1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh\t
 $2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh\t
 $3\tshort\t/home/me
 ";
-        let names: Vec<_> = parse_sessions(text).into_iter().map(|s| s.name).collect();
+        let names: Vec<_> = parse_sessions(text, &HashMap::new())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
         assert_eq!(names, ["tatou"]);
     }
 
