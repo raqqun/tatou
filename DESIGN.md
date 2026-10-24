@@ -92,7 +92,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 |---|---|---|
 | `Enter` | Jump to agent | `tmux switch-client -t <session>` |
 | `n` | New worktree | dialog → `git worktree add`, `on_create`, `tmux new-session` |
-| `s` | Start / restart agent | `tmux new-session` / `respawn-pane` |
+| `s` | Start / restart agent | choose the agent → `tmux new-session`, or confirm → `respawn-pane -k` on the agent's pane (a new window when it has none or it is gone) |
 | `t` | Open shell in worktree | `tmux new-window -t <session> -c <path>` |
 | `p` | Open PR | `gh pr view --web` |
 | `d` | Remove worktree | kill session, `git worktree remove` (confirm; force only if explicitly confirmed) |
