@@ -328,6 +328,7 @@ Depends on: 2.1, 2.2, 2.3
 - Runs on a background thread: `git worktree add` → `on_create` via `run_sh` in the new worktree (if set) → `new-session` with the agent command → set options. Progress shown; the UI stays responsive.
 - `on_create` failure: show its output, keep the worktree, still start the session.
 - The new worktree is selected when it appears.
+- The sequence lives in `actions.rs` (the commands behind each action, run on threads of their own), which reports events to the UI: progress, git's refusal, the worktree added, `on_create` failed, the agent started, a failure. The form stays open and busy until git answers; a refusal shows git's message in the form, to fix and confirm again. Once added, the form closes and progress shows in the hint bar until the agent runs. A failed `on_create` opens a message with its output. The worktrees' and sessions' refresh is woken after each.
 
 **Done when**
 - Manual check documented in the PR; unit test for the step sequencing with failures injected where practical.

@@ -48,8 +48,6 @@ pub fn main_worktree(dir: &Path) -> Result<PathBuf> {
 /// Where a new worktree goes: `<worktree_dir>/<name>` when the project sets
 /// `worktree_dir`, else `<repo>.worktrees/<name>` next to the repository. A `/` in
 /// the branch name becomes `-`, so every worktree is a direct child of the folder.
-// Not called yet: the new-worktree dialog uses it (#21)
-#[allow(dead_code)]
 pub fn worktree_path(repo: &Path, name: &str, worktree_dir: Option<&Path>) -> PathBuf {
     let folder = name.replace('/', "-");
     match worktree_dir {
@@ -65,8 +63,6 @@ pub fn worktree_path(repo: &Path, name: &str, worktree_dir: Option<&Path>) -> Pa
 /// Creates the worktree `path` of `repo` on a new branch `name`, starting from
 /// `base`, or from the branch checked out in the main worktree. The name is checked
 /// first; git's message comes back as is when it refuses, e.g. a branch that exists.
-// Not called yet: the new-worktree dialog uses it (#21)
-#[allow(dead_code)]
 pub fn add(repo: &Path, name: &str, base: Option<&str>, path: &Path) -> Result<()> {
     check_branch_name(repo, name)?;
     let (repo, path) = (repo.to_string_lossy(), path.to_string_lossy());

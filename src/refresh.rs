@@ -91,16 +91,12 @@ impl Refresh {
     }
 
     /// Lists the sessions again now, e.g. after tatou started one.
-    // Not called yet: starting an agent wakes it (#19)
-    #[allow(dead_code)]
     pub fn sessions_now(&self) {
         // A worker that ended has nothing left to refresh
         let _ = self.sessions.send(());
     }
 
     /// Lists `project`'s worktrees again now, e.g. after tatou added one.
-    // Not called yet: adding a worktree wakes it (#21)
-    #[allow(dead_code)]
     pub fn worktrees_now(&self, project: &Path) {
         if let Some(wake) = self.projects.get(project) {
             let _ = wake.send(());

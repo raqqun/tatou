@@ -55,6 +55,33 @@ impl Tree {
         project.worktrees.iter().find(|w| &w.path == path)
     }
 
+    /// The selected row's project.
+    pub fn selected_project(&self) -> Option<&ProjectView> {
+        let path = match self.selected.as_ref()? {
+            Row::Project(path) | Row::Worktree { project: path, .. } => path,
+        };
+        self.view.iter().find(|p| &p.path == path)
+    }
+
+    /// Selects the worktree at `path`, unfolding its project; false when it is not
+    /// listed (yet).
+    pub fn select_worktree(&mut self, path: &std::path::Path) -> bool {
+        let project = self
+            .view
+            .iter()
+            .find(|p| p.worktrees.iter().any(|w| w.path == path));
+        let Some(project) = project.map(|p| p.path.clone()) else {
+            return false;
+        };
+        self.collapsed.remove(&project);
+        self.selected = Some(Row::Worktree {
+            project,
+            path: path.to_path_buf(),
+        });
+        self.reselect();
+        true
+    }
+
     /// Folds or unfolds the selected project.
     pub fn toggle(&mut self) {
         if let Some(Row::Project(path)) = &self.selected

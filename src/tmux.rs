@@ -90,8 +90,6 @@ impl Server {
     /// `name-2`, `name-3`, … when taken. `TATOU=1` in its environment lets the
     /// agent's hooks report to tatou; `@tatou_path` and `@tatou_agent_pane` tag it.
     /// tmux runs `command` with its default shell, like any config command.
-    // Not called yet: starting an agent uses it (#21, #22)
-    #[allow(dead_code)]
     pub fn new_session(&self, name: &str, path: &Path, command: &str) -> Result<NewSession> {
         let dir = path.to_string_lossy();
         let mut n = 1;
@@ -205,8 +203,6 @@ pub struct Session {
 }
 
 /// A session `Server::new_session` started.
-// Not read yet: starting an agent uses it (#21, #22)
-#[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct NewSession {
     /// `$3`: the target for commands.
@@ -219,8 +215,6 @@ pub struct NewSession {
 /// The session name for worktree `name` of the repository named `repo`:
 /// `<repo>-<name>`. `.` and `:` become `-`: tmux accepts them in names, but reads
 /// them in targets as window and pane separators, so `tmux attach -t` would fail.
-// Not called yet: starting an agent uses it (#21, #22)
-#[allow(dead_code)]
 pub fn session_name(repo: &str, name: &str) -> String {
     format!("{repo}-{name}").replace(['.', ':'], "-")
 }

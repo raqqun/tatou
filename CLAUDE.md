@@ -40,6 +40,7 @@ src/
   files.rs    # file tree for a worktree (ignore walk + git markers)
   model.rs    # merges config + git + tmux + gh into what the UI shows
   refresh.rs  # background worker threads feeding the UI loop over a channel
+  actions.rs  # the commands behind each action, on threads of their own, reporting events
   keys.rs     # keymap: defaults, config overrides, action dispatch
   ui/         # ratatui rendering and input handling only
 tests/fixtures/  # captured git/tmux/gh outputs used by parser tests

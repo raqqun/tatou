@@ -51,8 +51,6 @@ pub fn run(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output> {
 
 /// Runs `script` with `sh -c`. Only for commands the user wrote in the config, with
 /// any substituted values passed through `shell_quote`.
-// Not called yet: `on_create` uses it (#21)
-#[allow(dead_code)]
 pub fn run_sh(script: &str, cwd: Option<&Path>) -> Result<Output> {
     run("sh", &["-c", script], cwd)
 }

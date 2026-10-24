@@ -4,9 +4,8 @@ mod dialog;
 mod projects;
 mod terminal;
 
-use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{self, Event, KeyEventKind};
@@ -16,13 +15,15 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
+use crate::actions::{self, NewWorktree, Task};
 use crate::config::{self, Config, Tmux};
 use crate::error::{Error, Result};
+use crate::git;
 use crate::keys::{Action, Key, Keymap, Pane};
 use crate::model::{Sources, WorktreeView};
 use crate::refresh::{ConfigWatch, Refresh, Update};
 use crate::tmux::{self, Server};
-use dialog::{Dialog, Outcome};
+use dialog::{Dialog, Field, Form, Message, Outcome};
 use projects::Tree;
 
 /// How long to wait for input before applying updates and drawing again.
@@ -51,7 +52,7 @@ pub fn run() -> Result<()> {
     };
     let watch = ConfigWatch::new(path, seen);
     let refresh = Refresh::start(server.clone(), watch, &projects, &updates);
-    let (failures, failed) = mpsc::channel();
+    let (events, happened) = mpsc::channel();
 
     let (mut terminal, _guard) = terminal::enter().map_err(Error::Terminal)?;
     let mut app = App::new(config);
@@ -71,9 +72,9 @@ pub fn run() -> Result<()> {
             app.input(event::read().map_err(Error::Terminal)?);
         }
         for task in app.tasks.drain(..) {
-            start(task, &server, &failures);
+            actions::start(task, &server, &events);
         }
-        app.apply_all(&received, &failed);
+        app.apply_all(&received, &happened);
         app.update_view(unix_now());
         if app.quit {
             return Ok(());
@@ -81,11 +82,18 @@ pub fn run() -> Result<()> {
     }
 }
 
-/// A command the UI asks for; the loop runs it on a thread of its own.
-#[derive(Debug, PartialEq)]
-enum Task {
-    /// Shows the session with this id in the dashboard's client.
-    Switch(String),
+/// An open dialog, and what its answer is for.
+struct Open {
+    dialog: Dialog,
+    purpose: Purpose,
+}
+
+enum Purpose {
+    NewWorktree {
+        project: PathBuf,
+    },
+    /// Only to read, e.g. a command's output.
+    Notice,
 }
 
 struct App {
@@ -102,9 +110,13 @@ struct App {
     keymap: Keymap,
     focus: Pane,
     /// Takes the keys while open; drawn over the panes.
-    dialog: Option<Dialog>,
+    dialog: Option<Open>,
     /// Shown in place of the hints until the next key press.
     message: Option<String>,
+    /// What a background action is doing, shown in place of the hints until it ends.
+    progress: Option<String>,
+    /// A worktree to select as soon as it is listed: the one just created.
+    select_when_listed: Option<PathBuf>,
     /// Asked for since the loop last took them.
     tasks: Vec<Task>,
     quit: bool,
@@ -123,6 +135,8 @@ impl App {
             focus: Pane::Worktrees,
             dialog: None,
             message: None,
+            progress: None,
+            select_when_listed: None,
             tasks: Vec::new(),
             quit: false,
         }
@@ -136,9 +150,10 @@ impl App {
             return;
         }
         self.message = None;
-        if let Some(dialog) = &mut self.dialog {
-            if dialog.key(key) != Outcome::Open {
-                self.answered();
+        if let Some(open) = &mut self.dialog {
+            let outcome = open.dialog.key(key);
+            if outcome != Outcome::Open {
+                self.answered(outcome);
             }
             return;
         }
@@ -147,16 +162,76 @@ impl App {
         }
     }
 
-    /// Applies every update and task failure that has arrived, without waiting for more.
-    fn apply_all(&mut self, received: &Receiver<Update>, failed: &Receiver<String>) {
+    /// Applies every update and action event that has arrived, without waiting for more.
+    fn apply_all(&mut self, received: &Receiver<Update>, happened: &Receiver<actions::Event>) {
         while let Ok(update) = received.try_recv() {
             match update {
                 Update::Config(result) => self.reload(result),
                 update => self.sources.apply(update),
             }
         }
-        while let Ok(failure) = failed.try_recv() {
-            self.message = Some(failure);
+        while let Ok(event) = happened.try_recv() {
+            self.happened(event);
+        }
+    }
+
+    /// What an action running in the background reports.
+    fn happened(&mut self, event: actions::Event) {
+        use actions::Event;
+        match event {
+            Event::Progress(text) => self.progress = Some(text),
+            Event::Failed(message) => {
+                self.progress = None;
+                self.message = Some(message);
+            }
+            // Back to the form, to fix the name; cancelled meanwhile, to the hint bar
+            Event::Refused(error) => {
+                self.progress = None;
+                match self.new_worktree_form() {
+                    Some(form) => {
+                        form.set_busy(None);
+                        form.set_error(&error);
+                    }
+                    None => self.message = Some(error),
+                }
+            }
+            Event::Added { project, path } => {
+                if self.new_worktree_form().is_some() {
+                    self.dialog = None;
+                }
+                self.select_when_listed = Some(path);
+                if let Some(refresh) = &self.refresh {
+                    refresh.worktrees_now(&project);
+                }
+            }
+            Event::OnCreateFailed(output) => match self.dialog {
+                None => {
+                    let dialog = Dialog::Message(Message::new("on_create failed", &output));
+                    self.dialog = Some(Open {
+                        dialog,
+                        purpose: Purpose::Notice,
+                    });
+                }
+                // Not over another dialog: its first line, then
+                Some(_) => self.message = output.lines().next().map(String::from),
+            },
+            Event::Started => {
+                self.progress = None;
+                if let Some(refresh) = &self.refresh {
+                    refresh.sessions_now();
+                }
+            }
+        }
+    }
+
+    /// The new-worktree form, when it is open.
+    fn new_worktree_form(&mut self) -> Option<&mut Form> {
+        match &mut self.dialog {
+            Some(Open {
+                dialog: Dialog::Form(form),
+                purpose: Purpose::NewWorktree { .. },
+            }) => Some(form),
+            _ => None,
         }
     }
 
@@ -188,6 +263,16 @@ impl App {
         if let Ok(config) = &self.config {
             self.tree.set_view(self.sources.view(config, now));
         }
+        self.select_new_worktree();
+    }
+
+    /// Selects the worktree just created, once it is listed.
+    fn select_new_worktree(&mut self) {
+        if let Some(path) = &self.select_when_listed
+            && self.tree.select_worktree(path)
+        {
+            self.select_when_listed = None;
+        }
     }
 
     fn handle(&mut self, action: Action) {
@@ -199,6 +284,7 @@ impl App {
             Action::Collapse if worktrees => self.tree.collapse(),
             Action::Expand if worktrees => self.tree.expand(),
             Action::Jump if worktrees => self.jump(),
+            Action::NewWorktree if worktrees => self.open_new_worktree(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
                     Pane::Worktrees => Pane::Files,
@@ -210,10 +296,103 @@ impl App {
         }
     }
 
-    /// The open dialog was answered or cancelled. Each step that opens one acts
-    /// on its answer here, and may keep it open, e.g. to show an error in a form.
-    fn answered(&mut self) {
-        self.dialog = None;
+    /// The open dialog was answered or cancelled. Each kind of dialog acts on its
+    /// answer here, and may keep it open, e.g. to show an error in a form.
+    fn answered(&mut self, outcome: Outcome) {
+        let Some(open) = self.dialog.take() else {
+            return;
+        };
+        if let (Purpose::NewWorktree { project }, Dialog::Form(form), Outcome::Submit) =
+            (open.purpose, open.dialog, outcome)
+        {
+            self.create_worktree(project, form);
+        }
+    }
+
+    /// The form for a new worktree in the selected row's project: name, base
+    /// (the project's, else its main worktree's branch) and agent.
+    fn open_new_worktree(&mut self) {
+        let (Some(view), Ok(config)) = (self.tree.selected_project(), &self.config) else {
+            return;
+        };
+        if let Some(error) = &view.error {
+            let first = error.lines().next().unwrap_or_default();
+            self.message = Some(format!("{}: {first}", view.name));
+            return;
+        }
+        let project = config.projects.iter().find(|p| p.path == view.path);
+        let main_branch = view.worktrees.iter().find(|w| w.main);
+        let base = match project.and_then(|p| p.base.clone()) {
+            Some(base) => base,
+            None => main_branch
+                .and_then(|w| w.branch.clone())
+                .unwrap_or_default(),
+        };
+        let agents = config.agents.keys().cloned().collect();
+        let fields = vec![
+            Field::text("Name", ""),
+            Field::text("Base", &base),
+            Field::choice("Agent", agents, &config.default_agent),
+        ];
+        let form = Form::new(&format!("New worktree in {}", view.name), fields);
+        let purpose = Purpose::NewWorktree {
+            project: view.path.clone(),
+        };
+        self.dialog = Some(Open {
+            dialog: Dialog::Form(form),
+            purpose,
+        });
+    }
+
+    /// Starts creating the worktree the form asks for; the form stays open, busy,
+    /// until git has answered.
+    fn create_worktree(&mut self, project: PathBuf, mut form: Form) {
+        let values: Vec<String> = form.values().into_iter().map(String::from).collect();
+        match self.new_worktree_request(&project, &values) {
+            Ok(request) => {
+                form.set_busy(Some(&format!("Creating {}…", request.name)));
+                self.tasks.push(Task::NewWorktree(request));
+            }
+            Err(error) => form.set_error(&error),
+        }
+        self.dialog = Some(Open {
+            dialog: Dialog::Form(form),
+            purpose: Purpose::NewWorktree { project },
+        });
+    }
+
+    /// What to create for the form's name, base and agent, or why it cannot be.
+    fn new_worktree_request(
+        &self,
+        project: &Path,
+        values: &[String],
+    ) -> std::result::Result<NewWorktree, String> {
+        let [name, base, agent] = values else {
+            return Err("The form has the wrong fields".to_string());
+        };
+        let (name, base) = (name.trim(), base.trim());
+        if name.is_empty() {
+            return Err("A name is needed".to_string());
+        }
+        let Ok(config) = &self.config else {
+            return Err("config.toml is invalid".to_string());
+        };
+        let Some(settings) = config.projects.iter().find(|p| p.path == project) else {
+            return Err(format!("{} is no longer a project", project.display()));
+        };
+        let Some(command) = config.agents.get(agent) else {
+            return Err(format!("No agent named {agent}"));
+        };
+        let project_name = project.file_name().unwrap_or_default().to_string_lossy();
+        Ok(NewWorktree {
+            project: project.to_path_buf(),
+            name: name.to_string(),
+            base: (!base.is_empty()).then(|| base.to_string()),
+            path: git::worktree_path(project, name, settings.worktree_dir.as_deref()),
+            on_create: settings.on_create.clone(),
+            session: tmux::session_name(&project_name, name),
+            command: command.clone(),
+        })
     }
 
     /// On a worktree, switches to its session; on a project, folds or unfolds it.
@@ -252,8 +431,8 @@ impl App {
         self.render_projects(frame, left);
         frame.render_widget(self.pane_block(" Files ", Pane::Files), right);
         frame.render_widget(self.hint_bar(), hints);
-        if let Some(dialog) = &mut self.dialog {
-            dialog.render(frame, main);
+        if let Some(open) = &mut self.dialog {
+            open.dialog.render(frame, main);
         }
     }
 
@@ -290,13 +469,18 @@ impl App {
         }
     }
 
-    /// The message, else the keys that apply to the selection.
+    /// The message, else the dialog's keys, else what runs in the background, else
+    /// the keys that apply to the selection.
     fn hint_bar(&self) -> Paragraph<'static> {
         if let Some(message) = &self.message {
             return Paragraph::new(message.clone());
         }
+        if let (None, Some(progress)) = (&self.dialog, &self.progress) {
+            return Paragraph::new(format!("… {progress}"));
+        }
         let hints = match &self.dialog {
-            Some(dialog) => dialog
+            Some(open) => open
+                .dialog
                 .hints()
                 .iter()
                 .map(|&(k, l)| (k.to_string(), l))
@@ -337,28 +521,6 @@ fn one_line(err: &str, path: &std::path::Path) -> String {
         }
         [only] => only.to_string(),
         [] => String::new(),
-    }
-}
-
-/// Runs `task` on a thread of its own; its error, if any, goes to `failures`.
-fn start(task: Task, server: &Server, failures: &Sender<String>) {
-    let server = server.clone();
-    let failed = failures.clone();
-    let started = thread::Builder::new()
-        .name("task".to_string())
-        .spawn(move || {
-            let result = match &task {
-                Task::Switch(session) => server.switch_client(session),
-            };
-            if let Err(err) = result {
-                tracing::warn!(?task, %err, "task failed");
-                // The dashboard has ended: nobody to tell
-                let _ = failed.send(err.to_string());
-            }
-        });
-    if let Err(err) = started {
-        tracing::error!(%err, "cannot start a task thread");
-        let _ = failures.send(format!("cannot start a thread: {err}"));
     }
 }
 
@@ -582,7 +744,8 @@ mod tests {
         updates
             .send(Update::Sessions(Err("tmux: boom".into())))
             .unwrap();
-        failures.send("can't find session: $9".to_string()).unwrap();
+        let failure = actions::Event::Failed("can't find session: $9".to_string());
+        failures.send(failure).unwrap();
         app.apply_all(&received, &failed);
         assert_eq!(app.sources.sessions_error(), Some("tmux: boom"));
         assert_eq!(app.message.as_deref(), Some("can't find session: $9"));
@@ -748,7 +911,10 @@ unknown field `popop`, expected one of `popup`, `back`";
     fn an_open_dialog_takes_the_keys_while_the_rest_keeps_refreshing() {
         let mut app = showing(vec![project("/code/app", &["fix"])]);
         let form = dialog::Form::new("New worktree", vec![dialog::Field::text("Name", "")]);
-        app.dialog = Some(Dialog::Form(form));
+        app.dialog = Some(Open {
+            dialog: Dialog::Form(form),
+            purpose: Purpose::Notice,
+        });
         for code in [KeyCode::Char('j'), KeyCode::Char('q'), KeyCode::Tab] {
             press(&mut app, code);
         }
@@ -781,6 +947,187 @@ unknown field `popop`, expected one of `popup`, `back`";
             app.tree.selected().cloned(),
             Some(projects::Row::Project("/code/app".into()))
         );
+    }
+
+    /// `app` with `/code/app` as its only project, `base` set or not, its main
+    /// worktree on `main`.
+    fn with_a_project(base: Option<&str>) -> App {
+        let mut config = test_config();
+        config.projects.push(config::Project {
+            path: "/code/app".into(),
+            base: base.map(String::from),
+            worktree_dir: None,
+            on_create: Some("npm install".into()),
+            error: None,
+            file: "/c/projects/app.toml".into(),
+        });
+        let mut app = App::new(Ok(config));
+        app.tree.set_view(vec![project("/code/app", &[])]);
+        app
+    }
+
+    fn form_values(app: &mut App) -> Vec<String> {
+        let form = app.new_worktree_form().expect("the new-worktree form");
+        form.values().into_iter().map(String::from).collect()
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn event(app: &mut App, event: actions::Event) {
+        let (_updates, received) = mpsc::channel();
+        let (events, happened) = mpsc::channel();
+        events.send(event).unwrap();
+        app.apply_all(&received, &happened);
+    }
+
+    #[test]
+    fn n_opens_the_form_with_the_defaults() {
+        let mut app = with_a_project(None);
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(
+            form_values(&mut app),
+            ["", "main", "claude"],
+            "the main worktree's branch"
+        );
+        let lines = screen(&mut app, 80, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("┌ New worktree in app ")),
+            "{lines:?}"
+        );
+
+        let mut app = with_a_project(Some("develop"));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(
+            form_values(&mut app),
+            ["", "develop", "claude"],
+            "the project's base"
+        );
+    }
+
+    #[test]
+    fn a_name_is_needed() {
+        let mut app = with_a_project(None);
+        press(&mut app, KeyCode::Char('n'));
+        type_text(&mut app, "  ");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tasks, []);
+        let lines = screen(&mut app, 80, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("A name is needed")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn the_form_asks_for_the_worktree_and_waits_for_git() {
+        let mut app = with_a_project(None);
+        press(&mut app, KeyCode::Char('n'));
+        type_text(&mut app, "fix/login");
+        press(&mut app, KeyCode::Enter);
+        let expected = NewWorktree {
+            project: "/code/app".into(),
+            name: "fix/login".into(),
+            base: Some("main".into()),
+            path: "/code/app.worktrees/fix-login".into(),
+            on_create: Some("npm install".into()),
+            session: "app-fix/login".into(),
+            command: "claude".into(),
+        };
+        assert_eq!(app.tasks, [Task::NewWorktree(expected)]);
+        // Busy: typing changes nothing
+        type_text(&mut app, "x");
+        assert_eq!(form_values(&mut app)[0], "fix/login");
+        let lines = screen(&mut app, 80, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("Creating fix/login…")),
+            "{lines:?}"
+        );
+
+        // git refuses: the form shows why, and can be edited again
+        event(
+            &mut app,
+            actions::Event::Refused("fatal: a branch named 'fix/login' already exists".into()),
+        );
+        let lines = screen(&mut app, 80, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("already exists")),
+            "{lines:?}"
+        );
+        type_text(&mut app, "2");
+        assert_eq!(form_values(&mut app)[0], "fix/login2");
+    }
+
+    #[test]
+    fn the_new_worktree_is_selected_once_listed_and_progress_shows_meanwhile() {
+        let mut app = with_a_project(None);
+        press(&mut app, KeyCode::Char('n'));
+        type_text(&mut app, "fix");
+        press(&mut app, KeyCode::Enter);
+        let path = PathBuf::from("/code/app.worktrees/fix");
+        event(
+            &mut app,
+            actions::Event::Added {
+                project: "/code/app".into(),
+                path: path.clone(),
+            },
+        );
+        assert!(
+            app.dialog.is_none(),
+            "the form closes once git has added it"
+        );
+        event(
+            &mut app,
+            actions::Event::Progress("fix: running on_create".into()),
+        );
+        assert_eq!(hint_line(&mut app), "… fix: running on_create");
+
+        app.select_new_worktree();
+        assert!(app.select_when_listed.is_some(), "not listed yet");
+        // Folded, and listed by the next refresh
+        app.tree.collapse();
+        app.tree.set_view(vec![project("/code/app", &["fix"])]);
+        app.select_new_worktree();
+        let selected = app.tree.selected_worktree().map(|w| w.path.clone());
+        assert_eq!(selected, Some(path));
+        assert!(app.select_when_listed.is_none());
+
+        event(&mut app, actions::Event::Started);
+        assert!(hint_line(&mut app).starts_with("n new"), "progress done");
+    }
+
+    #[test]
+    fn a_failed_on_create_shows_its_output() {
+        let mut app = with_a_project(None);
+        event(
+            &mut app,
+            actions::Event::OnCreateFailed("npm ERR! missing script".into()),
+        );
+        let lines = screen(&mut app, 80, 12);
+        assert!(
+            lines.iter().any(|l| l.contains("┌ on_create failed ")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("npm ERR! missing script")),
+            "{lines:?}"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn a_project_with_an_error_gets_no_form() {
+        let mut app = with_a_project(None);
+        let mut broken = project("/code/app", &[]);
+        broken.error = Some("fatal: not a git repository\nmore".into());
+        app.tree.set_view(vec![broken]);
+        press(&mut app, KeyCode::Char('n'));
+        assert!(app.dialog.is_none());
+        assert_eq!(hint_line(&mut app), "app: fatal: not a git repository");
     }
 
     fn test_config() -> Config {
