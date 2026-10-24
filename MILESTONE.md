@@ -368,6 +368,8 @@ Depends on: 2.1, 2.2, 2.3
 
 ### 2.8 Popup mode (#25)
 
+**On hold** (label `on hold` on #25): not needed now, and to be studied in depth before it is built. Until then `tatou --popup` says it is not implemented, and the `popup` key in `[tmux]` binds nothing.
+
 Depends on: 1.16, 1.6
 
 - `tatou --popup`: same UI; jumping or launching an action exits, which closes the popup.
@@ -492,7 +494,7 @@ Depends on: 4.4
 - Edit `e`: `new-window -c <worktree> "$EDITOR <file>"`; View `v`: `display-popup -E -d <worktree> "$PAGER <file>"`; Diff `D`: `display-popup -E -d <worktree> "git diff -- <file>"` (user's git pager).
 - File paths are shell-quoted; `$EDITOR` falls back to `vi`, `$PAGER` to `less`.
 - Untracked files: diff against `/dev/null` (`git diff --no-index`), deleted files: view disabled.
-- Behaviour from popup mode as decided in 2.8.
+- Behaviour from popup mode as decided in 2.8; while 2.8 is on hold, view and diff need to work from the dashboard only.
 
 **Done when**
 - Unit tests on the built tmux arguments with awkward file names (spaces, quotes, leading `-`).
