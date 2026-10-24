@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process;
 use std::time::SystemTime;
 
 use serde::Deserialize;
@@ -175,6 +176,105 @@ pub fn load_from(path: &Path, home: Option<&Path>) -> Result<Config> {
         path: path.to_path_buf(),
         message,
     })
+}
+
+/// What `add_project` did.
+#[derive(Debug, PartialEq)]
+pub enum Added {
+    Added,
+    /// A project already has this path; nothing was written.
+    AlreadyThere,
+}
+
+/// Adds `repo` to `<config dir>/config.toml`, first writing the template if it
+/// does not exist; see `add_project_to`.
+pub fn add_project(repo: &Path) -> Result<Added> {
+    let path = path()?;
+    write_template(&path)?;
+    let home = env::var_os("HOME").map(PathBuf::from);
+    add_project_to(&path, repo, home.as_deref())
+}
+
+/// Appends a `[[project]]` for `repo`, a main worktree, to the config at `path`,
+/// unless a project already has its canonical path. The rest of the file, comments
+/// included, is left as written, and the new text must load before it replaces it.
+pub fn add_project_to(path: &Path, repo: &Path, home: Option<&Path>) -> Result<Added> {
+    let invalid = |message| Error::Config {
+        path: path.to_path_buf(),
+        message,
+    };
+    let text = fs::read_to_string(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let config = parse(&text, path, home).map_err(invalid)?;
+    let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    if config.projects.iter().any(|project| project.path == repo) {
+        return Ok(Added::AlreadyThere);
+    }
+    let new = append_project(&text, &tilde(&repo, home));
+    parse(&new, path, home).map_err(invalid)?;
+    write_atomic(path, &new)?;
+    Ok(Added::Added)
+}
+
+/// `text` with a `[[project]]` block for `path` at the end, after a blank line.
+fn append_project(text: &str, path: &str) -> String {
+    let mut new = text.to_string();
+    if !new.is_empty() && !new.ends_with('\n') {
+        new.push('\n');
+    }
+    if !new.is_empty() && !new.ends_with("\n\n") {
+        new.push('\n');
+    }
+    let quoted = toml::Value::String(path.to_string()).to_string();
+    new.push_str(&format!("[[project]]\npath = {quoted}\n"));
+    new
+}
+
+/// `path` as written in the config and shown to the user: under `$HOME`, with `~/`.
+pub fn tilde(path: &Path, home: Option<&Path>) -> String {
+    // git prints paths with symlinks resolved, which `$HOME` may not be
+    let homes = home
+        .into_iter()
+        .flat_map(|home| [Some(home.to_path_buf()), home.canonicalize().ok()])
+        .flatten();
+    for home in homes {
+        match path.strip_prefix(&home) {
+            Ok(rest) if rest.as_os_str().is_empty() => return "~".to_string(),
+            Ok(rest) => return format!("~/{}", rest.display()),
+            Err(_) => {}
+        }
+    }
+    path.display().to_string()
+}
+
+/// Writes `text` to a temporary file beside `path` and renames it over `path`, so
+/// that nothing ever reads a half-written file. Through a symlink (a config kept in
+/// a dotfiles repository), the file it points to is replaced, with its permissions.
+pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let io_error = |source| Error::Io {
+        path: path.clone(),
+        source,
+    };
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(io_error)?;
+    }
+    // The pid keeps two tatou processes at the same time from sharing a temporary file
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", process::id()));
+    let tmp = PathBuf::from(tmp);
+    let result = fs::write(&tmp, text)
+        .and_then(|()| match fs::metadata(&path) {
+            Ok(meta) => fs::set_permissions(&tmp, meta.permissions()),
+            Err(_) => Ok(()),
+        })
+        .and_then(|()| fs::rename(&tmp, &path));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result.map_err(io_error)
 }
 
 /// Creates the template at `path`, unless a file is already there.
@@ -547,5 +647,143 @@ mod tests {
         let err = load_from(&path, None).unwrap_err();
         assert!(matches!(err, Error::Config { path: ref p, .. } if *p == path));
         assert!(err.to_string().contains("line 1"), "{err}");
+    }
+
+    /// A config file in a temporary directory, which also stands for `$HOME`.
+    fn config_file(text: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, text).unwrap();
+        (dir, path)
+    }
+
+    /// A directory in `home` to add as a project, canonical like git prints it.
+    fn repo(home: &Path, name: &str) -> PathBuf {
+        let repo = home.join(name);
+        fs::create_dir_all(&repo).unwrap();
+        repo.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn adding_a_project_appends_it_and_keeps_the_rest() {
+        let original = "# my settings\ndefault_agent = \"codex\" # inline comment\n";
+        let (dir, path) = config_file(original);
+        let home = dir.path();
+        let app = repo(home, "code/my app");
+        assert_eq!(
+            add_project_to(&path, &app, Some(home)).unwrap(),
+            Added::Added
+        );
+
+        let text = fs::read_to_string(&path).unwrap();
+        let expected = "\n[[project]]\npath = \"~/code/my app\"\n";
+        assert_eq!(text, format!("{original}{expected}"));
+        let config = load_from(&path, Some(home)).unwrap();
+        assert_eq!(config.projects[0].path, app);
+        assert_eq!(config.projects[0].error, None);
+    }
+
+    #[test]
+    fn adding_the_same_project_again_changes_nothing() {
+        let (dir, path) = config_file("");
+        let home = dir.path();
+        let app = repo(home, "app");
+        assert_eq!(
+            add_project_to(&path, &app, Some(home)).unwrap(),
+            Added::Added
+        );
+        let once = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            once, "[[project]]\npath = \"~/app\"\n",
+            "no blank line first"
+        );
+        // Through a symlink it is the same directory
+        let link = home.join("link");
+        std::os::unix::fs::symlink(&app, &link).unwrap();
+        for again in [&app, &link] {
+            let added = add_project_to(&path, again, Some(home)).unwrap();
+            assert_eq!(added, Added::AlreadyThere, "{again:?}");
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), once);
+    }
+
+    #[test]
+    fn a_project_outside_home_and_odd_names_are_written_as_toml() {
+        let (dir, path) = config_file("[tmux]\nback = \"M-b\"");
+        let elsewhere = tempfile::tempdir().unwrap();
+        let odd = repo(elsewhere.path(), "it's \"quoted\" \\ here");
+        add_project_to(&path, &odd, Some(dir.path())).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("[tmux]\nback = \"M-b\"\n\n[[project]]\n"),
+            "a newline, then a blank line: {text}"
+        );
+        let config = load_from(&path, Some(dir.path())).unwrap();
+        assert_eq!(config.projects[0].path, odd);
+        assert_eq!(config.tmux.back, "M-b", "still in [tmux]");
+    }
+
+    #[test]
+    fn an_invalid_config_is_left_alone() {
+        let (dir, path) = config_file("popop = 1\n");
+        let app = repo(dir.path(), "app");
+        let err = add_project_to(&path, &app, Some(dir.path())).unwrap_err();
+        assert!(matches!(err, Error::Config { .. }), "{err:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "popop = 1\n");
+    }
+
+    #[test]
+    fn a_config_that_would_not_load_with_the_project_is_left_alone() {
+        // Valid, but an inline array cannot be extended with a [[project]] table
+        let original = "project = [{ path = \"/tmp\" }]\n";
+        let (dir, path) = config_file(original);
+        let app = repo(dir.path(), "app");
+        let err = add_project_to(&path, &app, Some(dir.path())).unwrap_err();
+        assert!(matches!(err, Error::Config { .. }), "{err:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn home_is_written_with_a_tilde() {
+        let home = Path::new("/home/me");
+        assert_eq!(
+            tilde(Path::new("/home/me/code/app"), Some(home)),
+            "~/code/app"
+        );
+        assert_eq!(tilde(home, Some(home)), "~");
+        assert_eq!(tilde(Path::new("/home/meow"), Some(home)), "/home/meow");
+        assert_eq!(tilde(Path::new("/srv/app"), None), "/srv/app");
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config/tmux.conf");
+        write_atomic(&path, "old\n").unwrap();
+        write_atomic(&path, "new\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["tmux.conf"]);
+    }
+
+    #[test]
+    fn write_atomic_keeps_a_symlink_and_the_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles/config.toml");
+        fs::create_dir(target.parent().unwrap()).unwrap();
+        fs::write(&target, "old\n").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_atomic(&link, "new\n").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        let mode = fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

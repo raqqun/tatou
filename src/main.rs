@@ -15,7 +15,10 @@ mod ui;
 
 use std::env;
 use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+use error::Error;
 
 use tracing::level_filters::LevelFilter;
 
@@ -26,6 +29,7 @@ Runs coding agents in parallel, each in its own git worktree and tmux session.
 
 Commands:
   (none)         attach to tatou's tmux server and its dashboard
+  add [path]     add the repository at path (default: here) to config.toml
   status         print a short summary of agent statuses, for tmux's status line
   hooks          print the hooks that let agents report their status
   --dashboard    run the dashboard; `tatou` starts it inside tatou's tmux server
@@ -38,6 +42,8 @@ Commands:
 #[derive(Debug, PartialEq)]
 enum Command {
     Launch,
+    /// The folder given, if any.
+    Add(Option<PathBuf>),
     Dashboard,
     Popup,
     Status,
@@ -51,10 +57,15 @@ fn version() -> &'static str {
     include_str!("../VERSION").trim()
 }
 
-/// Reads the arguments after the program name; tatou takes at most one.
+/// Reads the arguments after the program name: a command, and for `add` a path.
 fn parse_args(args: &[OsString]) -> Result<Command, String> {
     match args {
         [] => Ok(Command::Launch),
+        [add] if add == "add" => Ok(Command::Add(None)),
+        [add, path] if add == "add" => Ok(Command::Add(Some(PathBuf::from(path)))),
+        [add, _, extra, ..] if add == "add" => {
+            Err(format!("unexpected argument `{}`", extra.to_string_lossy()))
+        }
         [arg] => match arg.to_str() {
             Some("--dashboard") => Ok(Command::Dashboard),
             Some("--popup") => Ok(Command::Popup),
@@ -106,6 +117,7 @@ fn main() -> ExitCode {
 
     match command {
         Command::Launch => launcher::run(),
+        Command::Add(path) => add(path.as_deref().unwrap_or(Path::new("."))),
         Command::Dashboard => dashboard(),
         Command::Popup => not_implemented("--popup", 25),
         Command::Status => not_implemented("status", 30),
@@ -127,6 +139,40 @@ fn dashboard() -> ExitCode {
         Err(err) => {
             tracing::error!(%err, "dashboard failed");
             eprintln!("tatou: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `tatou add`: adds the repository `dir` is in, by its main worktree.
+fn add(dir: &Path) -> ExitCode {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let added = git::main_worktree(dir).and_then(|repo| {
+        let added = config::add_project(&repo)?;
+        Ok((repo, added, config::path()?))
+    });
+    match added {
+        Ok((repo, added, config)) => {
+            let (repo, config) = (
+                config::tilde(&repo, home.as_deref()),
+                config::tilde(&config, home.as_deref()),
+            );
+            match added {
+                config::Added::Added => println!("Added {repo} to {config}"),
+                config::Added::AlreadyThere => println!("{repo} is already a project in {config}"),
+            }
+            tracing::info!(repo, ?added, "add");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            tracing::warn!(%err, "add failed");
+            match err {
+                // git's own message says why, e.g. not a repository
+                Error::Command { stderr, .. } => {
+                    eprintln!("tatou: cannot add {}: {stderr}", dir.display())
+                }
+                err => eprintln!("tatou: {err}"),
+            }
             ExitCode::FAILURE
         }
     }
@@ -161,6 +207,8 @@ mod tests {
             (&["--popup"], Command::Popup),
             (&["status"], Command::Status),
             (&["hooks"], Command::Hooks),
+            (&["add"], Command::Add(None)),
+            (&["add", "../app"], Command::Add(Some("../app".into()))),
             (&["-h"], Command::Help),
             (&["--help"], Command::Help),
             (&["-V"], Command::Version),
@@ -181,6 +229,10 @@ mod tests {
         assert_eq!(
             parse(&["status", "-v"]),
             Err("unexpected argument `-v`".into())
+        );
+        assert_eq!(
+            parse(&["add", "a", "b"]),
+            Err("unexpected argument `b`".into())
         );
     }
 

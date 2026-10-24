@@ -25,6 +25,13 @@ impl Sandbox {
         self.dir.path().join("config")
     }
 
+    /// `$HOME`.
+    // Not every test file reads it
+    #[allow(dead_code)]
+    pub fn home(&self) -> PathBuf {
+        self.dir.path().to_path_buf()
+    }
+
     /// `$XDG_STATE_HOME`; tatou's log is in its `tatou` directory.
     pub fn state(&self) -> PathBuf {
         self.dir.path().join("state")

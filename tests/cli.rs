@@ -3,6 +3,7 @@
 mod common;
 
 use std::fs;
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 use common::Sandbox;
@@ -138,4 +139,82 @@ fn the_launcher_asks_before_nesting_and_quits_without_an_answer() {
     let dir = sandbox.config().join("tatou");
     assert!(dir.join("config.toml").exists());
     assert!(dir.join("tmux.conf").exists());
+}
+
+/// Runs git in `dir` without the user's or the system's config.
+fn git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "tatou")
+        .env("GIT_AUTHOR_EMAIL", "tatou@example.com")
+        .env("GIT_COMMITTER_NAME", "tatou")
+        .env("GIT_COMMITTER_EMAIL", "tatou@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        text(&output.stderr)
+    );
+}
+
+#[test]
+fn add_adds_the_main_worktree_once_from_anywhere_in_it() {
+    let sandbox = Sandbox::new();
+    let home = sandbox.home();
+    let repo = home.join("code/app");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    git(
+        &repo,
+        &["worktree", "add", "-q", "-b", "fix", "../app.worktrees/fix"],
+    );
+
+    // From a folder inside it, with no config yet: the template is written first
+    let output = run(sandbox.tatou(&["add"]).current_dir(repo.join("src")));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stdout),
+        "Added ~/code/app to ~/config/tatou/config.toml\n"
+    );
+    let config = sandbox.config().join("tatou/config.toml");
+    let added = fs::read_to_string(&config).unwrap();
+    assert!(added.starts_with("# tatou configuration"), "{added}");
+    assert!(
+        added.ends_with("\n\n[[project]]\npath = \"~/code/app\"\n"),
+        "{added}"
+    );
+
+    // The repository's root, and a linked worktree by its path: the same project
+    let linked = home.join("code/app.worktrees/fix");
+    let from_root = sandbox.tatou(&["add"]).current_dir(&repo).output().unwrap();
+    let by_path = run(&mut sandbox.tatou(&["add", linked.to_str().unwrap()]));
+    for output in [from_root, by_path] {
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        assert_eq!(
+            text(&output.stdout),
+            "~/code/app is already a project in ~/config/tatou/config.toml\n"
+        );
+    }
+    assert_eq!(fs::read_to_string(&config).unwrap(), added);
+}
+
+#[test]
+fn add_outside_a_repository_says_why() {
+    let sandbox = Sandbox::new();
+    let output = run(sandbox.tatou(&["add"]).current_dir(sandbox.home()));
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with("tatou: cannot add .: fatal: not a git repository"),
+        "{stderr}"
+    );
+    assert!(
+        !sandbox.config().join("tatou/config.toml").exists(),
+        "nothing written"
+    );
 }

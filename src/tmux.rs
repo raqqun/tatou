@@ -3,9 +3,7 @@
 
 use std::env;
 use std::ffi::OsStr;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::config::{self, Config};
 use crate::error::{Error, Result};
@@ -299,7 +297,8 @@ pub fn write_conf(config: &Config) -> Result<()> {
         config::config_home()?.join("tmux/tmux.conf"),
     ];
     let text = conf(&config.tmux, &user_confs, &dir.join("tmux.local.conf"));
-    write_atomic(&conf_path()?, &text)
+    // A running tmux server never sources a half-written file
+    config::write_atomic(&conf_path()?, &text)
 }
 
 /// The contents of tatou's `tmux.conf`: the user's own tmux config when inherited,
@@ -397,27 +396,6 @@ fn undo_commands(conf: &str) -> Vec<Vec<String>> {
     commands
 }
 
-/// Writes `text` to a temporary file beside `path` and renames it over `path`,
-/// so a running tmux server never sources a half-written file.
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    let io_error = |source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    };
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(io_error)?;
-    }
-    // The pid keeps two launches at the same time from sharing a temporary file
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".{}.tmp", process::id()));
-    let tmp = PathBuf::from(tmp);
-    let result = fs::write(&tmp, text).and_then(|()| fs::rename(&tmp, path));
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result.map_err(io_error)
-}
-
 /// A tmux server for tests, on a socket of its own and killed when dropped.
 #[cfg(test)]
 pub mod testing {
@@ -468,6 +446,8 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::testing::TestServer;
     use super::*;
 
@@ -573,20 +553,6 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
         assert!(text.contains(r"source-file -q '/it'\''s here/tmux.local.conf'"));
     }
 
-    #[test]
-    fn write_atomic_replaces_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config/tmux.conf");
-        write_atomic(&path, "old\n").unwrap();
-        write_atomic(&path, "new\n").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
-        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(names, ["tmux.conf"]);
-    }
-
     /// tmux ignores errors in the file given with `-f`, so the generated conf is
     /// checked with `source-file`, which fails on the first invalid line.
     #[test]
@@ -608,7 +574,7 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
             ..Default::default()
         };
         let path = dir.join("tmux.conf");
-        write_atomic(&path, &conf(&tmux, &[user_conf], &local_conf)).unwrap();
+        config::write_atomic(&path, &conf(&tmux, &[user_conf], &local_conf)).unwrap();
 
         let mut args = vec!["start-server", ";", "source-file", path.to_str().unwrap()];
         for option in ["@tatou_user", "@tatou_local", "prefix"] {
