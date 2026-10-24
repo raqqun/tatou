@@ -381,6 +381,22 @@ Depends on: 1.16, 1.6
 **Done when**
 - Unit test on the generated binding; manual check from a worktree session documented in the PR.
 
+### Post-milestone fixes
+
+Found while using M2; each is an issue on the M2 milestone.
+
+### 2.11 Drop the built-in `shell` agent (#87)
+
+Depends on: 2.5
+
+- `s` always starts an agent: the built-in `shell = "$SHELL"` agent is dropped, so neither `s` nor the `n` form offers a shell; shells are `t`'s job.
+- Built-in agents become `claude` and `codex`. A user can still define a shell-like agent in `[agents]`, and it is offered like any other, also as `default_agent`.
+- The config template and DESIGN §9 follow.
+
+**Done when**
+- Config unit tests: the built-in agents without `shell`; a user-defined `shell` still works and can be `default_agent`.
+- UI tests: the `s` choice and the `n` form list no `shell` by default.
+
 ---
 
 ## M3 — Status

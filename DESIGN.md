@@ -183,7 +183,6 @@ back  = "M-d"                # returns to the dashboard
 [agents]
 claude = "claude"
 codex  = "codex"
-shell  = "$SHELL"
 
 [keys]                       # override any default
 jump = "Enter"
@@ -210,7 +209,7 @@ base = "main"
 - Every setting is optional. When `config.toml` does not exist, tatou writes it with every setting commented out; without project files, the dashboard says where they go.
 - Project files are `projects/*.toml`, listed by file name; hidden files and other names (editor backups) are ignored. `tatou add` names a file after the repository's folder, with `-2`, `-3`, … when the name is taken; matching always goes by `path`. `[[project]]` in `config.toml` is an error that points here.
 - Unknown keys are errors, reported with the line. `[keys]` action names are checked against the keymap.
-- `[agents]` is merged with the built-in `claude`, `codex` and `shell`: new names add an agent, a built-in name replaces its command. `default_agent` must name one of them.
+- `[agents]` is merged with the built-in `claude` and `codex`: new names add an agent, a built-in name replaces its command. `default_agent` must name one of them. There is no built-in shell agent: shells are `t`'s job, and `s` and `n` start agents; an agent of your own may still be a shell.
 - `path` and `worktree_dir` accept `~/`; any other path must be absolute. A project whose file does not parse, or whose `path` is missing, invalid or another file's, is shown with its error, and the other projects still load.
 - `base` is optional: without it, new worktrees start from the branch checked out in the project's main worktree.
 

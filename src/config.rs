@@ -29,8 +29,8 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # prefix = "C-b"              # prefix key on tatou's tmux server
 # inherit_user_conf = false   # also source your own tmux config before tatou's settings
 
-# Commands that start an agent; added to the built-in claude, codex and shell,
-# or replacing one of them when the name is the same
+# Commands that start an agent; added to the built-in claude and codex, or
+# replacing one of them when the name is the same. Shells are `t`'s job
 # [agents]
 # aider = "aider"
 
@@ -399,10 +399,10 @@ fn parse(text: &str, path: &Path) -> std::result::Result<Config, String> {
         ));
     }
 
+    // No shell among them: `t` opens shells, `s` and `n` start agents
     let mut agents = BTreeMap::from([
         ("claude".to_string(), "claude".to_string()),
         ("codex".to_string(), "codex".to_string()),
-        ("shell".to_string(), "$SHELL".to_string()),
     ]);
     agents.extend(file.agents);
     let default_agent = file.default_agent.unwrap_or_else(|| "claude".into());
@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(config.tmux, Tmux::default());
         assert_eq!(
             config.agents.keys().collect::<Vec<_>>(),
-            ["claude", "codex", "shell"]
+            ["claude", "codex"]
         );
         assert_eq!(config.keys, Keys::default());
         assert_eq!(config.projects, []);
@@ -606,7 +606,6 @@ mod tests {
             [agents]
             claude = "claude"
             codex  = "codex"
-            shell  = "$SHELL"
 
             [keys]
             jump = "Enter"
@@ -718,6 +717,14 @@ mod tests {
         let config = parse_ok("[agents]\naider = \"aider\"\nclaude = \"claude --verbose\"\n");
         assert_eq!(config.agents["aider"], "aider");
         assert_eq!(config.agents["claude"], "claude --verbose");
+        assert_eq!(config.agents.len(), 3);
+        assert!(!config.agents.contains_key("shell"), "no built-in shell");
+    }
+
+    #[test]
+    fn a_shell_can_still_be_an_agent_of_ones_own() {
+        let config = parse_ok("default_agent = \"shell\"\n[agents]\nshell = \"$SHELL\"\n");
+        assert_eq!(config.default_agent, "shell");
         assert_eq!(config.agents["shell"], "$SHELL");
     }
 
@@ -725,7 +732,7 @@ mod tests {
     fn default_agent_must_be_an_agent() {
         let message = parse_err("default_agent = \"aider\"\n");
         assert!(
-            message.contains("not one of the agents: claude, codex, shell"),
+            message.contains("not one of the agents: claude, codex"),
             "{message}"
         );
         let config = parse_ok("default_agent = \"aider\"\n[agents]\naider = \"aider\"\n");
