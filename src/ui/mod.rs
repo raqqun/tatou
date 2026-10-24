@@ -39,7 +39,7 @@ const WORKTREE_ACTIONS: [Action; 5] = [
 pub fn run() -> Result<()> {
     let path = config::path()?;
     // Before loading, so that a change made meanwhile is loaded again
-    let seen = config::modified(&path);
+    let seen = config::stamp(&path);
     let config = config::load().map_err(|err| err.to_string());
     let (updates, received) = mpsc::channel();
     let server = Server::tatou(&tmux::conf_path()?);
@@ -251,8 +251,8 @@ impl App {
         let message = match &self.config {
             Ok(_) if !self.tree.is_empty() => return self.tree.render(frame, area, block),
             Ok(config) => format!(
-                "No projects yet. Add a [[project]] with its path to {}",
-                config.path.display()
+                "No projects yet: run `tatou add` in a repository, or add a file to {}",
+                config::projects_dir(&config.path).display()
             ),
             Err(err) => err.clone(),
         };
@@ -492,16 +492,16 @@ mod tests {
     }
 
     #[test]
-    fn without_projects_shows_the_config_path() {
+    fn without_projects_shows_where_they_go() {
         let mut config = test_config();
         config.path = "/home/me/.config/tatou/config.toml".into();
         let mut app = App::new(Ok(config));
         assert_eq!(
             projects_pane(&mut app, 7),
             [
-                "No projects yet. Add a [[project]]",
-                "with its path to",
-                "/home/me/.config/tatou/config.toml",
+                "No projects yet: run `tatou add` in a",
+                "repository, or add a file to",
+                "/home/me/.config/tatou/projects",
                 ""
             ]
         );

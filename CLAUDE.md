@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 
-**tatou**: a minimal terminal UI (ratatui) for running coding agents in parallel across several repositories, one git worktree per task. It lists projects and worktrees with agent status, shows an actionable file tree for the selected worktree, and delegates everything else to `tmux`, `git`, `gh`, `$EDITOR` and `$PAGER`. It never renders agent output, and it has no state of its own beyond a small config file.
+**tatou**: a minimal terminal UI (ratatui) for running coding agents in parallel across several repositories, one git worktree per task. It lists projects and worktrees with agent status, shows an actionable file tree for the selected worktree, and delegates everything else to `tmux`, `git`, `gh`, `$EDITOR` and `$PAGER`. It never renders agent output, and it has no state of its own beyond its config files (`config.toml` and one small file per project).
 
 Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
@@ -27,11 +27,11 @@ Keep the dependency list short. Before adding a crate, check whether the standar
 
 ```
 src/
-  main.rs     # arg parsing: dashboard, --popup, `status`, `hooks`
-  launcher.rs # `tatou`: check tools, regenerate tmux.conf, attach to the dashboard
+  main.rs     # arg parsing: dashboard, --popup, `add`, `status`, `hooks`
+  launcher.rs # `tatou`: check tools, regenerate tmux.conf, offer to add the repository, attach
   error.rs    # crate-wide Error enum and Result alias
   logging.rs  # log file setup and rotation
-  config.rs   # load/save config.toml; XDG config and state directories
+  config.rs   # load config.toml and projects/*.toml, write project files; XDG directories
   exec.rs     # the only place that runs external commands
   platform.rs # the only platform-specific code: open(path), notify(title, body)
   git.rs      # worktrees, branches, status; output parsing
@@ -60,7 +60,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 ## Rules
 
 - **No terminal-in-terminal.** Never capture or render agent/pane output. To show something, switch the tmux client, or open a tmux window or popup.
-- **No persistent state** besides `config.toml` and the generated `tmux.conf` (rebuilt from `config.toml` at every launch). No database, cache or state file; derive everything from `git`, `tmux` and `gh`.
+- **No persistent state** besides `config.toml`, the project files in `projects/` next to it (one per repository, written by `tatou add` and the launch offer, plain TOML the user may edit) and the generated `tmux.conf` (rebuilt from `config.toml` at every launch). No database, cache or other state file; derive everything from `git`, `tmux` and `gh`.
 - **tatou's own tmux server only.** Every tmux invocation goes through `tmux.rs` and uses `-u -L tatou -f <generated conf>`. Never talk to the user's default tmux server, never read or write the user's `~/.tmux.conf` or `~/.config/tmux/tmux.conf` (except sourcing them when `inherit_user_conf = true`), never create `tmux.local.conf`.
 - **Don't reimplement tools.** No built-in editor, pager, diff viewer, file operations, splits or session persistence; delegate to `$EDITOR`, `$PAGER`, `git diff`, tmux.
 - **Everything tatou creates must be usable without tatou:** plain worktrees, plain tmux sessions.

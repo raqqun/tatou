@@ -147,21 +147,11 @@ fn dashboard() -> ExitCode {
 /// `tatou add`: adds the repository `dir` is in, by its main worktree.
 fn add(dir: &Path) -> ExitCode {
     let home = env::var_os("HOME").map(PathBuf::from);
-    let added = git::main_worktree(dir).and_then(|repo| {
-        let added = config::add_project(&repo)?;
-        Ok((repo, added, config::path()?))
-    });
+    let added = git::main_worktree(dir).and_then(|repo| Ok((config::add_project(&repo)?, repo)));
     match added {
-        Ok((repo, added, config)) => {
-            let (repo, config) = (
-                config::tilde(&repo, home.as_deref()),
-                config::tilde(&config, home.as_deref()),
-            );
-            match added {
-                config::Added::Added => println!("Added {repo} to {config}"),
-                config::Added::AlreadyThere => println!("{repo} is already a project in {config}"),
-            }
-            tracing::info!(repo, ?added, "add");
+        Ok((added, repo)) => {
+            println!("{}", added.message(&repo, home.as_deref()));
+            tracing::info!(?repo, ?added, "add");
             ExitCode::SUCCESS
         }
         Err(err) => {
