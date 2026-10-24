@@ -86,6 +86,95 @@ impl Server {
         self.run(&["switch-client", "-t", session]).map(|_| ())
     }
 
+    /// Starts `command` in a new detached session in `path`, named `name`, or
+    /// `name-2`, `name-3`, … when taken. `TATOU=1` in its environment lets the
+    /// agent's hooks report to tatou; `@tatou_path` and `@tatou_agent_pane` tag it.
+    /// tmux runs `command` with its default shell, like any config command.
+    // Not called yet: starting an agent uses it (#21, #22)
+    #[allow(dead_code)]
+    pub fn new_session(&self, name: &str, path: &Path, command: &str) -> Result<NewSession> {
+        let dir = path.to_string_lossy();
+        let mut n = 1;
+        let (name, output) = loop {
+            let name = match n {
+                1 => name.to_string(),
+                n => format!("{name}-{n}"),
+            };
+            let args = [
+                "new-session",
+                "-d",
+                "-s",
+                &name,
+                "-c",
+                &dir,
+                "-e",
+                "TATOU=1",
+                "-P",
+                "-F",
+                "#{session_id} #{pane_id}",
+                command,
+            ];
+            match self.run(&args) {
+                Ok(output) => break (name, output.stdout),
+                Err(Error::Command { stderr, .. }) if stderr.starts_with("duplicate session") => {
+                    n += 1;
+                }
+                Err(err) => return Err(err),
+            }
+        };
+        let Some((id, pane)) = output.trim_end().split_once(' ') else {
+            return Err(Error::TmuxOutput { output });
+        };
+        // By id: `-t =<name>` is read as a pane here. Should this fail, the session
+        // still matches its worktree by its start directory
+        let tag_path = ["set-option", "-t", id, "@tatou_path", &dir];
+        let tag_pane = ["set-option", "-t", id, "@tatou_agent_pane", pane];
+        self.run(&[&tag_path[..], &[";"], &tag_pane[..]].concat())?;
+        Ok(NewSession {
+            id: id.to_string(),
+            name,
+            pane: pane.to_string(),
+        })
+    }
+
+    /// Restarts `pane` (`%4`) with `command`, killing what runs in it; the pane
+    /// keeps its id and folder.
+    // Not called yet: restarting an agent uses it (#22)
+    #[allow(dead_code)]
+    pub fn respawn_agent(&self, pane: &str, command: &str) -> Result<()> {
+        self.run(&["respawn-pane", "-k", "-t", pane, command])?;
+        Ok(())
+    }
+
+    /// Opens a window in `session` (an id) in `path`, running `command`, or the
+    /// default shell; it becomes the session's current window. Returns its pane.
+    // Not called yet: opening a shell uses it (#23)
+    #[allow(dead_code)]
+    pub fn new_window(&self, session: &str, path: &Path, command: Option<&str>) -> Result<String> {
+        let dir = path.to_string_lossy();
+        let mut args = vec![
+            "new-window",
+            "-t",
+            session,
+            "-c",
+            &dir,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ];
+        args.extend(command);
+        let output = self.run(&args)?;
+        Ok(output.stdout.trim_end().to_string())
+    }
+
+    /// Kills `session` (an id) and everything running in it.
+    // Not called yet: removing a worktree uses it (#24)
+    #[allow(dead_code)]
+    pub fn kill_session(&self, session: &str) -> Result<()> {
+        self.run(&["kill-session", "-t", session])?;
+        Ok(())
+    }
+
     /// Every session on the server, sorted by name; none when the server is not running.
     pub fn sessions(&self) -> Result<Vec<Session>> {
         match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
@@ -113,6 +202,27 @@ pub struct Session {
     /// When the agent's window last printed, in seconds since the Unix epoch; for a
     /// session without an agent pane, its most recent window.
     pub activity: u64,
+}
+
+/// A session `Server::new_session` started.
+// Not read yet: starting an agent uses it (#21, #22)
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+pub struct NewSession {
+    /// `$3`: the target for commands.
+    pub id: String,
+    pub name: String,
+    /// The pane running the agent: `%4`.
+    pub pane: String,
+}
+
+/// The session name for worktree `name` of the repository named `repo`:
+/// `<repo>-<name>`. `.` and `:` become `-`: tmux accepts them in names, but reads
+/// them in targets as window and pane separators, so `tmux attach -t` would fail.
+// Not called yet: starting an agent uses it (#21, #22)
+#[allow(dead_code)]
+pub fn session_name(repo: &str, name: &str) -> String {
+    format!("{repo}-{name}").replace(['.', ':'], "-")
 }
 
 /// What an agent reports through `@tatou_status`.
@@ -400,7 +510,7 @@ fn undo_commands(conf: &str) -> Vec<Vec<String>> {
 #[cfg(test)]
 pub mod testing {
     use std::ops::Deref;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::Server;
@@ -437,10 +547,24 @@ pub mod testing {
     }
 
     impl Drop for TestServer {
+        /// Kills the server and removes its socket, which tmux leaves behind, also
+        /// when the server exited by itself with its last session.
         fn drop(&mut self) {
             // Fails when the server already exited, which is fine
             let _ = self.0.run(&["kill-server"]);
+            if let Some(socket) = socket_file(&self.0.socket) {
+                let _ = std::fs::remove_file(socket);
+            }
         }
+    }
+
+    /// Where tmux puts the socket named `name`: `$TMUX_TMPDIR`, or `/tmp`, then
+    /// `tmux-<uid>/<name>`.
+    fn socket_file(name: &str) -> Option<PathBuf> {
+        let uid = exec::run("id", &["-u"], None).ok()?.stdout;
+        let dir = std::env::var_os("TMUX_TMPDIR").filter(|dir| !dir.is_empty());
+        let dir = dir.map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        Some(dir.join(format!("tmux-{}", uid.trim())).join(name))
     }
 }
 
@@ -755,6 +879,108 @@ $3\tshort\t/home/me
             Err(Error::Command { stderr, .. }) => assert!(!stderr.is_empty()),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A test server whose default shell is `/bin/sh`, so that commands never run
+    /// the user's shell and its startup files.
+    fn sh_server() -> Option<(TestServer, tempfile::TempDir)> {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("tmux.conf");
+        fs::write(&conf, "set-option -g default-shell /bin/sh\n").unwrap();
+        Some((TestServer::with_conf(&conf)?, dir))
+    }
+
+    /// `format` for `target`, from `display-message`.
+    fn show(server: &Server, target: &str, format: &str) -> String {
+        let output = server.run(&["display-message", "-p", "-t", target, format]);
+        output.unwrap().stdout.trim_end().to_string()
+    }
+
+    #[test]
+    fn session_names_have_no_target_separators() {
+        assert_eq!(session_name("my-app", "fix-login"), "my-app-fix-login");
+        assert_eq!(session_name("my.app", "v1.2:x"), "my-app-v1-2-x");
+        assert_eq!(session_name("app", "feature/login"), "app-feature/login");
+    }
+
+    #[test]
+    fn new_sessions_are_tagged_for_tatou() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let path = dir.path().canonicalize().unwrap();
+        let session = server.new_session("app-fix", &path, "sleep 1000").unwrap();
+        assert_eq!(session.name, "app-fix");
+        assert!(session.id.starts_with('$') && session.pane.starts_with('%'));
+
+        let sessions = server.sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, session.id);
+        assert_eq!(sessions[0].tatou_path.as_deref(), Some(path.as_path()));
+        assert_eq!(
+            sessions[0].agent_pane.as_deref(),
+            Some(session.pane.as_str())
+        );
+        assert_eq!(sessions[0].path, path);
+        let env = server.run(&["show-environment", "-t", &session.id, "TATOU"]);
+        assert_eq!(env.unwrap().stdout, "TATOU=1\n");
+        let command = show(&server, &session.pane, "#{pane_start_command}");
+        assert_eq!(command, "\"sleep 1000\"");
+    }
+
+    #[test]
+    fn a_taken_name_gets_a_number() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let names: Vec<_> = (0..3)
+            .map(|_| {
+                server
+                    .new_session("app-fix", dir.path(), "sleep 1000")
+                    .unwrap()
+                    .name
+            })
+            .collect();
+        assert_eq!(names, ["app-fix", "app-fix-2", "app-fix-3"]);
+    }
+
+    #[test]
+    fn respawns_the_agent_in_its_pane() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let session = server.new_session("app", dir.path(), "sleep 1000").unwrap();
+        let pid = show(&server, &session.pane, "#{pane_pid}");
+        server.respawn_agent(&session.pane, "sleep 2000").unwrap();
+        let after = show(&server, &session.pane, "#{pane_start_command}");
+        assert_eq!(after, "\"sleep 2000\"");
+        assert_ne!(show(&server, &session.pane, "#{pane_pid}"), pid);
+        let path = show(&server, &session.pane, "#{pane_current_path}");
+        assert_eq!(Path::new(&path), dir.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn opens_windows_and_kills_sessions() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let session = server.new_session("app", dir.path(), "sleep 1000").unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let shell = server.new_window(&session.id, other.path(), None).unwrap();
+        let tool = server
+            .new_window(&session.id, other.path(), Some("sleep 3000"))
+            .unwrap();
+        assert!(shell.starts_with('%') && tool.starts_with('%'));
+        let windows = show(&server, &session.id, "#{session_windows}");
+        assert_eq!(windows, "3");
+        let path = show(&server, &shell, "#{pane_current_path}");
+        assert_eq!(Path::new(&path), other.path().canonicalize().unwrap());
+        // The last one opened is the session's current window
+        assert_eq!(show(&server, &session.id, "#{pane_id}"), tool);
+
+        server.kill_session(&session.id).unwrap();
+        assert_eq!(server.sessions().unwrap(), []);
+        assert!(server.kill_session(&session.id).is_err(), "gone");
     }
 
     #[test]
