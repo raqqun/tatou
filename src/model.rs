@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use crate::config::{self, Config};
 use crate::git::Worktree;
 use crate::refresh::Update;
-use crate::tmux::{self, AgentStatus, Session};
+use crate::tmux::{self, AgentStatus, Session, Window};
 
 /// How long after its last output an agent without hooks still counts as active, in seconds.
 const ACTIVE_FOR: u64 = 10;
@@ -66,6 +66,8 @@ pub struct SessionRow {
     /// What it is for: `project/worktree` when it belongs to one, else the
     /// folder it started in, with `~/`.
     pub place: String,
+    /// Its windows, by index.
+    pub windows: Vec<Window>,
 }
 
 /// A worktree's agent: reported by its hooks, else guessed from its window's activity.
@@ -147,6 +149,7 @@ impl Sources {
             name: session.name.clone(),
             status: status(session, now),
             command: session.command.clone(),
+            windows: session.windows.clone(),
             place: match places.get(session.id.as_str()) {
                 Some(place) => place.clone(),
                 None => config::tilde(&session.path, home),
@@ -296,6 +299,7 @@ mod tests {
             path: path.into(),
             activity: NOW,
             command: None,
+            windows: Vec::new(),
         }
     }
 

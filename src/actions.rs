@@ -15,6 +15,11 @@ use crate::tmux::Server;
 pub enum Task {
     /// Shows the session with this id in the dashboard's client.
     Switch(String),
+    /// Shows a window: makes it its session's current one, then shows the session.
+    Window {
+        session: String,
+        window: String,
+    },
     NewWorktree(NewWorktree),
     /// An agent in a new session, for a worktree that has none.
     StartAgent(StartAgent),
@@ -128,6 +133,15 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
         Task::Switch(session) => {
             if let Err(err) = server.switch_client(&session) {
                 tracing::warn!(session, %err, "switch failed");
+                send(Event::Failed(err.to_string()));
+            }
+        }
+        Task::Window { session, window } => {
+            let shown = server
+                .select_window(&window)
+                .and_then(|()| server.switch_client(&session));
+            if let Err(err) = shown {
+                tracing::warn!(session, window, %err, "switch failed");
                 send(Event::Failed(err.to_string()));
             }
         }
@@ -530,6 +544,27 @@ mod tests {
     /// No client is attached in a test: the shell is ready, and showing it fails.
     fn not_shown(events: &[Event]) -> bool {
         matches!(events, [Event::Failed(err)] if err.starts_with("fix: ") && err.contains("switch-client"))
+    }
+
+    #[test]
+    fn a_window_is_selected_then_shown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let session = server
+            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
+            .unwrap();
+        server.new_window(&session.id, tmp.path(), None).unwrap();
+        let first = server.sessions().unwrap()[0].windows[0].id.clone();
+        let task = Task::Window {
+            session: session.id.clone(),
+            window: first.clone(),
+        };
+        let events = events(task, &server);
+        // No client is attached in a test: selected, and showing it fails
+        assert!(matches!(&events[..], [Event::Failed(_)]), "{events:?}");
+        assert!(server.sessions().unwrap()[0].windows[0].current);
     }
 
     #[test]

@@ -25,7 +25,7 @@ const MIN_VERSION: (u32, u32) = (3, 2);
 /// The fields `sessions` reads for each pane, tab-separated; empty when an option is
 /// not set. Panes rather than sessions, because only a window's activity follows the
 /// output of its panes: `session_activity` changes on keyboard input alone.
-const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}";
+const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}\t#{window_id}\t#{window_index}";
 
 /// What `ps` lists of each process, to tell what runs in the foreground of each
 /// pane's terminal; the same columns on Linux and macOS.
@@ -190,6 +190,12 @@ impl Server {
         Ok(())
     }
 
+    /// Makes `window` (an id: `@3`) its session's current window.
+    pub fn select_window(&self, window: &str) -> Result<()> {
+        self.run(&["select-window", "-t", window])?;
+        Ok(())
+    }
+
     /// Every session on the server, sorted by name; none when the server is not running.
     pub fn sessions(&self) -> Result<Vec<Session>> {
         match self.run(&["list-panes", "-a", "-F", PANE_FORMAT]) {
@@ -201,7 +207,7 @@ impl Server {
 }
 
 /// A session on tatou's server, from the list of its panes.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     /// `$1`: the target for commands, unlike the name, which can be ambiguous.
     pub id: String,
@@ -220,6 +226,20 @@ pub struct Session {
     /// What runs in the foreground of its current window's active pane, by the
     /// name it was started under (`claude`, `zsh`, `vim`), as a program's own name
     /// may differ: Claude Code's executable is named after its version.
+    pub command: Option<String>,
+    /// Its windows, by index.
+    pub windows: Vec<Window>,
+}
+
+/// A window of a session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Window {
+    /// `@3`: the target for commands.
+    pub id: String,
+    pub index: u32,
+    /// The session's current window.
+    pub current: bool,
+    /// What runs in its active pane, as `Session::command`.
     pub command: Option<String>,
 }
 
@@ -285,12 +305,27 @@ fn parse_sessions(text: &str, programs: &HashMap<String, String>) -> Vec<Session
             // Without an agent pane, any window counts
             None => panes.iter().map(|pane| pane.activity).max().unwrap_or(0),
         };
-        let current = panes.iter().find(|pane| pane.current);
-        session.command = current.and_then(|pane| {
-            let tty = pane.tty.trim_start_matches("/dev/");
-            // tmux's own name for it, when ps had nothing to say
-            programs.get(tty).cloned().or_else(|| pane.command.clone())
-        });
+        // Every window has one active pane, which names it
+        let mut windows: Vec<Window> = panes
+            .iter()
+            .filter(|pane| pane.pane_active)
+            .map(|pane| {
+                let tty = pane.tty.trim_start_matches("/dev/");
+                Window {
+                    id: pane.window_id.clone(),
+                    index: pane.window_index,
+                    current: pane.window_active,
+                    // tmux's own name for it, when ps had nothing to say
+                    command: programs.get(tty).cloned().or_else(|| pane.command.clone()),
+                }
+            })
+            .collect();
+        windows.sort_by_key(|window| window.index);
+        session.command = windows
+            .iter()
+            .find(|w| w.current)
+            .and_then(|w| w.command.clone());
+        session.windows = windows;
         result.push(session);
     }
     result
@@ -301,8 +336,12 @@ struct Pane {
     id: String,
     /// Its window's activity.
     activity: u64,
-    /// The active pane of the session's current window.
-    current: bool,
+    window_id: String,
+    window_index: u32,
+    /// Its window is the session's current one.
+    window_active: bool,
+    /// The active pane of its window.
+    pane_active: bool,
     command: Option<String>,
     /// Its terminal: `/dev/ttys012`, `/dev/pts/3`.
     tty: String,
@@ -324,6 +363,8 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         pane_active,
         command,
         tty,
+        window_id,
+        window_index,
     ] = fields[..]
     else {
         return None;
@@ -338,12 +379,15 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         path: PathBuf::from(path),
         activity: 0,
         command: None,
+        windows: Vec::new(),
     };
     let pane = Pane {
         id: pane.to_string(),
         activity: activity.parse().ok()?,
-        // Each window has an active pane: the current one is the current window's
-        current: window_active == "1" && pane_active == "1",
+        window_id: window_id.to_string(),
+        window_index: window_index.parse().ok()?,
+        window_active: window_active == "1",
+        pane_active: pane_active == "1",
         command: set(command),
         tty: tty.to_string(),
     };
@@ -911,6 +955,7 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
             path: path.into(),
             activity,
             command: Some(command.into()),
+            windows: Vec::new(),
         };
         let created = |id, name, path: &str, pane: &str, activity, command| Session {
             tatou_path: Some(path.into()),
@@ -938,7 +983,40 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
             ),
             plain("$0", "tatou", "/home/me", 1792793302, "tatou"),
         ];
-        assert_eq!(parse_sessions(text, &programs), expected);
+        let parsed = parse_sessions(text, &programs);
+        let without_windows: Vec<_> = parsed
+            .iter()
+            .map(|s| Session {
+                windows: Vec::new(),
+                ..s.clone()
+            })
+            .collect();
+        assert_eq!(without_windows, expected);
+
+        // Each session's windows, by index, each named by its active pane
+        let window = |id: &str, index, current, command: &str| Window {
+            id: id.into(),
+            index,
+            current,
+            command: Some(command.into()),
+        };
+        let windows: Vec<_> = parsed.into_iter().map(|s| s.windows).collect();
+        assert_eq!(
+            windows,
+            [
+                vec![window("@2", 0, true, "claude")],
+                // The agent's window, then the shell's, split, with vim active
+                vec![
+                    window("@1", 0, false, "claude"),
+                    window("@4", 1, true, "vim")
+                ],
+                vec![
+                    window("@3", 0, false, "claude"),
+                    window("@6", 1, true, "less")
+                ],
+                vec![window("@0", 0, true, "tatou")],
+            ]
+        );
         // Without ps, tmux's names
         let names: Vec<_> = parse_sessions(text, &HashMap::new())
             .into_iter()
@@ -950,8 +1028,8 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     #[test]
     fn a_closed_agent_pane_falls_back_to_the_most_recent_window() {
         let text = "\
-$1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh\t
-$1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t
+$1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh\t\t@1\t0
+$1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t\t@2\t1
 ";
         assert_eq!(parse_sessions(text, &HashMap::new())[0].activity, 200);
     }
@@ -1002,9 +1080,9 @@ $1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t
     #[test]
     fn lines_in_another_shape_are_skipped() {
         let text = "\
-$0\ttatou\t\t\t\t/home/me\t%0\t1792788783\t1\t1\ttatou\t
-$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh\t
-$2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh\t
+$0\ttatou\t\t\t\t/home/me\t%0\t1792788783\t1\t1\ttatou\t\t@0\t0
+$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh\t\t@2\t1
+$2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh\t\t@2\t1
 $3\tshort\t/home/me
 ";
         let names: Vec<_> = parse_sessions(text, &HashMap::new())
@@ -1135,6 +1213,25 @@ $3\tshort\t/home/me
     }
 
     #[test]
+    fn selects_a_window_and_lists_each_one() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let session = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
+        server.new_window(&session.id, dir.path(), None).unwrap();
+        let windows = server.sessions().unwrap()[0].windows.clone();
+        let current: Vec<_> = windows.iter().map(|w| (w.index, w.current)).collect();
+        assert_eq!(current, [(0, false), (1, true)], "the one opened last");
+        assert_eq!(windows[0].command.as_deref(), Some("sleep"));
+
+        server.select_window(&windows[0].id).unwrap();
+        let windows = server.sessions().unwrap()[0].windows.clone();
+        assert!(windows[0].current && !windows[1].current);
+    }
+
+    #[test]
     fn opens_windows_and_kills_sessions() {
         let Some((server, dir)) = sh_server() else {
             return;
@@ -1203,6 +1300,7 @@ $3\tshort\t/home/me
                 path: worktree.into(),
                 activity: sessions[0].activity,
                 command: sessions[0].command.clone(),
+                windows: sessions[0].windows.clone(),
             },
             Session {
                 id: plain,
@@ -1213,6 +1311,7 @@ $3\tshort\t/home/me
                 path: home.into(),
                 activity: sessions[1].activity,
                 command: sessions[1].command.clone(),
+                windows: sessions[1].windows.clone(),
             },
         ];
         assert_eq!(sessions, expected);

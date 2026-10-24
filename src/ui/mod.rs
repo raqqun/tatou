@@ -357,11 +357,16 @@ impl App {
             Action::Quit => self.quit = true,
             Action::Up if sessions => self.sessions.up(),
             Action::Down if sessions => self.sessions.down(),
-            Action::Jump if sessions => {
-                if let Some(row) = self.sessions.selected() {
-                    self.tasks.push(Task::Switch(row.id.clone()));
+            Action::Collapse if sessions => self.sessions.collapse(),
+            Action::Expand if sessions => self.sessions.expand(),
+            // A session, or one of its windows
+            Action::Jump if sessions => match self.sessions.selected().cloned() {
+                Some(sessions::Row::Session(id)) => self.tasks.push(Task::Switch(id)),
+                Some(sessions::Row::Window { session, window }) => {
+                    self.tasks.push(Task::Window { session, window });
                 }
-            }
+                None => {}
+            },
             Action::Up if worktrees => self.tree.up(),
             Action::Down if worktrees => self.tree.down(),
             Action::Collapse if worktrees => self.tree.collapse(),
@@ -1667,6 +1672,7 @@ unknown field `popop`, expected one of `popup`, `back`";
             path: path.into(),
             activity: NOW,
             command: None,
+            windows: Vec::new(),
         }
     }
 
@@ -1736,7 +1742,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         ]);
         assert_eq!(
             sessions_pane(&mut app, 20),
-            ["● app-fix  app/fix", "● notes  ~/notes"],
+            ["▾ ● app-fix  app/fix", "▾ ● notes  ~/notes"],
             "its worktree, else its folder"
         );
     }
@@ -1748,12 +1754,111 @@ unknown field `popop`, expected one of `popup`, `back`";
             ..tmux_session("$1", "app-fix", "/code/app.worktrees/fix")
         };
         let mut app = with_sessions(vec![running("claude")]);
-        assert_eq!(sessions_pane(&mut app, 20), ["● app-fix  claude  app/fix"]);
+        assert_eq!(
+            sessions_pane(&mut app, 20),
+            ["▾ ● app-fix  claude  app/fix"]
+        );
         // Another window, or another program: the next refresh says so
         app.sources
             .apply(Update::Sessions(Ok(vec![running("zsh")])));
         app.update_view(NOW);
-        assert_eq!(sessions_pane(&mut app, 20), ["● app-fix  zsh  app/fix"]);
+        assert_eq!(sessions_pane(&mut app, 20), ["▾ ● app-fix  zsh  app/fix"]);
+    }
+
+    /// `tmux_session` with windows 0 (`claude`) and 1 (`zsh`, current).
+    fn with_windows(id: &str, name: &str, path: &str) -> tmux::Session {
+        let window = |n: u32, current, command: &str| tmux::Window {
+            id: format!("@{id}{n}").replace('$', ""),
+            index: n,
+            current,
+            command: Some(command.into()),
+        };
+        tmux::Session {
+            command: Some("zsh".into()),
+            windows: vec![window(0, false, "claude"), window(1, true, "zsh")],
+            ..tmux_session(id, name, path)
+        }
+    }
+
+    #[test]
+    fn sessions_show_their_windows_as_a_tree() {
+        let mut app = with_sessions(vec![
+            with_windows("$1", "app-fix", "/code/app.worktrees/fix"),
+            with_windows("$2", "notes", "/home/me/notes"),
+        ]);
+        app.focus = Pane::Sessions;
+        let tree = [
+            "▾ ● app-fix  zsh  app/fix",
+            "    0 claude",
+            "    1 zsh *",
+            "▾ ● notes  zsh  ~/notes",
+            "    0 claude",
+            "    1 zsh *",
+        ];
+        assert_eq!(sessions_pane(&mut app, 40), tree);
+
+        // Fold app-fix: its windows go, and Down goes to notes
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(
+            sessions_pane(&mut app, 40)[..2],
+            ["▸ ● app-fix  zsh  app/fix", "▾ ● notes  zsh  ~/notes"]
+        );
+        press(&mut app, KeyCode::Char('l'));
+        // l again: into its first window; h from there: back to the session
+        press(&mut app, KeyCode::Char('l'));
+        let window = sessions::Row::Window {
+            session: "$1".into(),
+            window: "@10".into(),
+        };
+        assert_eq!(app.sessions.selected(), Some(&window));
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(
+            app.sessions.selected(),
+            Some(&sessions::Row::Session("$1".into()))
+        );
+        assert_eq!(
+            sessions_pane(&mut app, 40),
+            tree,
+            "h from a window does not fold"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_window_shows_that_window() {
+        let mut app = with_sessions(vec![with_windows(
+            "$1",
+            "app-fix",
+            "/code/app.worktrees/fix",
+        )]);
+        app.focus = Pane::Sessions;
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        let shown = Task::Window {
+            session: "$1".into(),
+            window: "@11".into(),
+        };
+        assert_eq!(app.tasks, [Task::Switch("$1".into()), shown]);
+
+        // A window opened before it: still on window 1
+        let mut more = with_windows("$1", "app-fix", "/code/app.worktrees/fix");
+        more.windows.insert(
+            0,
+            tmux::Window {
+                id: "@9".into(),
+                index: 0,
+                current: false,
+                command: None,
+            },
+        );
+        app.sources.apply(Update::Sessions(Ok(vec![more])));
+        app.update_view(NOW);
+        let window = sessions::Row::Window {
+            session: "$1".into(),
+            window: "@11".into(),
+        };
+        assert_eq!(app.sessions.selected(), Some(&window));
     }
 
     #[test]
@@ -1800,8 +1905,9 @@ unknown field `popop`, expected one of `popup`, `back`";
         ])));
         app.update_view(NOW);
         assert_eq!(
-            app.sessions.selected().map(|s| s.name.as_str()),
-            Some("notes")
+            app.sessions.selected(),
+            Some(&sessions::Row::Session("$2".into())),
+            "still notes"
         );
         // The tree did not move meanwhile
         assert_eq!(

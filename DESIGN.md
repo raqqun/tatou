@@ -73,15 +73,17 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 │   ○ refactor-db                 │   ? notes.md                              │
 │ ▸ website                       │   Cargo.toml                              │
 ├ Sessions ───────────────────────┤                                           │
-│ ● my-app-fix-login  claude  my… │                                           │
-│ ○ notes  vim  ~/notes           │                                           │
+│ ▾ ● my-app-fix-login  zsh  my-… │                                           │
+│     0 claude                    │                                           │
+│     1 zsh *                     │                                           │
+│ ▸ ○ notes  vim  ~/notes         │                                           │
 ├─────────────────────────────────┴───────────────────────────────────────────┤
 │ ⏎ jump  n new  d remove  e edit  v view  D diff  @ send to agent  ? help    │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Left:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session; without hooks (§8.4), a dim `●` for recent output and a dim `○` otherwise. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
-- **Left, below:** every session on tatou's server but the dashboard's, each with its status, what runs in its current window (the program in the foreground of its terminal by the name it was started under, from `ps`: `claude`, `zsh`, `vim`; tmux's own name for a program is its file's, and Claude Code's file is named after its version), and the `project/worktree` it belongs to, or the folder it started in when it belongs to none; `Enter` jumps to it. As tall as its sessions, up to a third of the column (scrolling past that), one line saying "No sessions" when there are none, and not drawn when a third of the column has no room for a row. tmux's errors show on its bottom border.
+- **Left, below:** every session on tatou's server but the dashboard's, each with its status, what runs in its current window (the program in the foreground of its terminal by the name it was started under, from `ps`: `claude`, `zsh`, `vim`; tmux's own name for a program is its file's, and Claude Code's file is named after its version), and the `project/worktree` it belongs to, or the folder it started in when it belongs to none; under each, as a tree folded and unfolded as the projects are, its windows: index, what runs in it, `*` on the current one. `Enter` jumps to a session, or to a window (`select-window`, then the session). As tall as its sessions, up to a third of the column (scrolling past that), one line saying "No sessions" when there are none, and not drawn when a third of the column has no room for a row. tmux's errors show on its bottom border.
 - **Right:** file tree of the selected worktree. Git markers from `git status --porcelain`: `M` modified, `A` added, `?` untracked, `D` deleted. Respects `.gitignore` by default (toggle to show ignored/hidden files). Optional filter: changed files only.
 - **Bottom:** key hints for the selected row: on a project, only what applies to a project; on a worktree without a session, no jump. A message (e.g. a failed command) replaces them until the next key. `?` shows the full keymap.
 - `Tab` moves focus between panes: projects, sessions, files. The focused pane's border and title are cyan; the others are dim, contents included, keeping their selection and their red errors. The right pane hides automatically when the terminal is narrow.
@@ -119,9 +121,9 @@ All keys are configurable (§9). Any action can also be bound to a custom tmux c
 ```
 projects/*.toml ─► projects
 git worktree list --porcelain (per project) ─► worktrees
-tmux list-panes -a -F '#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}'
+tmux list-panes -a -F '#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}\t#{window_id}\t#{window_index}'
                                              ─► session, status, agent pane per worktree (matched by path),
-                                                and each session's current pane and its terminal
+                                                and each session's windows, their active panes and terminals
 ps -A -o pid=,ppid=,pgid=,tpgid=,tty=,args=  ─► what runs in the foreground of each terminal, by the name it was started under
 gh pr list --state all --json number,headRefName,state,isDraft,statusCheckRollup,url (per project)
                                              ─► PR badge per branch
