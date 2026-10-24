@@ -1384,6 +1384,32 @@ unknown field `popop`, expected one of `popup`, `back`";
     }
 
     #[test]
+    fn s_and_n_offer_agents_only() {
+        let mut app = with_a_session();
+        app.config = Ok(test_config());
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('s'));
+        let lines = screen(&mut app, 80, 14).join("\n");
+        assert!(
+            lines.contains("│claude") && lines.contains("│codex"),
+            "{lines}"
+        );
+        assert!(!lines.contains("shell"), "{lines}");
+        press(&mut app, KeyCode::Esc);
+
+        press(&mut app, KeyCode::Char('n'));
+        let mut agents = Vec::new();
+        for _ in 0..3 {
+            agents.push(form_values(&mut app)[2].clone());
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Right);
+            press(&mut app, KeyCode::Tab);
+        }
+        assert_eq!(agents, ["claude", "codex", "claude"], "two agents, round");
+    }
+
+    #[test]
     fn s_does_nothing_on_a_project() {
         let mut app = with_a_session();
         app.config = Ok(test_config());
