@@ -1,0 +1,7 @@
+$2	api-docs	/home/me/code/api.worktrees/docs	input	%2	/home/me/code/api.worktrees/docs	%2	1792793302
+$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%1	1792793302
+$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%4	1792793305
+$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%5	1792793305
+$3	scratch				/home/me/notes and ideas	%3	1792793302
+$3	scratch				/home/me/notes and ideas	%6	1792793307
+$0	tatou				/home/me	%0	1792793302

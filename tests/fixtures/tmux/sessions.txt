@@ -1,4 +1,0 @@
-$2	api-docs	/home/me/code/api.worktrees/docs	input	%2	/home/me/code/api.worktrees/docs	1792788783
-$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login	busy	%1	/home/me/code/my-app.worktrees/fix login	1792788783
-$3	scratch				/home/me/notes and ideas	1792788783
-$0	tatou				/home/me	1792788783

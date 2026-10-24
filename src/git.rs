@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::exec;
 
 /// A worktree as `git worktree list --porcelain` reports it.
-// Not read yet: the model lists worktrees under their project (#12)
+// Not read yet beyond the model, itself unused until (#13)
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Worktree {

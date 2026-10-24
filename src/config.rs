@@ -55,7 +55,7 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 "#;
 
 /// The configuration, with defaults applied and paths resolved.
-// Not read yet beyond `tmux`: the model uses it (#12)
+// Not read yet beyond `tmux` and the model, itself unused until (#13)
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Config {
@@ -105,7 +105,7 @@ pub struct Keys {
     pub actions: BTreeMap<String, String>,
 }
 
-// Not read yet: the model and worktree creation use it (#12, #21)
+// Not read yet beyond the model: the refresh and worktree creation use it (#13, #21)
 #[allow(dead_code)]
 #[derive(Debug, PartialEq)]
 pub struct Project {
