@@ -469,7 +469,10 @@ mod tests {
         );
         assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
         let command = show(&server, &session.pane, "#{pane_start_command}");
-        assert!(command.starts_with("\"sleep 2000\\n"), "{command}");
+        assert!(
+            command.contains("sleep 2000") && command.contains("switch-client"),
+            "{command}"
+        );
         assert_eq!(show(&server, &session.id, "#{session_windows}"), "1");
     }
 
@@ -494,7 +497,10 @@ mod tests {
         let agent = server.sessions().unwrap()[0].agent_pane.clone().unwrap();
         assert_ne!(agent, session.pane, "the new window's pane");
         let command = show(&server, &agent, "#{pane_start_command}");
-        assert!(command.starts_with("\"sleep 2000\\n"), "{command}");
+        assert!(
+            command.contains("sleep 2000") && command.contains("switch-client"),
+            "{command}"
+        );
         assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
     }
 
@@ -578,12 +584,12 @@ mod tests {
         // The shell is the session's current window; the agent's pane is still the agent
         let current = show(&server, &session.id, "#{pane_id}");
         assert_ne!(current, session.pane);
-        // The user's shell, as a login shell, then the way back
+        // The user's shell, as a login shell, then the way back; tmux versions
+        // escape the command they print differently, so only its parts are checked
         let command = show(&server, &current, "#{pane_start_command}");
-        assert!(
-            command.starts_with(r#""\"\${SHELL:-/bin/sh}\" -l\n"#),
-            "{command}"
-        );
+        for part in ["SHELL:-/bin/sh}", " -l", "switch-client"] {
+            assert!(command.contains(part), "{part} in {command}");
+        }
         let agent = server.sessions().unwrap()[0].agent_pane.clone();
         assert_eq!(agent, Some(session.pane));
     }

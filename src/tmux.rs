@@ -1197,7 +1197,10 @@ $3\tshort\t/home/me
         assert_eq!(env.unwrap().stdout, "TATOU=1\n");
         // The command, then the way back to the dashboard
         let command = show(&server, &session.pane, "#{pane_start_command}");
-        assert!(command.starts_with("\"sleep 1000\\n"), "{command}");
+        assert!(
+            command.contains("sleep 1000") && command.contains("switch-client"),
+            "{command}"
+        );
         assert!(command.contains("switch-client"), "{command}");
     }
 
@@ -1228,7 +1231,10 @@ $3\tshort\t/home/me
         let pid = show(&server, &session.pane, "#{pane_pid}");
         server.respawn_agent(&session.pane, "sleep 2000").unwrap();
         let after = show(&server, &session.pane, "#{pane_start_command}");
-        assert!(after.starts_with("\"sleep 2000\\n"), "{after}");
+        assert!(
+            after.contains("sleep 2000") && after.contains("switch-client"),
+            "{after}"
+        );
         assert_ne!(show(&server, &session.pane, "#{pane_pid}"), pid);
         let path = show(&server, &session.pane, "#{pane_current_path}");
         assert_eq!(Path::new(&path), dir.path().canonicalize().unwrap());
