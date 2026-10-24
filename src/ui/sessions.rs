@@ -57,7 +57,8 @@ impl Sessions {
         self.selected = self.rows.get(self.index).map(|row| row.id.clone());
     }
 
-    /// Each session's status icon, name, and what it is for, dimmed.
+    /// Each session's status icon, name, what runs in its current window, and
+    /// what it is for, dimmed.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block) {
         if self.rows.is_empty() {
             frame.render_widget(Paragraph::new("No sessions").block(block), area);
@@ -69,11 +70,17 @@ impl Sessions {
             .iter()
             .map(|row| {
                 let (icon, style) = status_icon(row.status);
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(icon, style),
                     Span::raw(format!(" {}  ", row.name)),
-                    Span::styled(row.place.clone(), dim),
-                ]))
+                ];
+                if let Some(command) = &row.command {
+                    let bold = Style::new().add_modifier(Modifier::BOLD);
+                    spans.push(Span::styled(command.clone(), bold));
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(row.place.clone(), dim));
+                ListItem::new(Line::from(spans))
             })
             .collect();
         let list = List::new(items)

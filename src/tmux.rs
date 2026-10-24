@@ -24,7 +24,7 @@ const MIN_VERSION: (u32, u32) = (3, 2);
 /// The fields `sessions` reads for each pane, tab-separated; empty when an option is
 /// not set. Panes rather than sessions, because only a window's activity follows the
 /// output of its panes: `session_activity` changes on keyboard input alone.
-const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}";
+const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}";
 
 /// A tmux server: every command sent to it is `tmux -u -L <socket> -f <conf> …`.
 /// `-u` makes tmux print UTF-8 whatever the locale; without it, tabs and non-ASCII
@@ -208,6 +208,9 @@ pub struct Session {
     /// When the agent's window last printed, in seconds since the Unix epoch; for a
     /// session without an agent pane, its most recent window.
     pub activity: u64,
+    /// What runs in its current window's active pane, as tmux names the process:
+    /// `claude`, `zsh`, `vim`.
+    pub command: Option<String>,
 }
 
 /// A session `Server::new_session` started.
@@ -247,8 +250,8 @@ fn no_server(stderr: &str) -> bool {
 /// first appear. A line in another shape, such as one with a tab or a newline inside
 /// a path, is skipped so the other sessions still show.
 fn parse_sessions(text: &str) -> Vec<Session> {
-    // Each session with its panes' ids and window activity
-    let mut sessions: Vec<(Session, Vec<(String, u64)>)> = Vec::new();
+    // Each session with its panes
+    let mut sessions: Vec<(Session, Vec<Pane>)> = Vec::new();
     for line in text.lines().filter(|line| !line.is_empty()) {
         let Some((session, pane)) = parse_pane(line) else {
             tracing::warn!(line, "skipping a tmux pane line in an unexpected shape");
@@ -266,24 +269,31 @@ fn parse_sessions(text: &str) -> Vec<Session> {
     for (mut session, panes) in sessions {
         let agent = panes
             .iter()
-            .find(|(id, _)| session.agent_pane.as_ref() == Some(id));
+            .find(|pane| session.agent_pane.as_ref() == Some(&pane.id));
         session.activity = match agent {
-            Some((_, activity)) => *activity,
+            Some(pane) => pane.activity,
             // Without an agent pane, any window counts
-            None => panes
-                .iter()
-                .map(|(_, activity)| *activity)
-                .max()
-                .unwrap_or(0),
+            None => panes.iter().map(|pane| pane.activity).max().unwrap_or(0),
         };
+        let current = panes.iter().find(|pane| pane.current);
+        session.command = current.and_then(|pane| pane.command.clone());
         result.push(session);
     }
     result
 }
 
-/// One line: the pane's session (its activity not set yet) and the pane's id and
-/// window activity.
-fn parse_pane(line: &str) -> Option<(Session, (String, u64))> {
+/// A pane of a session, from one line.
+struct Pane {
+    id: String,
+    /// Its window's activity.
+    activity: u64,
+    /// The active pane of the session's current window.
+    current: bool,
+    command: Option<String>,
+}
+
+/// One line: the pane's session (its activity and command not set yet) and the pane.
+fn parse_pane(line: &str) -> Option<(Session, Pane)> {
     let fields: Vec<&str> = line.split('\t').collect();
     let [
         id,
@@ -294,6 +304,9 @@ fn parse_pane(line: &str) -> Option<(Session, (String, u64))> {
         path,
         pane,
         activity,
+        window_active,
+        pane_active,
+        command,
     ] = fields[..]
     else {
         return None;
@@ -307,8 +320,16 @@ fn parse_pane(line: &str) -> Option<(Session, (String, u64))> {
         agent_pane: set(agent_pane),
         path: PathBuf::from(path),
         activity: 0,
+        command: None,
     };
-    Some((session, (pane.to_string(), activity.parse().ok()?)))
+    let pane = Pane {
+        id: pane.to_string(),
+        activity: activity.parse().ok()?,
+        // Each window has an active pane: the current one is the current window's
+        current: window_active == "1" && pane_active == "1",
+        command: set(command),
+    };
+    Some((session, pane))
 }
 
 /// Any value other than the three statuses counts as not set.
@@ -789,7 +810,7 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     #[test]
     fn parses_sessions_from_their_panes() {
         let text = include_str!("../tests/fixtures/tmux/panes.txt");
-        let plain = |id: &str, name: &str, path: &str, activity| Session {
+        let plain = |id: &str, name: &str, path: &str, activity, command: &str| Session {
             id: id.into(),
             name: name.into(),
             tatou_path: None,
@@ -797,24 +818,32 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
             agent_pane: None,
             path: path.into(),
             activity,
+            command: Some(command.into()),
         };
-        let created = |id, name, path: &str, pane: &str, activity| Session {
+        let created = |id, name, path: &str, pane: &str, activity, command| Session {
             tatou_path: Some(path.into()),
             agent_pane: Some(pane.into()),
-            ..plain(id, name, path, activity)
+            ..plain(id, name, path, activity, command)
         };
         let docs = "/home/me/code/api.worktrees/docs";
         let login = "/home/me/code/my-app.worktrees/fix login";
         let expected = [
             Session {
                 status: Some(AgentStatus::Input),
-                ..created("$2", "api-docs", docs, "%2", 1792793302)
+                ..created("$2", "api-docs", docs, "%2", 1792793302, "claude")
             },
-            // Its agent's window, not the shell window opened later
-            created("$1", "my-app-fix login", login, "%1", 1792793302),
+            // Its agent's window, not the shell window opened later, and what runs
+            // in the active pane of its current window: vim in a split of the shell's
+            created("$1", "my-app-fix login", login, "%1", 1792793302, "vim"),
             // No agent pane: its most recent window
-            plain("$3", "scratch", "/home/me/notes and ideas", 1792793307),
-            plain("$0", "tatou", "/home/me", 1792793302),
+            plain(
+                "$3",
+                "scratch",
+                "/home/me/notes and ideas",
+                1792793307,
+                "less",
+            ),
+            plain("$0", "tatou", "/home/me", 1792793302, "tatou"),
         ];
         assert_eq!(parse_sessions(text), expected);
     }
@@ -822,8 +851,8 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     #[test]
     fn a_closed_agent_pane_falls_back_to_the_most_recent_window() {
         let text = "\
-$1\tapp\t/a\t\t%9\t/a\t%1\t100
-$1\tapp\t/a\t\t%9\t/a\t%2\t200
+$1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh
+$1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh
 ";
         assert_eq!(parse_sessions(text)[0].activity, 200);
     }
@@ -836,9 +865,9 @@ $1\tapp\t/a\t\t%9\t/a\t%2\t200
     #[test]
     fn lines_in_another_shape_are_skipped() {
         let text = "\
-$0\ttatou\t\t\t\t/home/me\t%0\t1792788783
-$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783
-$2\tactivity\t\t\t\t/home/me\t%2\tnot a number
+$0\ttatou\t\t\t\t/home/me\t%0\t1792788783\t1\t1\ttatou
+$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh
+$2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh
 $3\tshort\t/home/me
 ";
         let names: Vec<_> = parse_sessions(text).into_iter().map(|s| s.name).collect();
@@ -1033,6 +1062,7 @@ $3\tshort\t/home/me
                 agent_pane: Some(pane),
                 path: worktree.into(),
                 activity: sessions[0].activity,
+                command: sessions[0].command.clone(),
             },
             Session {
                 id: plain,
@@ -1042,10 +1072,13 @@ $3\tshort\t/home/me
                 agent_pane: None,
                 path: home.into(),
                 activity: sessions[1].activity,
+                command: sessions[1].command.clone(),
             },
         ];
         assert_eq!(sessions, expected);
         assert!(sessions.iter().all(|session| session.activity > 0));
+        // The test server's default shell, whichever it is
+        assert!(sessions.iter().all(|session| session.command.is_some()));
     }
 
     #[test]

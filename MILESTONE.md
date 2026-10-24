@@ -422,6 +422,18 @@ Depends on: 2.4
 - git tests in a TempDir with a local "remote": `origin/HEAD` read, and its absence handled.
 - UI tests: the Base prefilled on a project row and on a worktree row, and for a detached worktree.
 
+### 2.13 Sessions pane shows the program in each session's current window (#93)
+
+Depends on: 2.9
+
+- Each row of the Sessions pane shows what runs in the session's current window, as tmux names its foreground program: `● app-fix  claude  app/fix`, `● notes  vim  ~/notes`.
+- Read with the sessions, in the same `list-panes -a` call: its format gains `#{window_active}`, `#{pane_active}` and `#{pane_current_command}`. Every window has an active pane; the session's is the one active in its current window. No new tmux command, no tag; it follows window switches within a refresh.
+- tmux names the process, not the agent: an agent run as a script may show as `node` or `python` (Claude Code shows as `claude`).
+
+**Done when**
+- Parser tests on the captured `list-panes` fixture, extended with the three fields: the current window's active pane's program is the session's.
+- `TestBackend` test: the program shows between the name and the place.
+
 ---
 
 ## M3 — Status
