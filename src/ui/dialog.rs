@@ -23,11 +23,12 @@ pub enum Outcome {
     Submit,
 }
 
-// Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-#[allow(dead_code)]
 pub enum Dialog {
     Form(Form),
+    // Not used yet: start agent and remove ask with them (#22, #24)
+    #[allow(dead_code)]
     Choice(Choice),
+    #[allow(dead_code)]
     Confirm(Confirm),
     Message(Message),
 }
@@ -78,8 +79,6 @@ pub struct Input {
 
 impl Input {
     /// `text`, with the cursor at its end.
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-    #[allow(dead_code)]
     pub fn new(text: &str) -> Input {
         Input {
             text: text.to_string(),
@@ -165,8 +164,6 @@ impl Input {
     }
 }
 
-// Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-#[allow(dead_code)]
 pub enum Field {
     Text {
         label: String,
@@ -180,8 +177,6 @@ pub enum Field {
 }
 
 impl Field {
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-    #[allow(dead_code)]
     pub fn text(label: &str, value: &str) -> Field {
         Field::Text {
             label: label.to_string(),
@@ -190,8 +185,6 @@ impl Field {
     }
 
     /// `options` with the one equal to `selected` chosen, else the first.
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-    #[allow(dead_code)]
     pub fn choice(label: &str, options: Vec<String>, selected: &str) -> Field {
         let selected = options.iter().position(|o| o == selected).unwrap_or(0);
         Field::Choice {
@@ -225,35 +218,43 @@ pub struct Form {
     focus: usize,
     /// Why the last answer was refused; the form stays open meanwhile.
     error: Option<String>,
+    /// What runs with the answer; only Esc works until it is done.
+    busy: Option<String>,
 }
 
 impl Form {
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-    #[allow(dead_code)]
     pub fn new(title: &str, fields: Vec<Field>) -> Form {
         Form {
             title: title.to_string(),
             fields,
             focus: 0,
             error: None,
+            busy: None,
         }
     }
 
     /// The fields' values, in order.
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-    #[allow(dead_code)]
     pub fn values(&self) -> Vec<&str> {
         self.fields.iter().map(Field::value).collect()
     }
 
     /// Shows why the answer cannot be used, e.g. not a repository.
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-    #[allow(dead_code)]
     pub fn set_error(&mut self, error: &str) {
         self.error = Some(error.to_string());
     }
 
+    /// Shows that the answer is being used, or with `None`, that it no longer is.
+    pub fn set_busy(&mut self, busy: Option<&str>) {
+        self.busy = busy.map(String::from);
+    }
+
     fn key(&mut self, key: KeyEvent) -> Outcome {
+        if self.busy.is_some() {
+            return match key.code {
+                KeyCode::Esc => Outcome::Cancel,
+                _ => Outcome::Open,
+            };
+        }
         let count = self.fields.len().max(1);
         match key.code {
             KeyCode::Esc => return Outcome::Cancel,
@@ -286,7 +287,8 @@ impl Form {
         let label_width = self.fields.iter().map(|f| f.label().chars().count()).max();
         let label_width = label_width.unwrap_or(0);
         let error_lines = self.error.as_ref().map_or(0, |e| e.lines().count() + 1);
-        let height = self.fields.len() + error_lines;
+        let busy_lines = if self.busy.is_some() { 2 } else { 0 };
+        let height = self.fields.len() + error_lines + busy_lines;
         let inner = open(frame, area, &self.title, height as u16);
         let value_width = (inner.width as usize).saturating_sub(label_width + 2);
 
@@ -324,6 +326,13 @@ impl Form {
                     .map(|line| Line::styled(line.to_string(), red)),
             );
         }
+        if let Some(busy) = &self.busy {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                busy.clone(),
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        }
         frame.render_widget(Paragraph::new(lines), inner);
     }
 }
@@ -336,7 +345,7 @@ pub struct Choice {
 }
 
 impl Choice {
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
+    // Not used yet: start agent and remove ask with them (#22, #24)
     #[allow(dead_code)]
     pub fn new(title: &str, options: Vec<String>) -> Choice {
         Choice {
@@ -347,7 +356,7 @@ impl Choice {
     }
 
     /// The option chosen; `None` when there are none.
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
+    // Not used yet: start agent and remove ask with them (#22, #24)
     #[allow(dead_code)]
     pub fn selected(&self) -> Option<usize> {
         self.list.selected().filter(|&i| i < self.options.len())
@@ -388,7 +397,7 @@ pub struct Confirm {
 }
 
 impl Confirm {
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
+    // Not used yet: start agent and remove ask with them (#22, #24)
     #[allow(dead_code)]
     pub fn new(title: &str, question: &str, default: bool) -> Confirm {
         Confirm {
@@ -432,8 +441,6 @@ pub struct Message {
 }
 
 impl Message {
-    // Not used yet: new worktree, start agent and remove open dialogs (#21, #22, #24)
-    #[allow(dead_code)]
     pub fn new(title: &str, text: &str) -> Message {
         Message {
             title: title.to_string(),
