@@ -213,6 +213,7 @@ mod tests {
                     worktree_dir: None,
                     on_create: None,
                     error: None,
+                    file: "/c/projects/p.toml".into(),
                 })
                 .collect(),
         }

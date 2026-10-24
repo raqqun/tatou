@@ -48,12 +48,12 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # [keys.tmux]
 # "M-|" = "split-window -h -c '#{pane_current_path}'"
 
-# One [[project]] per repository
-# [[project]]
-# path = "~/code/my-app"
-# base = "main"                        # default: the branch checked out in the main worktree
-# worktree_dir = "~/worktrees/my-app"  # default: ~/code/my-app.worktrees
-# on_create = "cp ../my-app/.env . && npm install"
+# Projects are not set here: each is a file in projects/, next to this one,
+# written by `tatou add <path>` and yours to edit. projects/my-app.toml:
+#   path = "~/code/my-app"
+#   base = "main"                        # default: the branch checked out in the main worktree
+#   worktree_dir = "~/worktrees/my-app"  # default: ~/code/my-app.worktrees
+#   on_create = "cp ../my-app/.env . && npm install"
 "#;
 
 /// The configuration, with defaults applied and paths resolved.
@@ -67,6 +67,7 @@ pub struct Config {
     /// Built-in agents merged with the user's `[agents]`.
     pub agents: BTreeMap<String, String>,
     pub keys: Keys,
+    /// From the files in `projects/`, by file name.
     pub projects: Vec<Project>,
 }
 
@@ -113,8 +114,11 @@ pub struct Project {
     pub base: Option<String>,
     pub worktree_dir: Option<PathBuf>,
     pub on_create: Option<String>,
-    /// Why the project cannot be used, e.g. its directory is missing; shown next to it.
+    /// Why the project cannot be used, e.g. its directory is missing or its file
+    /// does not parse; shown next to it.
     pub error: Option<String>,
+    /// The file in `projects/` it comes from.
+    pub file: PathBuf,
 }
 
 /// `config.toml` as written by the user.
@@ -130,10 +134,11 @@ struct File {
     agents: BTreeMap<String, String>,
     #[serde(default)]
     keys: Keys,
-    #[serde(default, rename = "project")]
-    projects: Vec<ProjectFile>,
+    /// Where projects were before they moved to `projects/`; an error with a hint.
+    project: Option<toml::Value>,
 }
 
+/// A file in `projects/`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectFile {
@@ -162,9 +167,33 @@ pub fn reload(path: &Path) -> Result<Config> {
     load_from(path, home.as_deref())
 }
 
-/// When `path` was last modified; `None` when it cannot be read.
-pub fn modified(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).and_then(|meta| meta.modified()).ok()
+/// The folder of project files, next to the config at `path`.
+pub fn projects_dir(path: &Path) -> PathBuf {
+    path.with_file_name("projects")
+}
+
+/// When the config at `path` and its project files were last modified, to tell
+/// when it needs loading again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stamp {
+    config: Option<SystemTime>,
+    /// By file name; adding or removing a file changes it too.
+    projects: Vec<(PathBuf, Option<SystemTime>)>,
+}
+
+pub fn stamp(path: &Path) -> Stamp {
+    let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    let files = project_files(&projects_dir(path)).unwrap_or_default();
+    Stamp {
+        config: modified(path),
+        projects: files
+            .into_iter()
+            .map(|file| {
+                let modified = modified(&file);
+                (file, modified)
+            })
+            .collect(),
+    }
 }
 
 pub fn load_from(path: &Path, home: Option<&Path>) -> Result<Config> {
@@ -172,64 +201,130 @@ pub fn load_from(path: &Path, home: Option<&Path>) -> Result<Config> {
         path: path.to_path_buf(),
         source,
     })?;
-    parse(&text, path, home).map_err(|message| Error::Config {
+    let mut config = parse(&text, path).map_err(|message| Error::Config {
         path: path.to_path_buf(),
         message,
-    })
+    })?;
+    config.projects = load_projects(&projects_dir(path), home)?;
+    Ok(config)
 }
 
-/// What `add_project` did.
+/// The `.toml` files in `dir`, by name; none when `dir` does not exist. Hidden
+/// files, editors' backups and `write_atomic`'s temporary files are left out.
+fn project_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(Error::Io {
+                path: dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|file| {
+            let name = file.file_name().unwrap_or_default().to_string_lossy();
+            !name.starts_with('.') && name.ends_with(".toml")
+        })
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// The projects in `dir`, one per file; a file that cannot be read, or names a
+/// project another file already has, is a project with an error.
+fn load_projects(dir: &Path, home: Option<&Path>) -> Result<Vec<Project>> {
+    let mut projects: Vec<Project> = Vec::new();
+    for file in project_files(dir)? {
+        let read = fs::read_to_string(&file).map_err(|err| err.to_string());
+        let parsed = read.and_then(|text| toml::from_str(&text).map_err(|err| err.to_string()));
+        let mut project = match parsed {
+            Ok(parsed) => resolve_project(parsed, home, &file),
+            Err(message) => Project {
+                path: file.clone(),
+                base: None,
+                worktree_dir: None,
+                on_create: None,
+                error: Some(format!("{}: {message}", file.display())),
+                file,
+            },
+        };
+        if let Some(first) = projects.iter().find(|p| p.path == project.path) {
+            let first = first.file.display();
+            project
+                .error
+                .get_or_insert(format!("the same project as {first}"));
+        }
+        projects.push(project);
+    }
+    Ok(projects)
+}
+
+/// What `add_project` did, and the project's file.
 #[derive(Debug, PartialEq)]
 pub enum Added {
-    Added,
+    Added(PathBuf),
     /// A project already has this path; nothing was written.
-    AlreadyThere,
+    AlreadyThere(PathBuf),
 }
 
-/// Adds `repo` to `<config dir>/config.toml`, first writing the template if it
-/// does not exist; see `add_project_to`.
+impl Added {
+    /// What `tatou add` says about `repo`.
+    pub fn message(&self, repo: &Path, home: Option<&Path>) -> String {
+        let repo = tilde(repo, home);
+        match self {
+            Added::Added(file) => format!("Added {repo}: {}", tilde(file, home)),
+            Added::AlreadyThere(file) => {
+                format!("{repo} is already a project: {}", tilde(file, home))
+            }
+        }
+    }
+}
+
+/// Adds `repo` to the projects next to `<config dir>/config.toml`, first writing
+/// the config's template if it does not exist; see `add_project_to`.
 pub fn add_project(repo: &Path) -> Result<Added> {
     let path = path()?;
     write_template(&path)?;
     let home = env::var_os("HOME").map(PathBuf::from);
-    add_project_to(&path, repo, home.as_deref())
+    add_project_to(&projects_dir(&path), repo, home.as_deref())
 }
 
-/// Appends a `[[project]]` for `repo`, a main worktree, to the config at `path`,
-/// unless a project already has its canonical path. The rest of the file, comments
-/// included, is left as written, and the new text must load before it replaces it.
-pub fn add_project_to(path: &Path, repo: &Path, home: Option<&Path>) -> Result<Added> {
-    let invalid = |message| Error::Config {
-        path: path.to_path_buf(),
-        message,
-    };
-    let text = fs::read_to_string(path).map_err(|source| Error::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let config = parse(&text, path, home).map_err(invalid)?;
+/// Writes `<dir>/<repo's folder name>.toml` with `repo`, a main worktree, as its
+/// `path`, unless a project already has its canonical path. A name already taken
+/// gets `-2`, `-3`, …; the file must load before it is written.
+pub fn add_project_to(dir: &Path, repo: &Path, home: Option<&Path>) -> Result<Added> {
     let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-    if config.projects.iter().any(|project| project.path == repo) {
-        return Ok(Added::AlreadyThere);
+    let projects = load_projects(dir, home)?;
+    if let Some(project) = projects.into_iter().find(|project| project.path == repo) {
+        return Ok(Added::AlreadyThere(project.file));
     }
-    let new = append_project(&text, &tilde(&repo, home));
-    parse(&new, path, home).map_err(invalid)?;
-    write_atomic(path, &new)?;
-    Ok(Added::Added)
-}
-
-/// `text` with a `[[project]]` block for `path` at the end, after a blank line.
-fn append_project(text: &str, path: &str) -> String {
-    let mut new = text.to_string();
-    if !new.is_empty() && !new.ends_with('\n') {
-        new.push('\n');
+    let name = match repo.file_name() {
+        Some(name) => name.to_string_lossy().into_owned(),
+        None => "project".to_string(),
+    };
+    let mut file = dir.join(format!("{name}.toml"));
+    let mut n = 1;
+    while fs::symlink_metadata(&file).is_ok() {
+        n += 1;
+        file = dir.join(format!("{name}-{n}.toml"));
     }
-    if !new.is_empty() && !new.ends_with("\n\n") {
-        new.push('\n');
+    let quoted = toml::Value::String(tilde(&repo, home)).to_string();
+    let text = format!("path = {quoted}\n");
+    let parsed = toml::from_str(&text).map_err(|err: toml::de::Error| Error::Config {
+        path: file.clone(),
+        message: err.to_string(),
+    })?;
+    if let Some(message) = resolve_project(parsed, home, &file).error {
+        return Err(Error::Config {
+            path: file,
+            message,
+        });
     }
-    let quoted = toml::Value::String(path.to_string()).to_string();
-    new.push_str(&format!("[[project]]\npath = {quoted}\n"));
-    new
+    write_atomic(&file, &text)?;
+    Ok(Added::Added(file))
 }
 
 /// `path` as written in the config and shown to the user: under `$HOME`, with `~/`.
@@ -293,8 +388,16 @@ fn write_template(path: &Path) -> Result<()> {
     }
 }
 
-fn parse(text: &str, path: &Path, home: Option<&Path>) -> std::result::Result<Config, String> {
+/// The settings in `config.toml`; projects are loaded from their own files.
+fn parse(text: &str, path: &Path) -> std::result::Result<Config, String> {
     let file: File = toml::from_str(text).map_err(|err| err.to_string())?;
+    if file.project.is_some() {
+        return Err(format!(
+            "[[project]] is no longer read from config.toml: each project is a file in {}, \
+             written by `tatou add <path>`",
+            projects_dir(path).display()
+        ));
+    }
 
     let mut agents = BTreeMap::from([
         ("claude".to_string(), "claude".to_string()),
@@ -311,12 +414,6 @@ fn parse(text: &str, path: &Path, home: Option<&Path>) -> std::result::Result<Co
         ));
     }
 
-    let projects = file
-        .projects
-        .into_iter()
-        .map(|project| resolve_project(project, home))
-        .collect();
-
     Ok(Config {
         path: path.to_path_buf(),
         default_agent,
@@ -324,13 +421,13 @@ fn parse(text: &str, path: &Path, home: Option<&Path>) -> std::result::Result<Co
         tmux: file.tmux,
         agents,
         keys: file.keys,
-        projects,
+        projects: Vec::new(),
     })
 }
 
 /// Expands `~` in the project's paths and canonicalises its directory; problems
 /// are kept on the project so the others still load.
-fn resolve_project(project: ProjectFile, home: Option<&Path>) -> Project {
+fn resolve_project(project: ProjectFile, home: Option<&Path>, file: &Path) -> Project {
     let mut error = None;
     let path = match expand_tilde(&project.path, home) {
         Ok(path) => match path.canonicalize() {
@@ -359,6 +456,7 @@ fn resolve_project(project: ProjectFile, home: Option<&Path>) -> Project {
         worktree_dir,
         on_create: project.on_create,
         error,
+        file: file.to_path_buf(),
     }
 }
 
@@ -431,21 +529,24 @@ mod tests {
     }
 
     fn parse_ok(text: &str) -> Config {
-        parse(
-            text,
-            Path::new("/c/config.toml"),
-            Some(Path::new("/home/me")),
-        )
-        .unwrap()
+        parse(text, Path::new("/c/config.toml")).unwrap()
     }
 
     fn parse_err(text: &str) -> String {
-        parse(
-            text,
-            Path::new("/c/config.toml"),
-            Some(Path::new("/home/me")),
-        )
-        .unwrap_err()
+        parse(text, Path::new("/c/config.toml")).unwrap_err()
+    }
+
+    /// The projects loaded from `files`, written as (name, text) in a `projects/`
+    /// folder, with `/home/me` as `$HOME`.
+    fn projects(files: &[(&str, &str)]) -> (tempfile::TempDir, Vec<Project>) {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = dir.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+        for (name, text) in files {
+            fs::write(projects.join(name), text).unwrap();
+        }
+        let loaded = load_projects(&projects, Some(Path::new("/home/me"))).unwrap();
+        (dir, loaded)
     }
 
     #[test]
@@ -516,12 +617,6 @@ mod tests {
 
             [keys.tmux]
             "M-|" = "split-window -h -c '#{pane_current_path}'"
-
-            [[project]]
-            path = "/"
-            base = "main"
-            worktree_dir = "~/worktrees/my-app"
-            on_create = "cp ../my-app/.env . && npm install"
             "#,
         );
         assert!(config.show_ignored);
@@ -537,7 +632,15 @@ mod tests {
             config.keys.tmux["M-|"],
             "split-window -h -c '#{pane_current_path}'"
         );
-        let project = &config.projects[0];
+    }
+
+    #[test]
+    fn a_project_file_has_the_projects_settings() {
+        let text = "path = \"/\"\nbase = \"main\"\nworktree_dir = \"~/worktrees/my-app\"\n\
+                    on_create = \"cp ../my-app/.env . && npm install\"\n";
+        let (dir, projects) = projects(&[("my-app.toml", text)]);
+        let project = &projects[0];
+        assert_eq!(project.file, dir.path().join("projects/my-app.toml"));
         assert_eq!(project.path, PathBuf::from("/"));
         assert_eq!(project.base.as_deref(), Some("main"));
         assert_eq!(
@@ -560,8 +663,54 @@ mod tests {
         let message = parse_err("[tmux]\npopup_key = \"M-g\"\n");
         assert!(message.contains("popup_key"), "{message}");
 
-        let message = parse_err("[[project]]\npath = \"/\"\nbranch = \"main\"\n");
+        let (_dir, projects) = projects(&[("app.toml", "path = \"/\"\nbranch = \"main\"\n")]);
+        let message = projects[0].error.as_deref().unwrap();
+        assert!(message.contains("app.toml: "), "{message}");
         assert!(message.contains("branch"), "{message}");
+    }
+
+    #[test]
+    fn projects_in_config_toml_point_to_their_files() {
+        let message = parse_err("[[project]]\npath = \"/\"\n");
+        assert!(
+            message.starts_with("[[project]] is no longer read from config.toml"),
+            "{message}"
+        );
+        assert!(message.contains("/c/projects"), "{message}");
+    }
+
+    #[test]
+    fn projects_come_from_their_toml_files_by_name() {
+        let (_dir, projects) = projects(&[
+            ("web.toml", "path = \"/tmp\"\n"),
+            ("app.toml", "path = \"/\"\n"),
+            (".hidden.toml", "path = \"/\"\n"),
+            ("app.toml~", "path = \"/\"\n"),
+            ("app.toml.123.tmp", "path = \"/\"\n"),
+            ("notes.txt", "hello"),
+        ]);
+        let names: Vec<_> = projects
+            .iter()
+            .map(|p| p.file.file_name().unwrap())
+            .collect();
+        assert_eq!(names, ["app.toml", "web.toml"]);
+    }
+
+    #[test]
+    fn no_projects_folder_is_no_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let none = load_projects(&dir.path().join("projects"), None).unwrap();
+        assert_eq!(none, []);
+    }
+
+    #[test]
+    fn two_files_with_one_path_mark_the_second() {
+        let (dir, projects) =
+            projects(&[("a.toml", "path = \"/\"\n"), ("b.toml", "path = \"/\"\n")]);
+        assert_eq!(projects[0].error, None);
+        let first = dir.path().join("projects/a.toml");
+        let expected = format!("the same project as {}", first.display());
+        assert_eq!(projects[1].error, Some(expected));
     }
 
     #[test]
@@ -602,27 +751,68 @@ mod tests {
 
     #[test]
     fn project_paths_are_canonicalised() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo");
-        fs::create_dir(&repo).unwrap();
-        let text = format!("[[project]]\npath = \"{}/./repo\"\n", dir.path().display());
-        let config = parse_ok(&text);
-        assert_eq!(config.projects[0].path, repo.canonicalize().unwrap());
-        assert_eq!(config.projects[0].error, None);
+        let repo = tempfile::tempdir().unwrap();
+        let text = format!("path = \"{}/./\"\n", repo.path().display());
+        let (_dir, projects) = projects(&[("repo.toml", &text)]);
+        assert_eq!(projects[0].path, repo.path().canonicalize().unwrap());
+        assert_eq!(projects[0].error, None);
     }
 
     #[test]
-    fn a_bad_project_path_only_marks_that_project() {
-        let config = parse_ok(
-            "[[project]]\npath = \"/tatou/no/such/dir\"\n\
-             [[project]]\npath = \"relative/dir\"\n\
-             [[project]]\npath = \"/\"\n",
-        );
-        let errors: Vec<_> = config.projects.iter().map(|p| p.error.is_some()).collect();
-        assert_eq!(errors, [true, true, false]);
-        let missing = config.projects[0].error.as_deref().unwrap();
+    fn a_bad_project_only_marks_that_project() {
+        let (_dir, projects) = projects(&[
+            ("a.toml", "path = \"/tatou/no/such/dir\"\n"),
+            ("b.toml", "path = \"relative/dir\"\n"),
+            ("c.toml", "path = \"/\"\n"),
+            ("d.toml", "path = ["),
+        ]);
+        let errors: Vec<_> = projects.iter().map(|p| p.error.is_some()).collect();
+        assert_eq!(errors, [true, true, false, true]);
+        let missing = projects[0].error.as_deref().unwrap();
         assert!(missing.starts_with("/tatou/no/such/dir: "), "{missing}");
-        assert_eq!(config.projects[0].path, PathBuf::from("/tatou/no/such/dir"));
+        assert_eq!(projects[0].path, PathBuf::from("/tatou/no/such/dir"));
+        // A file that does not parse stands for itself
+        assert_eq!(projects[3].path, projects[3].file);
+    }
+
+    #[test]
+    fn a_config_loads_its_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "").unwrap();
+        fs::create_dir(dir.path().join("projects")).unwrap();
+        fs::write(dir.path().join("projects/root.toml"), "path = \"/\"\n").unwrap();
+        let config = load_from(&path, None).unwrap();
+        assert_eq!(config.projects[0].path, PathBuf::from("/"));
+    }
+
+    #[test]
+    fn the_stamp_changes_with_the_config_and_its_project_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let at = |file: &Path, secs| {
+            let file = fs::File::options().write(true).open(file).unwrap();
+            let time = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            file.set_modified(time).unwrap();
+        };
+        fs::write(&path, "").unwrap();
+        at(&path, 1_000);
+        let first = stamp(&path);
+        assert_eq!(stamp(&path), first, "unchanged");
+
+        let projects = dir.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+        let app = projects.join("app.toml");
+        fs::write(&app, "path = \"/\"\n").unwrap();
+        at(&app, 2_000);
+        let added = stamp(&path);
+        assert_ne!(added, first, "a file added");
+        at(&app, 3_000);
+        assert_ne!(stamp(&path), added, "a file edited");
+        fs::remove_file(&app).unwrap();
+        assert_eq!(stamp(&path), first, "removed again");
+        at(&path, 4_000);
+        assert_ne!(stamp(&path), first, "config.toml edited");
     }
 
     #[test]
@@ -649,14 +839,6 @@ mod tests {
         assert!(err.to_string().contains("line 1"), "{err}");
     }
 
-    /// A config file in a temporary directory, which also stands for `$HOME`.
-    fn config_file(text: &str) -> (tempfile::TempDir, PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        fs::write(&path, text).unwrap();
-        (dir, path)
-    }
-
     /// A directory in `home` to add as a project, canonical like git prints it.
     fn repo(home: &Path, name: &str) -> PathBuf {
         let repo = home.join(name);
@@ -665,82 +847,81 @@ mod tests {
     }
 
     #[test]
-    fn adding_a_project_appends_it_and_keeps_the_rest() {
-        let original = "# my settings\ndefault_agent = \"codex\" # inline comment\n";
-        let (dir, path) = config_file(original);
-        let home = dir.path();
+    fn adding_a_project_writes_its_file() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let dir = home.join(".config/tatou/projects");
         let app = repo(home, "code/my app");
+        let file = dir.join("my app.toml");
+        let added = add_project_to(&dir, &app, Some(home)).unwrap();
+        assert_eq!(added, Added::Added(file.clone()));
         assert_eq!(
-            add_project_to(&path, &app, Some(home)).unwrap(),
-            Added::Added
+            fs::read_to_string(&file).unwrap(),
+            "path = \"~/code/my app\"\n"
         );
-
-        let text = fs::read_to_string(&path).unwrap();
-        let expected = "\n[[project]]\npath = \"~/code/my app\"\n";
-        assert_eq!(text, format!("{original}{expected}"));
-        let config = load_from(&path, Some(home)).unwrap();
-        assert_eq!(config.projects[0].path, app);
-        assert_eq!(config.projects[0].error, None);
+        let projects = load_projects(&dir, Some(home)).unwrap();
+        assert_eq!(projects[0].path, app);
+        assert_eq!(projects[0].error, None);
+        assert_eq!(
+            added.message(&app, Some(home)),
+            "Added ~/code/my app: ~/.config/tatou/projects/my app.toml"
+        );
     }
 
     #[test]
     fn adding_the_same_project_again_changes_nothing() {
-        let (dir, path) = config_file("");
-        let home = dir.path();
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let dir = home.join("projects");
         let app = repo(home, "app");
+        let file = dir.join("app.toml");
         assert_eq!(
-            add_project_to(&path, &app, Some(home)).unwrap(),
-            Added::Added
-        );
-        let once = fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            once, "[[project]]\npath = \"~/app\"\n",
-            "no blank line first"
+            add_project_to(&dir, &app, Some(home)).unwrap(),
+            Added::Added(file.clone())
         );
         // Through a symlink it is the same directory
         let link = home.join("link");
         std::os::unix::fs::symlink(&app, &link).unwrap();
         for again in [&app, &link] {
-            let added = add_project_to(&path, again, Some(home)).unwrap();
-            assert_eq!(added, Added::AlreadyThere, "{again:?}");
+            let added = add_project_to(&dir, again, Some(home)).unwrap();
+            assert_eq!(added, Added::AlreadyThere(file.clone()), "{again:?}");
         }
-        assert_eq!(fs::read_to_string(&path).unwrap(), once);
+        let names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["app.toml"]);
+        let already = Added::AlreadyThere(file).message(&app, Some(home));
+        assert_eq!(already, "~/app is already a project: ~/projects/app.toml");
     }
 
     #[test]
-    fn a_project_outside_home_and_odd_names_are_written_as_toml() {
-        let (dir, path) = config_file("[tmux]\nback = \"M-b\"");
+    fn a_name_already_taken_gets_a_number() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let dir = home.join("projects");
+        let first = repo(home, "work/app");
+        let second = repo(home, "personal/app");
+        add_project_to(&dir, &first, Some(home)).unwrap();
+        let added = add_project_to(&dir, &second, Some(home)).unwrap();
+        assert_eq!(added, Added::Added(dir.join("app-2.toml")));
+        let paths: Vec<_> = load_projects(&dir, Some(home))
+            .unwrap()
+            .into_iter()
+            .map(|p| p.path)
+            .collect();
+        assert_eq!(paths, [second, first], "by file name");
+    }
+
+    #[test]
+    fn odd_names_are_written_as_toml() {
         let elsewhere = tempfile::tempdir().unwrap();
         let odd = repo(elsewhere.path(), "it's \"quoted\" \\ here");
-        add_project_to(&path, &odd, Some(dir.path())).unwrap();
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(
-            text.starts_with("[tmux]\nback = \"M-b\"\n\n[[project]]\n"),
-            "a newline, then a blank line: {text}"
-        );
-        let config = load_from(&path, Some(dir.path())).unwrap();
-        assert_eq!(config.projects[0].path, odd);
-        assert_eq!(config.tmux.back, "M-b", "still in [tmux]");
-    }
-
-    #[test]
-    fn an_invalid_config_is_left_alone() {
-        let (dir, path) = config_file("popop = 1\n");
-        let app = repo(dir.path(), "app");
-        let err = add_project_to(&path, &app, Some(dir.path())).unwrap_err();
-        assert!(matches!(err, Error::Config { .. }), "{err:?}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), "popop = 1\n");
-    }
-
-    #[test]
-    fn a_config_that_would_not_load_with_the_project_is_left_alone() {
-        // Valid, but an inline array cannot be extended with a [[project]] table
-        let original = "project = [{ path = \"/tmp\" }]\n";
-        let (dir, path) = config_file(original);
-        let app = repo(dir.path(), "app");
-        let err = add_project_to(&path, &app, Some(dir.path())).unwrap_err();
-        assert!(matches!(err, Error::Config { .. }), "{err:?}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let dir = elsewhere.path().join("projects");
+        add_project_to(&dir, &odd, Some(Path::new("/home/me"))).unwrap();
+        let projects = load_projects(&dir, None).unwrap();
+        assert_eq!(projects[0].path, odd);
+        assert_eq!(projects[0].error, None);
     }
 
     #[test]

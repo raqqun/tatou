@@ -263,7 +263,8 @@ Depends on: 1.11, 1.18
 
 - `tatou` started inside a git repository that is not a project asks `Add ~/code/my-app to tatou? [Y/n]` before attaching, and adds it with 1.18's code on yes.
 - Only when stdin is a terminal; the launcher's nesting question (1.11) comes first.
-- **Decision to confirm:** how to stop asking for a repository the user declined, given tatou keeps no state file (for example a `config.toml` setting to turn the offer off, or listing declined paths in the config).
+- Decided: a declined repository is not remembered and is asked about again at the next launch. The offer runs wherever `tatou` runs with a terminal, inside tatou's server too; Enter means yes; a failure to add is shown and the launch goes on.
+- Projects move out of `config.toml` into one file each, `projects/<folder name>.toml` (DESIGN §9): `tatou add` writes the file instead of appending `[[project]]` (now an error pointing to `projects/`), and the reload's watch covers the project files too (added, removed or edited). CLAUDE.md's no-state rule and DESIGN §1, §3, §5, §7, §8.1 and §9 say so.
 
 **Done when**
 - Unit tests for the decision (inside a project, inside a new repository, outside any repository, no terminal); manual check documented in the PR.
@@ -272,7 +273,7 @@ Depends on: 1.11, 1.18
 
 Depends on: 1.16, 1.19
 
-- What tatou is (one paragraph), requirements, `cargo install --path .`, adding projects (`tatou add`, the launch offer, or `config.toml`), how to run, how to get back to the dashboard.
+- What tatou is (one paragraph), requirements, `cargo install --path .`, adding projects (`tatou add`, the launch offer, or a file in `projects/`), how to run, how to get back to the dashboard.
 
 **Done when**
 - Following the README on a clean machine gets to a working dashboard.
@@ -596,11 +597,11 @@ Depends on: 6.1
 
 Depends on: 2.3, 6.1, 1.17, 1.18
 
-- `a` opens a path dialog, prefilled with the folder tatou was launched from; on confirm, the same check and append as `tatou add`. The reload from 1.17 shows the new project.
+- `a` opens a path dialog, prefilled with the folder tatou was launched from; on confirm, the same check and project file as `tatou add`. The reload from 1.17 shows the new project.
 - Errors (not a repository, already a project) show in the dialog.
 
 **Done when**
-- `TestBackend` test of the dialog; unit test that confirming appends the project.
+- `TestBackend` test of the dialog; unit test that confirming writes the project file.
 
 ---
 

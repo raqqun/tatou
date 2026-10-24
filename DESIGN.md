@@ -28,7 +28,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
 - Render terminals or agent output.
 - Its own session persistence, splits or panes — tmux.
-- A database or state file beyond a small config.
+- A database or state file beyond its config: `config.toml` and one small file per project (§9).
 - Edit, create, rename or delete files itself — `$EDITOR`, or a shell opened in the worktree.
 - A diff viewer or PR review UI — `git diff` in a popup, `gh`/browser for PRs.
 - Modify agent configs, `.tmux.conf` or shell rc files — it shows the snippet to add instead.
@@ -58,7 +58,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 - **Launcher:** `tatou` — typed in any terminal. Regenerates tatou's tmux config, then attaches to the tatou server, creating the `tatou` dashboard session if needed (`tmux -L tatou -f <conf> new-session -A -s tatou "tatou --dashboard"`). Running `tatou` again from another terminal just re-attaches; from inside tatou's server, it switches to the dashboard, starting it again if its session was closed. An invalid `config.toml` stops the launch with the error. When the server is already running, the regenerated config is applied with `source-file`, after unbinding the keys the previous one bound.
 - **Dashboard:** `tatou --dashboard` — the full-screen UI, living in the `tatou` session. Selecting a worktree switches the client to that worktree's session; the "back" key (default `Alt-d`) returns to the dashboard.
 - **Popup:** `tatou --popup` — the same UI in a floating tmux popup over whatever you're doing, opened with the popup key (default `Alt-g`). Jumping to a session or launching an action closes the popup. The binding is part of tatou's generated tmux config; nothing to add by hand.
-- **Add a project:** `tatou add [path]` — adds the repository at `path` (default: the current folder) to `config.toml`. Launching `tatou` inside a repository that is not a project offers to add it, and `a` in the dashboard does the same from a path dialog.
+- **Add a project:** `tatou add [path]` — adds the repository at `path` (default: the current folder) as a file in `projects/` (§9). Launching `tatou` inside a repository that is not a project offers to add it (`Add ~/code/my-app to tatou? [Y/n]`, asked again next time after a no), and `a` in the dashboard does the same from a path dialog.
 - **Status line:** `tatou status` — prints a short summary (e.g. `⚠2 ●3`); tatou's tmux config shows it in the status bar.
 
 **Nesting:** if `tatou` is started from inside the user's own tmux, attaching would nest two tmux servers. tatou warns and offers to attach anyway (with `TMUX` unset) or to quit; the recommended setup is a dedicated terminal tab/window for tatou.
@@ -95,7 +95,7 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 | `t` | Open shell in worktree | `tmux new-window -t <session> -c <path>` |
 | `p` | Open PR | `gh pr view --web` |
 | `d` | Remove worktree | kill session, `git worktree remove` (confirm; force only if explicitly confirmed) |
-| `a` | Add project | path dialog → append a `[[project]]` to `config.toml` (as `tatou add`) |
+| `a` | Add project | path dialog → write a project file in `projects/` (as `tatou add`) |
 
 ### On a file (right pane)
 | Default key | Action | Implemented as |
@@ -113,7 +113,7 @@ All keys are configurable (§9). Any action can also be bound to a custom tmux c
 
 ### 8.1 Data flow
 ```
-config.toml ─► projects
+projects/*.toml ─► projects
 git worktree list --porcelain (per project) ─► worktrees
 tmux list-panes -a -F '#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}'
                                              ─► session, status, agent pane per worktree (matched by path)
@@ -167,7 +167,7 @@ On a transition to `input` for a worktree that isn't the current tmux session: a
 
 ## 9. Configuration
 
-`$XDG_CONFIG_HOME/tatou/config.toml`, defaulting to `~/.config/tatou/config.toml` on every platform, macOS included. tatou writes only this file and the generated `tmux.conf` next to it (§8.3). It writes `config.toml` in two cases only: the commented template when the file is missing, and a `[[project]]` block appended at the end when you add a project; everything else in the file is yours and left as written. A running dashboard reloads the file when it changes. A full example:
+`$XDG_CONFIG_HOME/tatou/config.toml`, defaulting to `~/.config/tatou/config.toml` on every platform, macOS included, holds the settings; each project is a file of its own in `projects/` next to it. tatou writes only these files and the generated `tmux.conf` (§8.3): `config.toml` once, the commented template when it is missing, and a project file when you add a project. Everything else is yours and left as written. A running dashboard reloads them when they change. A full `config.toml`:
 
 ```toml
 default_agent = "claude"
@@ -195,18 +195,22 @@ send_to_agent = "@"
 # extra bindings written into tatou's tmux config (active everywhere on the tatou server)
 [keys.tmux]
 "M-|" = "split-window -h -c '#{pane_current_path}'"
+```
 
-[[project]]
+And a project, `projects/my-app.toml`, as `tatou add ~/code/my-app` writes it with the optional settings added:
+
+```toml
 path = "~/code/my-app"
 base = "main"
 # worktree_dir = "~/worktrees/my-app"
 # on_create = "cp ../my-app/.env . && npm install"
 ```
 
-- Every setting is optional. When `config.toml` does not exist, tatou writes it with every setting commented out and no projects, and the dashboard shows its path.
+- Every setting is optional. When `config.toml` does not exist, tatou writes it with every setting commented out; without project files, the dashboard says where they go.
+- Project files are `projects/*.toml`, listed by file name; hidden files and other names (editor backups) are ignored. `tatou add` names a file after the repository's folder, with `-2`, `-3`, … when the name is taken; matching always goes by `path`. `[[project]]` in `config.toml` is an error that points here.
 - Unknown keys are errors, reported with the line. `[keys]` action names are checked against the keymap.
 - `[agents]` is merged with the built-in `claude`, `codex` and `shell`: new names add an agent, a built-in name replaces its command. `default_agent` must name one of them.
-- `path` and `worktree_dir` accept `~/`; any other path must be absolute. A project whose `path` is missing or invalid is shown with its error, and the other projects still load.
+- `path` and `worktree_dir` accept `~/`; any other path must be absolute. A project whose file does not parse, or whose `path` is missing, invalid or another file's, is shown with its error, and the other projects still load.
 - `base` is optional: without it, new worktrees start from the branch checked out in the project's main worktree.
 
 ## 10. Implementation notes

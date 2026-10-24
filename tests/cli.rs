@@ -179,14 +179,18 @@ fn add_adds_the_main_worktree_once_from_anywhere_in_it() {
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(
         text(&output.stdout),
-        "Added ~/code/app to ~/config/tatou/config.toml\n"
+        "Added ~/code/app: ~/config/tatou/projects/app.toml\n"
     );
     let config = sandbox.config().join("tatou/config.toml");
-    let added = fs::read_to_string(&config).unwrap();
-    assert!(added.starts_with("# tatou configuration"), "{added}");
     assert!(
-        added.ends_with("\n\n[[project]]\npath = \"~/code/app\"\n"),
-        "{added}"
+        fs::read_to_string(&config)
+            .unwrap()
+            .starts_with("# tatou configuration")
+    );
+    let file = sandbox.config().join("tatou/projects/app.toml");
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        "path = \"~/code/app\"\n"
     );
 
     // The repository's root, and a linked worktree by its path: the same project
@@ -197,10 +201,11 @@ fn add_adds_the_main_worktree_once_from_anywhere_in_it() {
         assert!(output.status.success(), "{}", text(&output.stderr));
         assert_eq!(
             text(&output.stdout),
-            "~/code/app is already a project in ~/config/tatou/config.toml\n"
+            "~/code/app is already a project: ~/config/tatou/projects/app.toml\n"
         );
     }
-    assert_eq!(fs::read_to_string(&config).unwrap(), added);
+    let files = fs::read_dir(sandbox.config().join("tatou/projects")).unwrap();
+    assert_eq!(files.count(), 1);
 }
 
 #[test]
@@ -213,8 +218,5 @@ fn add_outside_a_repository_says_why() {
         stderr.starts_with("tatou: cannot add .: fatal: not a git repository"),
         "{stderr}"
     );
-    assert!(
-        !sandbox.config().join("tatou/config.toml").exists(),
-        "nothing written"
-    );
+    assert!(!sandbox.config().join("tatou").exists(), "nothing written");
 }

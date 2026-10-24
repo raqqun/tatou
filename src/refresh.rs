@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
-use crate::config::{self, Config};
+use crate::config::{self, Config, Stamp};
 use crate::git::{self, Worktree};
 use crate::tmux::{Server, Session};
 
@@ -108,25 +108,26 @@ impl Refresh {
     }
 }
 
-/// Notices that `config.toml` changed, by its modification time.
+/// Notices that `config.toml` or a project file changed, by their modification
+/// times, or that a project file was added or removed.
 pub struct ConfigWatch {
     path: PathBuf,
-    seen: Option<SystemTime>,
+    seen: Stamp,
 }
 
 impl ConfigWatch {
-    /// Watches `path`, as it was when modified at `seen`.
-    pub fn new(path: PathBuf, seen: Option<SystemTime>) -> ConfigWatch {
+    /// Watches the config at `path`, as it was when `seen` was taken.
+    pub fn new(path: PathBuf, seen: Stamp) -> ConfigWatch {
         ConfigWatch { path, seen }
     }
 
-    /// The file loaded again, when it changed since the last check.
+    /// The config loaded again, when it changed since the last check.
     fn check(&mut self) -> Option<Result<Config, String>> {
-        let modified = config::modified(&self.path);
-        if modified == self.seen {
+        let stamp = config::stamp(&self.path);
+        if stamp == self.seen {
             return None;
         }
-        self.seen = modified;
+        self.seen = stamp;
         Some(config::reload(&self.path).map_err(|err| err.to_string()))
     }
 }
@@ -201,7 +202,7 @@ fn log_change<T>(last: &mut Option<String>, result: &Result<T, String>, what: &s
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime};
 
     use super::*;
     use crate::tmux::testing::TestServer;
@@ -320,7 +321,7 @@ mod tests {
         let (updates, received) = mpsc::channel();
         let refresh = Refresh::start(
             Server::clone(&server),
-            ConfigWatch::new(dir.path().join("config.toml"), None),
+            unchanged(&dir.path().join("config.toml")),
             &[good.clone(), broken.clone()],
             &updates,
         );
@@ -355,7 +356,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         let (first, second) = (dir.path().join("first"), dir.path().join("second"));
-        let watch = ConfigWatch::new(dir.path().join("config.toml"), None);
+        let watch = unchanged(&dir.path().join("config.toml"));
         let (updates, received) = mpsc::channel();
         let mut refresh = Refresh::start(Server::clone(&server), watch, &[first], &updates);
         refresh.set_projects(std::slice::from_ref(&second));
@@ -368,6 +369,11 @@ mod tests {
         // The first one's wake-up sender is gone, which ends its worker
         let watched: Vec<_> = refresh.projects.keys().collect();
         assert_eq!(watched, [&second]);
+    }
+
+    /// Watches the config at `path` from as it is now.
+    fn unchanged(path: &Path) -> ConfigWatch {
+        ConfigWatch::new(path.to_path_buf(), config::stamp(path))
     }
 
     /// Writes `text` to `path`, dated `secs` after the epoch, so that two writes in
@@ -384,7 +390,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         write_at(&path, "", 1_000);
-        let mut watch = ConfigWatch::new(path.clone(), config::modified(&path));
+        let mut watch = unchanged(&path);
         assert!(
             watch.check().is_none(),
             "unchanged since the dashboard loaded it"
@@ -394,6 +400,20 @@ mod tests {
         let config = watch.check().unwrap().unwrap();
         assert_eq!(config.default_agent, "codex");
         assert!(watch.check().is_none(), "loaded once");
+
+        // A project file added, then edited
+        let projects = dir.path().join("projects");
+        fs::create_dir(&projects).unwrap();
+        write_at(&projects.join("root.toml"), "path = \"/\"\n", 2_500);
+        let config = watch.check().unwrap().unwrap();
+        assert_eq!(config.projects[0].path, Path::new("/"));
+        assert!(watch.check().is_none(), "loaded once");
+        write_at(&projects.join("root.toml"), "path = \"/tmp\"\n", 2_600);
+        let config = watch.check().unwrap().unwrap();
+        assert_eq!(
+            config.projects[0].path,
+            Path::new("/tmp").canonicalize().unwrap()
+        );
 
         write_at(&path, "popop = 1\n", 3_000);
         let err = watch.check().unwrap().unwrap_err();
