@@ -10,7 +10,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
 - **No state of its own.** Git knows the worktrees, tmux knows the sessions, `gh` knows the PRs. tatou reads them every time; no database, no daemon, no cache that can drift.
 - **Never in the way.** Everything tatou creates is a plain git worktree and a plain tmux session on tatou's own tmux server (`tmux -L tatou`). Create, attach, split or delete them from anywhere and tatou reflects it. Your personal tmux server and config are never touched. Uninstalling tatou loses nothing.
-- **Reuse, don't rebuild.** Terminals, persistence, splits, popups → tmux. Git → `git`. GitHub → `gh`. Editing → `$EDITOR`. Viewing → `$PAGER`. Diffs → `git diff` (and the user's pager, e.g. delta).
+- **Reuse, don't rebuild.** Terminals, persistence, splits, popups → tmux. Git → `git`. GitHub → `gh`. Files → `$EDITOR`, or the agent.
 - **No terminal-in-terminal.** tatou never renders agent output. It switches tmux to the right session or opens tmux windows/popups.
 - **Small.** If a feature needs a new subsystem, it probably doesn't belong in tatou.
 
@@ -19,7 +19,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 1. Lists projects and their worktrees with a status per worktree: busy / needs input / idle / no session.
 2. Creates a worktree (name + base branch) and starts an agent in a tmux session inside it; removes both when done.
 3. Jumps to a worktree's agent session with one key.
-4. Shows the selected worktree's files on the right, with git status markers, and acts on them (open, view, diff, send path to agent, …).
+4. Opens `$EDITOR` or a shell in a worktree, in a window of its tmux session.
 5. Notifies when an agent needs input.
 6. Shows a PR/CI badge per worktree.
 7. Exposes everything through configurable keybindings.
@@ -29,8 +29,8 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 - Render terminals or agent output.
 - Its own session persistence, splits or panes — tmux.
 - A database or state file beyond its config: `config.toml` and one small file per project (§9).
-- Edit, create, rename or delete files itself — `$EDITOR`, or a shell opened in the worktree.
-- A diff viewer or PR review UI — `git diff` in a popup, `gh`/browser for PRs.
+- Show, edit, create, rename or delete files itself: no file tree, viewer or diff viewer — `$EDITOR` (`e`), a shell opened in the worktree (`t`), or the agent.
+- A PR review UI — `gh`/browser for PRs.
 - Modify agent configs, `.tmux.conf` or shell rc files — it shows the snippet to add instead.
 - Web UI, MCP server, remote machines, issue trackers.
 - Windows.
@@ -41,14 +41,11 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 |---|---|
 | UI | `ratatui` + `crossterm` |
 | Sessions, switching, windows, popups | tmux |
-| Worktrees, file status, diffs | `git` |
-| Directory walking (gitignore-aware) | `ignore` crate (from ripgrep) |
+| Worktrees, branches | `git` |
 | Agent status | Agent hooks setting a tmux session option |
 | PR / CI | `gh pr list --json …` |
 | Notifications | `notify-send` (Linux) or `osascript` (macOS), plus `tmux display-message` |
-| Open with system app | `xdg-open` (Linux) or `open` (macOS) |
-| Editing / viewing | `$EDITOR`, `$PAGER` |
-| Clipboard | `tmux set-buffer -w` (OSC 52) |
+| Editing | `$EDITOR` |
 | Config | one TOML file |
 
 ## 5. Running modes
@@ -66,52 +63,43 @@ tatou runs everything on **its own tmux server** (`tmux -L tatou`) with **its ow
 ## 6. Layout
 
 ```
-┌ Projects / worktrees ───────────┬ Files: my-app/fix-login ──────────────────┐
-│ ▾ my-app                        │ ▾ src/                                    │
-│   ● fix-login     #42 ✓         │     M auth.rs                             │
-│   ⚠ new-api       #45 ●         │       main.rs                             │
-│   ○ refactor-db                 │   ? notes.md                              │
-│ ▸ website                       │   Cargo.toml                              │
-├ Sessions ───────────────────────┤                                           │
-│ ▾ ● my-app-fix-login  zsh  my-… │                                           │
-│     0 claude                    │                                           │
-│     1 zsh *                     │                                           │
-│ ▸ ○ notes  vim  ~/notes         │                                           │
-├─────────────────────────────────┴───────────────────────────────────────────┤
-│ ⏎ jump  n new  d remove  e edit  v view  D diff  @ send to agent  ? help    │
+┌ Projects ───────────────────────────────────────────────────────────────────┐
+│ ▾ my-app                                                                    │
+│   ● fix-login     #42 ✓                                                     │
+│   ⚠ new-api       #45 ●                                                     │
+│   ○ refactor-db                                                             │
+│ ▸ website                                                                   │
+├ Sessions ───────────────────────────────────────────────────────────────────┤
+│ ▾ ● my-app-fix-login  zsh  my-app/fix-login                                 │
+│     0 claude                                                                │
+│     1 zsh *                                                                 │
+│ ▸ ○ notes  vim  ~/notes                                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ ⏎ jump  n new  s start agent  t shell  e edit  p PR  d remove  ? help       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Left:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session; without hooks (§8.4), a dim `●` for recent output and a dim `○` otherwise. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
-- **Left, below:** every session on tatou's server but the dashboard's, each with its status, what runs in its current window (the program in the foreground of its terminal by the name it was started under, from `ps`: `claude`, `zsh`, `vim`; tmux's own name for a program is its file's, and Claude Code's file is named after its version), and the `project/worktree` it belongs to, or the folder it started in when it belongs to none; under each, as a tree folded and unfolded as the projects are, its windows: index, what runs in it, `*` on the current one. `Enter` jumps to a session, or to a window (`select-window`, then the session). As tall as its sessions, up to a third of the column (scrolling past that), one line saying "No sessions" when there are none, and not drawn when a third of the column has no room for a row. tmux's errors show on its bottom border.
-- **Right:** file tree of the selected worktree. Git markers from `git status --porcelain`: `M` modified, `A` added, `?` untracked, `D` deleted. Respects `.gitignore` by default (toggle to show ignored/hidden files). Optional filter: changed files only.
+- **Top:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session; without hooks (§8.4), a dim `●` for recent output and a dim `○` otherwise. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
+- **Below:** every session on tatou's server but the dashboard's, each with its status, what runs in its current window (the program in the foreground of its terminal by the name it was started under, from `ps`: `claude`, `zsh`, `vim`; tmux's own name for a program is its file's, and Claude Code's file is named after its version), and the `project/worktree` it belongs to, or the folder it started in when it belongs to none; under each, as a tree folded and unfolded as the projects are, its windows: index, what runs in it, `*` on the current one. `Enter` jumps to a session, or to a window (`select-window`, then the session). As tall as its sessions, up to a third of the screen (scrolling past that), one line saying "No sessions" when there are none, and not drawn when a third of the screen has no room for a row. tmux's errors show on its bottom border.
 - **Bottom:** key hints for the selected row: on a project, only what applies to a project; on a worktree without a session, no jump. A message (e.g. a failed command) replaces them until the next key. `?` shows the full keymap.
-- `Tab` moves focus between panes: projects, sessions, files. The focused pane's border and title are cyan; the others are dim, contents included, keeping their selection and their red errors. The right pane hides automatically when the terminal is narrow.
+- `Tab` moves focus between the two panes, projects and sessions. The focused pane's border and title are cyan; the other is dim, contents included, keeping its selection and its red errors.
+- No file pane: reading, editing and diffing files is the editor's job (`e`) and the agent's (decided in 2.18, #103).
 - Dialogs open over the panes and take every key while the dashboard keeps refreshing behind them: a form (Tab/↑↓ between fields, ←→ through a choice, Enter to confirm, Esc to cancel; text fields edit like a shell line, Ctrl-a/e/u/k/w included), a choice list, a `[y/N]` confirmation whose default each dialog picks, and a scrollable message for command output. Their keys are fixed and shown in the hint bar.
 - Mouse support (click to select, scroll) via crossterm.
 
 ## 7. Actions
 
-### On a worktree (left pane)
+### On a worktree
 | Default key | Action | Implemented as |
 |---|---|---|
 | `Enter` | Jump to agent | `tmux switch-client -t <session>` |
 | `n` | New worktree | dialog → `git worktree add`, `on_create`, `tmux new-session` |
 | `s` | Start / restart agent | choose the agent → `tmux new-session`, or confirm → `respawn-pane -k` on the agent's pane (a new window when it has none or it is gone) |
 | `t` | Open shell in worktree | `tmux new-window -t <session> -c <path>`, or a new session with just the shell; then switch to it |
+| `e` | Edit the worktree (on a project, its repository) | as `t`, running `${EDITOR:-vi} .` in the worktree |
 | `p` | Open PR | `gh pr view --web` |
 | `d` | Remove worktree | `git worktree remove`, then kill its session (confirm; force only if explicitly confirmed; never the main worktree; the branch stays) |
 | `a` | Add project | path dialog → write a project file in `projects/` (as `tatou add`) |
-
-### On a file (right pane)
-| Default key | Action | Implemented as |
-|---|---|---|
-| `e` | Edit | `tmux new-window -c <worktree> "$EDITOR <file>"` |
-| `v` | View | `tmux display-popup -E "$PAGER <file>"` |
-| `D` | Diff | `tmux display-popup -E "git -C <worktree> diff -- <file>"` (honours the user's git pager) |
-| `@` | Send path to agent | `tmux send-keys -t <agent pane> -l "@<relative path> "` (no Enter) |
-| `y` | Copy path | `tmux set-buffer -w <path>` |
-| `o` | Open with system app | `xdg-open <file>` / `open <file>` (see §10) |
 
 All keys are configurable (§9). Any action can also be bound to a custom tmux command template.
 
@@ -127,9 +115,8 @@ tmux list-panes -a -F '#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_
 ps -A -o pid=,ppid=,pgid=,tpgid=,tty=,args=  ─► what runs in the foreground of each terminal, by the name it was started under
 gh pr list --state all --json number,headRefName,state,isDraft,statusCheckRollup,url (per project)
                                              ─► PR badge per branch
-git status --porcelain + ignore walk (selected worktree only) ─► file tree
 ```
-Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its own so a slow repository delays only itself; the selected worktree's files on selection change; `gh` every ~60 s and on demand. tatou's own actions wake the matching refresh at once. Commands run on background threads and send results to the UI loop over a channel.
+Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its own so a slow repository delays only itself; `gh` every ~60 s and on demand. tatou's own actions wake the matching refresh at once. Commands run on background threads and send results to the UI loop over a channel.
 
 ### 8.2 Worktrees
 - Create: `git -C <repo> worktree add -b <branch> -- <path> <base>`. Path defaults to `<repo>/../<repo>.worktrees/<name>` (configurable with `worktree_dir`); a `/` in the branch name becomes `-` in the folder's, so `feature/login` goes in `feature-login`.
@@ -154,7 +141,7 @@ tmux -L tatou new-session -d -s <repo>-<name> -c <path> -e TATOU=1 -P -F '#{sess
 tmux -L tatou set-option -t <session_id> @tatou_path <path>
 tmux -L tatou set-option -t <session_id> @tatou_agent_pane <pane_id>
 ```
-Every command tatou starts in a window (an agent, a shell, a restart) runs as `<command>`, a newline, then a POSIX `sh` snippet that, while the pane still exists, sends the clients whose current window is this pane's back to the dashboard (`list-clients -f "#{==:#{window_id},…}"`, then `switch-client -c … -t '=tatou'`); so leaving an agent or a shell lands on the dashboard, and a program ending in a window nobody looks at moves nobody. A shell runs as `"${SHELL:-/bin/sh}" -l`. Windows opened by hand stay plain tmux. Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`, comparing paths with symlinks resolved), never by parsing names; the dashboard's own `tatou` session is never a worktree's. Sessions are targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
+Every command tatou starts in a window (an agent, a shell, the editor, a restart) runs as `<command>`, a newline, then a POSIX `sh` snippet that, while the pane still exists, sends the clients whose current window is this pane's back to the dashboard (`list-clients -f "#{==:#{window_id},…}"`, then `switch-client -c … -t '=tatou'`); so leaving an agent, a shell or the editor lands on the dashboard, and a program ending in a window nobody looks at moves nobody. A shell runs as `"${SHELL:-/bin/sh}" -l`. Windows opened by hand stay plain tmux. Sessions are matched to worktrees by `@tatou_path` (fallback `#{session_path}`, comparing paths with symlinks resolved), never by parsing names; the dashboard's own `tatou` session is never a worktree's. Sessions are targeted by their id (`$3`): `set-option -t =<name>` fails, as it takes a pane target. Extra shells, splits and windows are plain tmux.
 
 ### 8.4 Agent status
 Agents report their own state by setting a tmux option; `$TMUX` inside a session points at the tatou server and session, `TATOU=1` makes it a no-op elsewhere.
@@ -181,7 +168,6 @@ On a transition to `input` for a worktree that isn't the current tmux session: a
 
 ```toml
 default_agent = "claude"
-# show_ignored = false
 
 [tmux]
 popup = "M-g"                # opens `tatou --popup`
@@ -196,8 +182,8 @@ codex  = "codex"
 [keys]                       # override any default
 jump = "Enter"
 new_worktree = "n"
-send_to_agent = "@"
-# custom actions in the tatou UI: key = tmux command template; {path}, {file}, {session}, {pane} are substituted
+edit = "e"
+# custom actions in the tatou UI: key = tmux command template; {path}, {session}, {pane} are substituted
 [keys.custom]
 "g" = "display-popup -E -d {path} lazygit"
 
@@ -224,15 +210,15 @@ base = "main"
 
 ## 10. Implementation notes
 
-- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `ignore`, `serde`, `toml`, `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`, default `info`, and `warn` for `tatou status`, which runs every few seconds; `--help` and `--version` do not log).
+- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `serde`, `toml`, `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`, default `info`, and `warn` for `tatou status`, which runs every few seconds; `--help` and `--version` do not log).
 - Paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), honouring `$XDG_*` variables when set. No `~/Library/...` on macOS: CLI users expect `~/.config`.
-- All platform differences live in one `platform` module behind two functions, `open(path)` and `notify(title, body)`, using `cfg(target_os)`. Nothing else in the codebase is platform-specific.
+- All platform differences live in one `platform` module behind one function, `notify(title, body)`, using `cfg(target_os)`. Nothing else in the codebase is platform-specific.
 - Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
 - Plain `std::thread` + `mpsc` channels for background commands; no async runtime.
 - Commands' stdout and stderr are read as UTF-8, lossily: file names that are not valid UTF-8 are not supported. Commands have no timeout; they run on background threads with stdin closed and git/gh prompts disabled, so a stuck command only stalls its own refresh.
-- Modules: `error`, `logging`, `config`, `exec`, `launcher`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `refresh`, `actions`, `keys`, `ui`.
+- Modules: `error`, `logging`, `config`, `exec`, `launcher`, `platform`, `git`, `tmux`, `gh`, `model`, `refresh`, `actions`, `keys`, `ui`.
 - Parsers for git/tmux/gh output are pure and tested against captured fixtures.
-- Runtime requirements: `git`, `tmux` (3.2+ for `display-popup` and `set-buffer -w`), and `ps`, part of every Linux and macOS. Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`).
+- Runtime requirements: `git`, `tmux` (3.2+, e.g. for `display-popup`), and `ps`, part of every Linux and macOS. Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`).
 - Versioning: every build is an alpha until a stable v1. The `VERSION` file holds the version as its git tag (`v0.1.0-alpha.N`), mirrored in `Cargo.toml`; each task's pull request bumps `N`. Merging into `main` makes CI tag that version and publish it as a GitHub pre-release with GoReleaser (Rust builder). Tags are never created by hand.
 
 ## 11. Milestones
@@ -240,9 +226,9 @@ base = "main"
 1. **Navigate:** config, generated tmux config, launcher (attach to the tatou server), list projects/worktrees from git, sessions/status from tmux, jump with Enter and back key. Dashboard mode.
 2. **Manage:** new/remove worktree, start/restart agent, open shell, popup mode and its binding.
 3. **Status:** hook-based status, `tatou hooks`, notifications, `tatou status` for the tmux status line.
-4. **Files:** right-pane tree with git markers, edit/view/diff/send-to-agent/copy/open, ignored-files toggle.
+4. ~~**Files**~~: dropped (2.18, #103). Editing is `e`'s, with `$EDITOR`; mouse support moved to milestone 6.
 5. **PRs:** badges and open PR.
-6. **Keys:** configurable keymap, custom tmux-command actions, `?` help overlay.
+6. **Keys:** configurable keymap, custom tmux-command actions, `?` help overlay, mouse support.
 7. **Ship:** `cargo install`; Linux: AUR, `.deb`/`.rpm`; macOS: Homebrew tap, Apple silicon only (`darwin-arm64`; Intel Macs are not supported). All packaging goes through GoReleaser. From milestone 1, CI tests on Linux and macOS and every merged task is released as an alpha (static `linux-amd64` and `linux-arm64` binaries, a `darwin-arm64` binary).
 
 Milestone 2 is already a useful tool. `MILESTONE.md` breaks these milestones into steps, one GitHub issue each.
@@ -252,4 +238,3 @@ Milestone 2 is already a useful tool. `MILESTONE.md` breaks these milestones int
 - ~~Default tmux server vs. dedicated socket~~ — decided: dedicated server and generated config (§8.3). Revisit only if many users want tatou sessions on their personal server.
 - Best default for nesting (§5): warn and ask, or auto-switch to a different prefix when nested.
 - Polling tmux vs. control mode (`tmux -C`): start with polling; change only if measurably costly.
-- Whether the file tree should auto-refresh via inotify or on interval/selection only: start with interval.

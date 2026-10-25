@@ -120,6 +120,22 @@ impl Server {
         path: &Path,
         command: Option<&str>,
     ) -> Result<NewSession> {
+        self.start_session(name, path, command, command.is_some())
+    }
+
+    /// Starts `command`, which is not an agent (the editor), in a new detached
+    /// session as `new_session` does, without an agent pane.
+    pub fn new_plain_session(&self, name: &str, path: &Path, command: &str) -> Result<NewSession> {
+        self.start_session(name, path, Some(command), false)
+    }
+
+    fn start_session(
+        &self,
+        name: &str,
+        path: &Path,
+        command: Option<&str>,
+        agent: bool,
+    ) -> Result<NewSession> {
         let dir = path.to_string_lossy();
         let run = returning(command);
         let mut n = 1;
@@ -156,7 +172,7 @@ impl Server {
         // By id: `-t =<name>` is read as a pane here. Should this fail, the session
         // still matches its worktree by its start directory
         let mut tags = vec!["set-option", "-t", id, "@tatou_path", &dir];
-        if command.is_some() {
+        if agent {
             tags.extend([";", "set-option", "-t", id, "@tatou_agent_pane", pane]);
         }
         self.run(&tags)?;
@@ -266,7 +282,7 @@ pub struct NewSession {
     /// `$3`: the target for commands.
     pub id: String,
     pub name: String,
-    /// The pane running the agent: `%4`.
+    /// Its pane, running the agent unless it was started without one: `%4`.
     pub pane: String,
 }
 
@@ -1317,6 +1333,26 @@ $3\tshort\t/home/me
             "{command}"
         );
         assert!(command.contains("switch-client"), "{command}");
+    }
+
+    #[test]
+    fn a_plain_session_has_no_agent_pane() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let path = dir.path().canonicalize().unwrap();
+        let session = server
+            .new_plain_session("app-fix", &path, "sleep 1000")
+            .unwrap();
+        let sessions = server.sessions().unwrap();
+        assert_eq!(sessions[0].id, session.id);
+        assert_eq!(sessions[0].tatou_path.as_deref(), Some(path.as_path()));
+        assert_eq!(sessions[0].agent_pane, None);
+        let command = show(&server, &session.pane, "#{pane_start_command}");
+        assert!(
+            command.contains("sleep 1000") && command.contains("switch-client"),
+            "{command}"
+        );
     }
 
     #[test]

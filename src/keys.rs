@@ -11,7 +11,6 @@ pub enum Pane {
     Worktrees,
     /// Every session on tatou's server, below the projects.
     Sessions,
-    Files,
     /// Navigation and the app itself, in any pane.
     Any,
 }
@@ -30,11 +29,6 @@ pub enum Action {
     OpenPr,
     RemoveWorktree,
     Edit,
-    View,
-    Diff,
-    SendToAgent,
-    CopyPath,
-    Open,
     Help,
     Quit,
 }
@@ -42,7 +36,7 @@ pub enum Action {
 impl Action {
     // Not read yet: checking `[keys]` names and the help overlay list them (#41, #44)
     #[allow(dead_code)]
-    pub const ALL: [Action; 19] = [
+    pub const ALL: [Action; 14] = [
         Action::Up,
         Action::Down,
         Action::Collapse,
@@ -52,14 +46,9 @@ impl Action {
         Action::NewWorktree,
         Action::StartAgent,
         Action::Shell,
+        Action::Edit,
         Action::OpenPr,
         Action::RemoveWorktree,
-        Action::Edit,
-        Action::View,
-        Action::Diff,
-        Action::SendToAgent,
-        Action::CopyPath,
-        Action::Open,
         Action::Help,
         Action::Quit,
     ];
@@ -81,11 +70,6 @@ impl Action {
             Action::OpenPr => "open_pr",
             Action::RemoveWorktree => "remove_worktree",
             Action::Edit => "edit",
-            Action::View => "view",
-            Action::Diff => "diff",
-            Action::SendToAgent => "send_to_agent",
-            Action::CopyPath => "copy_path",
-            Action::Open => "open",
             Action::Help => "help",
             Action::Quit => "quit",
         }
@@ -106,11 +90,6 @@ impl Action {
             Action::OpenPr => "PR",
             Action::RemoveWorktree => "remove",
             Action::Edit => "edit",
-            Action::View => "view",
-            Action::Diff => "diff",
-            Action::SendToAgent => "send to agent",
-            Action::CopyPath => "copy path",
-            Action::Open => "open",
             Action::Help => "help",
             Action::Quit => "quit",
         }
@@ -122,14 +101,9 @@ impl Action {
             | Action::NewWorktree
             | Action::StartAgent
             | Action::Shell
+            | Action::Edit
             | Action::OpenPr
             | Action::RemoveWorktree => Pane::Worktrees,
-            Action::Edit
-            | Action::View
-            | Action::Diff
-            | Action::SendToAgent
-            | Action::CopyPath
-            | Action::Open => Pane::Files,
             Action::Up
             | Action::Down
             | Action::Collapse
@@ -182,7 +156,7 @@ impl Key {
         }
     }
 
-    /// The key of a key press. Shift is part of a character (`D`, `@`), not a
+    /// The key of a key press. Shift is part of a character (`?`, `A`), not a
     /// modifier of it, whatever the terminal reports.
     pub fn from_event(event: KeyEvent) -> Key {
         let mut modifiers = event.modifiers;
@@ -242,14 +216,9 @@ impl Keymap {
             (Key::char('n'), Action::NewWorktree),
             (Key::char('s'), Action::StartAgent),
             (Key::char('t'), Action::Shell),
+            (Key::char('e'), Action::Edit),
             (Key::char('p'), Action::OpenPr),
             (Key::char('d'), Action::RemoveWorktree),
-            (Key::char('e'), Action::Edit),
-            (Key::char('v'), Action::View),
-            (Key::char('D'), Action::Diff),
-            (Key::char('@'), Action::SendToAgent),
-            (Key::char('y'), Action::CopyPath),
-            (Key::char('o'), Action::Open),
             (Key::char('?'), Action::Help),
             (Key::char('q'), Action::Quit),
             (Key::ctrl('c'), Action::Quit),
@@ -307,22 +276,20 @@ mod tests {
 
     #[test]
     fn shifted_characters_are_their_own_keys() {
-        // Terminals report `D` with or without Shift; both are diff, never remove
+        // Terminals report `?` with or without Shift; both are help
         assert_eq!(
-            press(KeyCode::Char('D'), KeyModifiers::SHIFT),
-            Some(Action::Diff)
+            press(KeyCode::Char('?'), KeyModifiers::SHIFT),
+            Some(Action::Help)
         );
         assert_eq!(
-            press(KeyCode::Char('D'), KeyModifiers::NONE),
-            Some(Action::Diff)
+            press(KeyCode::Char('?'), KeyModifiers::NONE),
+            Some(Action::Help)
         );
+        // An uppercase letter is not its lowercase one
+        assert_eq!(press(KeyCode::Char('D'), KeyModifiers::SHIFT), None);
         assert_eq!(
             press(KeyCode::Char('d'), KeyModifiers::NONE),
             Some(Action::RemoveWorktree)
-        );
-        assert_eq!(
-            press(KeyCode::Char('@'), KeyModifiers::SHIFT),
-            Some(Action::SendToAgent)
         );
     }
 
@@ -377,24 +344,19 @@ mod tests {
                 "n new",
                 "s start agent",
                 "t shell",
+                "e edit",
                 "p PR",
                 "d remove",
                 "? help",
                 "q quit"
             ]
         );
-        let files: Vec<_> = keymap
-            .hints(Pane::Files, &[])
-            .into_iter()
-            .map(|(k, _)| k)
-            .collect();
-        assert_eq!(files, ["e", "v", "D", "@", "y", "o", "?", "q"]);
         let without_jump: Vec<_> = keymap
             .hints(Pane::Worktrees, &[Action::Jump, Action::Help])
             .into_iter()
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(without_jump, ["n", "s", "t", "p", "d", "q"]);
+        assert_eq!(without_jump, ["n", "s", "t", "e", "p", "d", "q"]);
         let sessions: Vec<_> = keymap
             .hints(Pane::Sessions, &[])
             .into_iter()

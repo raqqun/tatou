@@ -20,9 +20,6 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # Agent started in new worktrees, one of the agents below
 # default_agent = "claude"
 
-# Show gitignored and hidden files in the file tree
-# show_ignored = false
-
 # [tmux]
 # popup = "M-g"               # opens `tatou --popup`
 # back = "M-d"                # returns to the dashboard
@@ -40,7 +37,7 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # new_worktree = "n"
 
 # Custom actions in the tatou UI: key = tmux command template;
-# {path}, {file}, {session}, {pane} are substituted
+# {path}, {session}, {pane} are substituted
 # [keys.custom]
 # "g" = "display-popup -E -d {path} lazygit"
 
@@ -62,7 +59,6 @@ pub struct Config {
     /// Where it was loaded from, shown in the UI's empty state.
     pub path: PathBuf,
     pub default_agent: String,
-    pub show_ignored: bool,
     pub tmux: Tmux,
     /// Built-in agents merged with the user's `[agents]`.
     pub agents: BTreeMap<String, String>,
@@ -126,8 +122,6 @@ pub struct Project {
 #[serde(deny_unknown_fields)]
 struct File {
     default_agent: Option<String>,
-    #[serde(default)]
-    show_ignored: bool,
     #[serde(default)]
     tmux: Tmux,
     #[serde(default)]
@@ -417,7 +411,6 @@ fn parse(text: &str, path: &Path) -> std::result::Result<Config, String> {
     Ok(Config {
         path: path.to_path_buf(),
         default_agent,
-        show_ignored: file.show_ignored,
         tmux: file.tmux,
         agents,
         keys: file.keys,
@@ -575,7 +568,6 @@ mod tests {
         let config = parse_ok("");
         assert_eq!(config.path, PathBuf::from("/c/config.toml"));
         assert_eq!(config.default_agent, "claude");
-        assert!(!config.show_ignored);
         assert_eq!(config.tmux, Tmux::default());
         assert_eq!(
             config.agents.keys().collect::<Vec<_>>(),
@@ -595,7 +587,6 @@ mod tests {
         let config = parse_ok(
             r#"
             default_agent = "claude"
-            show_ignored = true
 
             [tmux]
             popup = "M-g"
@@ -610,7 +601,7 @@ mod tests {
             [keys]
             jump = "Enter"
             new_worktree = "n"
-            send_to_agent = "@"
+            edit = "e"
             [keys.custom]
             "g" = "display-popup -E -d {path} lazygit"
 
@@ -618,10 +609,9 @@ mod tests {
             "M-|" = "split-window -h -c '#{pane_current_path}'"
             "#,
         );
-        assert!(config.show_ignored);
         assert_eq!(config.tmux.prefix.as_deref(), Some("C-a"));
         assert!(config.tmux.inherit_user_conf);
-        assert_eq!(config.keys.actions["send_to_agent"], "@");
+        assert_eq!(config.keys.actions["edit"], "e");
         assert_eq!(config.keys.actions.len(), 3);
         assert_eq!(
             config.keys.custom["g"],
@@ -655,7 +645,7 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_errors_with_their_line() {
-        let message = parse_err("show_ignored = true\nshow_hidden = true\n");
+        let message = parse_err("default_agent = \"claude\"\nshow_hidden = true\n");
         assert!(message.contains("line 2"), "{message}");
         assert!(message.contains("show_hidden"), "{message}");
 
@@ -831,16 +821,17 @@ mod tests {
         let config = load_from(&path, Some(Path::new("/home/me"))).unwrap();
         assert_eq!(config.projects, []);
 
-        fs::write(&path, "show_ignored = true\n").unwrap();
+        fs::write(&path, "default_agent = \"codex\"\n").unwrap();
         write_template(&path).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "show_ignored = true\n");
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "default_agent = \"codex\"\n");
     }
 
     #[test]
     fn an_invalid_file_is_a_config_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "show_ignored = maybe\n").unwrap();
+        fs::write(&path, "default_agent = maybe\n").unwrap();
         let err = load_from(&path, None).unwrap_err();
         assert!(matches!(err, Error::Config { path: ref p, .. } if *p == path));
         assert!(err.to_string().contains("line 1"), "{err}");

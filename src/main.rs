@@ -2,7 +2,6 @@ mod actions;
 mod config;
 mod error;
 mod exec;
-mod files;
 mod gh;
 mod git;
 mod keys;

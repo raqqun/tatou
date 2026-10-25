@@ -25,8 +25,8 @@ pub enum Task {
     StartAgent(StartAgent),
     /// The agent of a session, started again.
     RestartAgent(RestartAgent),
-    /// A shell in a worktree, shown in the dashboard's client.
-    Shell(Shell),
+    /// A shell, or the editor, in a worktree, shown in the dashboard's client.
+    Program(Program),
     RemoveWorktree(RemoveWorktree),
 }
 
@@ -42,14 +42,21 @@ pub struct RemoveWorktree {
     pub force: bool,
 }
 
+/// What `e` runs in a worktree: the user's editor, on the worktree's folder.
+/// `$EDITOR` is left unquoted so that its arguments (`code -w`) stay arguments.
+pub const EDITOR: &str = "${EDITOR:-vi} .";
+
+/// A program to open in a new window of a worktree's session: a shell, or the editor.
 #[derive(Debug, PartialEq)]
-pub struct Shell {
+pub struct Program {
     pub name: String,
     pub path: PathBuf,
-    /// The worktree's session id; `None`: a new session with just the shell.
+    /// The worktree's session id; `None`: a new session with just the program.
     pub session: Option<String>,
     /// The name for a new session.
     pub session_name: String,
+    /// Run by tmux's default shell; `None`: the user's shell.
+    pub command: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -157,9 +164,9 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
                 Err(err) => Event::Failed(format!("{}: {err}", start.name)),
             });
         }
-        Task::Shell(shell) => send(match open_shell(&shell, server) {
+        Task::Program(program) => send(match open_program(&program, server) {
             Ok(()) => Event::Started,
-            Err(err) => Event::Failed(format!("{}: {err}", shell.name)),
+            Err(err) => Event::Failed(format!("{}: {err}", program.name)),
         }),
         Task::RemoveWorktree(remove) => send(remove_worktree(remove, server)),
         Task::RestartAgent(restart) => {
@@ -208,19 +215,17 @@ fn remove_worktree(remove: RemoveWorktree, server: &Server) -> Event {
     }
 }
 
-/// A new window with a shell in the worktree's session, or a new session with
-/// one, without an agent pane, then shows it.
-fn open_shell(shell: &Shell, server: &Server) -> crate::error::Result<()> {
-    let session = match &shell.session {
-        Some(session) => {
-            server.new_window(session, &shell.path, None)?;
+/// A new window with the program in the worktree's session, or a new session
+/// with it, without an agent pane, then shows it.
+fn open_program(program: &Program, server: &Server) -> crate::error::Result<()> {
+    let (name, path) = (&program.session_name, &program.path);
+    let session = match (&program.session, &program.command) {
+        (Some(session), command) => {
+            server.new_window(session, path, command.as_deref())?;
             session.clone()
         }
-        None => {
-            server
-                .new_session(&shell.session_name, &shell.path, None)?
-                .id
-        }
+        (None, Some(command)) => server.new_plain_session(name, path, command)?.id,
+        (None, None) => server.new_session(name, path, None)?.id,
     };
     server.switch_client(&session)
 }
@@ -534,13 +539,23 @@ mod tests {
         assert_ne!(agent, shell);
     }
 
-    fn shell(path: &Path, session: Option<&str>) -> Task {
-        Task::Shell(Shell {
+    /// `command` in worktree `fix` at `path`; `None`: a shell.
+    fn program(path: &Path, session: Option<&str>, command: Option<&str>) -> Task {
+        Task::Program(Program {
             name: "fix".into(),
             path: path.to_path_buf(),
             session: session.map(String::from),
             session_name: "app-fix".into(),
+            command: command.map(String::from),
         })
+    }
+
+    fn shell(path: &Path, session: Option<&str>) -> Task {
+        program(path, session, None)
+    }
+
+    fn editor(path: &Path, session: Option<&str>) -> Task {
+        program(path, session, Some(EDITOR))
     }
 
     /// No client is attached in a test: the shell is ready, and showing it fails.
@@ -609,6 +624,43 @@ mod tests {
         assert_eq!(sessions[0].agent_pane, None, "a shell is no agent");
         let env = server.run(&["show-environment", "-t", &sessions[0].id, "TATOU"]);
         assert_eq!(env.unwrap().stdout, "TATOU=1\n");
+    }
+
+    #[test]
+    fn the_editor_opens_in_the_worktrees_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let session = server
+            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
+            .unwrap();
+        let events = events(editor(tmp.path(), Some(&session.id)), &server);
+        assert!(not_shown(&events), "{events:?}");
+        assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
+        let current = show(&server, &session.id, "#{pane_id}");
+        let command = show(&server, &current, "#{pane_start_command}");
+        for part in ["EDITOR:-vi} .", "switch-client"] {
+            assert!(command.contains(part), "{part} in {command}");
+        }
+        let agent = server.sessions().unwrap()[0].agent_pane.clone();
+        assert_eq!(agent, Some(session.pane));
+    }
+
+    #[test]
+    fn the_editor_without_a_session_gets_one_without_an_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let events = events(editor(tmp.path(), None), &server);
+        assert!(not_shown(&events), "{events:?}");
+        let sessions = server.sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "app-fix");
+        assert_eq!(sessions[0].agent_pane, None, "the editor is no agent");
+        let command = show(&server, &sessions[0].id, "#{pane_start_command}");
+        assert!(command.contains("EDITOR:-vi} ."), "{command}");
     }
 
     /// git in `repo`, without the user's config; its output.

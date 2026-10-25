@@ -16,7 +16,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
-use crate::actions::{self, NewWorktree, RemoveWorktree, RestartAgent, Shell, StartAgent, Task};
+use crate::actions::{
+    self, EDITOR, NewWorktree, Program, RemoveWorktree, RestartAgent, StartAgent, Task,
+};
 use crate::config::{self, Config, Tmux};
 use crate::error::{Error, Result};
 use crate::git;
@@ -386,12 +388,12 @@ impl App {
             Action::Jump if worktrees => self.jump(),
             Action::NewWorktree if worktrees => self.open_new_worktree(),
             Action::StartAgent if worktrees => self.choose_agent(),
-            Action::Shell if worktrees => self.open_shell(),
+            Action::Shell if worktrees => self.open(None, false),
+            Action::Edit if worktrees => self.open(Some(EDITOR), true),
             Action::RemoveWorktree if worktrees => self.confirm_remove(),
             Action::SwitchPane => {
                 self.focus = match self.focus {
                     Pane::Worktrees => Pane::Sessions,
-                    Pane::Sessions => Pane::Files,
                     _ => Pane::Worktrees,
                 }
             }
@@ -464,19 +466,27 @@ impl App {
         });
     }
 
-    /// A shell in the selected worktree, in its session or a new one.
-    fn open_shell(&mut self) {
-        let (Some(worktree), Some(project)) =
-            (self.tree.selected_worktree(), self.tree.selected_project())
-        else {
+    /// `command` (`None`: a shell) in the selected worktree, in a new window of its
+    /// session or in a new session; on a project, with `main`, in its main worktree.
+    fn open(&mut self, command: Option<&str>, main: bool) {
+        let Some(project) = self.tree.selected_project() else {
             return;
         };
+        let worktree = match self.tree.selected_worktree() {
+            Some(worktree) => worktree,
+            None if main => match project.worktrees.iter().find(|w| w.main) {
+                Some(worktree) => worktree,
+                None => return,
+            },
+            None => return,
+        };
         let name = worktree.label().to_string();
-        self.tasks.push(Task::Shell(Shell {
+        self.tasks.push(Task::Program(Program {
             path: worktree.path.clone(),
             session: worktree.session.as_ref().map(|s| s.id.clone()),
             session_name: tmux::session_name(&project.name, &name),
             name,
+            command: command.map(String::from),
         }));
     }
 
@@ -660,24 +670,20 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let [main, hints] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .areas(main);
-        // Sessions as tall as its rows and borders, up to a third of the column; not
+        // Sessions as tall as its rows and borders, up to a third of the screen; not
         // drawn when a third has no room for one row, so the projects keep theirs
         let wanted = self.sessions.len().max(1) as u16 + 2;
-        let height = match wanted.min(left.height / 3) {
+        let height = match wanted.min(main.height / 3) {
             fits @ 3.. => fits,
             _ => 0,
         };
         let [projects, sessions] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(left);
+            Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(main);
         // Without room for the sessions, their error goes below the projects
         self.render_projects(frame, projects, height == 0);
         if height > 0 {
             self.render_sessions(frame, sessions);
         }
-        frame.render_widget(self.pane_block(" Files ", Pane::Files), right);
         frame.render_widget(self.hint_bar(), hints);
         if let Some(open) = &mut self.dialog {
             open.dialog.render(frame, main);
@@ -827,10 +833,10 @@ mod tests {
             .collect()
     }
 
-    /// The left pane's text inside its borders, on a 100-column screen.
+    /// The projects' pane's text inside its borders, on a 40-column screen.
     fn projects_pane(app: &mut App, height: u16) -> Vec<String> {
         // Three more rows for the sessions' pane below, empty: the same room as before it
-        let lines = screen(app, 100, height + 3);
+        let lines = screen(app, 40, height + 3);
         let bottom = lines.iter().position(|l| l.starts_with('└')).unwrap();
         // Taller when the sessions' pane has no room: only empty lines more
         let inner = &lines[1..bottom.min(height as usize - 2)];
@@ -861,16 +867,16 @@ mod tests {
             project("/code/web", &[]),
         ]);
         let expected = [
-            "┌ Projects ──────────────────┐┌ Files ─────────────────────────────────────┐",
-            "│▾ app                       ││                                            │",
-            "│  · main  repo              ││                                            │",
-            "│  · fix-login               ││                                            │",
-            "│▾ web                       ││                                            │",
-            "│  · main  repo              ││                                            │",
-            "└────────────────────────────┘└────────────────────────────────────────────┘",
-            "n new  ? help  q quit",
+            "┌ Projects ──────────────────────────────┐",
+            "│▾ app                                   │",
+            "│  · main  repo                          │",
+            "│  · fix-login                           │",
+            "│▾ web                                   │",
+            "│  · main  repo                          │",
+            "└────────────────────────────────────────┘",
+            "n new  e edit  ? help  q quit",
         ];
-        assert_eq!(screen(&mut app, 76, 8), expected);
+        assert_eq!(screen(&mut app, 42, 8), expected);
     }
 
     #[test]
@@ -992,11 +998,7 @@ mod tests {
         let lines = screen(&mut app, 80, 12);
         assert_eq!(lines[11], "? help  q quit", "no session to jump to");
         press(&mut app, KeyCode::Tab);
-        assert_eq!(app.focus, Pane::Files);
-        let lines = screen(&mut app, 80, 4);
-        assert!(lines[3].starts_with("e edit  v view  D diff"), "{lines:?}");
-        press(&mut app, KeyCode::Tab);
-        assert_eq!(app.focus, Pane::Worktrees);
+        assert_eq!(app.focus, Pane::Worktrees, "no third pane");
     }
 
     #[test]
@@ -1081,18 +1083,19 @@ mod tests {
     #[test]
     fn the_hints_follow_the_selected_row() {
         let mut app = with_a_session();
-        assert_eq!(hint_line(&mut app), "n new  ? help  q quit", "project");
+        assert_eq!(
+            hint_line(&mut app),
+            "n new  e edit  ? help  q quit",
+            "project"
+        );
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(
             hint_line(&mut app),
-            "n new  s start agent  t shell  p PR  ? help  q quit",
+            "n new  s start agent  t shell  e edit  p PR  ? help  q quit",
             "no session, and the main worktree: no remove"
         );
         press(&mut app, KeyCode::Char('j'));
         assert!(hint_line(&mut app).starts_with("⏎ jump  n new"), "session");
-        press(&mut app, KeyCode::Tab);
-        press(&mut app, KeyCode::Tab);
-        assert!(hint_line(&mut app).starts_with("e edit"), "files");
     }
 
     /// Applies `result` as if `config.toml` had just been loaded again.
@@ -1542,23 +1545,57 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Char('k'));
         press(&mut app, KeyCode::Char('t'));
         let expected = [
-            Task::Shell(Shell {
+            Task::Program(Program {
                 name: "fix".into(),
                 path: "/code/app.worktrees/fix".into(),
                 session: Some("$3".into()),
                 session_name: "app-fix".into(),
+                command: None,
             }),
-            Task::Shell(Shell {
+            Task::Program(Program {
                 name: "main".into(),
                 path: "/code/app".into(),
                 session: None,
                 session_name: "app-main".into(),
+                command: None,
             }),
         ];
         assert_eq!(app.tasks, expected);
         // Not on a project
         press(&mut app, KeyCode::Char('k'));
         press(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.tasks.len(), 2);
+    }
+
+    #[test]
+    fn e_opens_the_editor_in_the_worktree_or_the_projects_repository() {
+        let mut app = on_fix_with_a_session();
+        press(&mut app, KeyCode::Char('e'));
+        // On the project: its main worktree
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('e'));
+        let expected = [
+            Task::Program(Program {
+                name: "fix".into(),
+                path: "/code/app.worktrees/fix".into(),
+                session: Some("$3".into()),
+                session_name: "app-fix".into(),
+                command: Some(EDITOR.into()),
+            }),
+            Task::Program(Program {
+                name: "main".into(),
+                path: "/code/app".into(),
+                session: None,
+                session_name: "app-main".into(),
+                command: Some(EDITOR.into()),
+            }),
+        ];
+        assert_eq!(app.tasks, expected);
+        assert!(hint_line(&mut app).contains("e edit"), "on a project");
+        // Not from the sessions' pane
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('e'));
         assert_eq!(app.tasks.len(), 2);
     }
 
@@ -1962,14 +1999,14 @@ unknown field `popop`, expected one of `popup`, `back`";
             "app-fix",
             "/code/app.worktrees/fix",
         )]);
-        // 100×20: Projects at (0, 0), Files at (40, 0), Sessions' top border lower down
+        // 100×20: Projects at (0, 0), Sessions' top border lower down
         let lines = screen(&mut app, 100, 20);
         let sessions = lines
             .iter()
             .position(|l| l.starts_with("┌ Sessions"))
             .unwrap() as u16;
-        let corners = [(0, 0), (0, sessions), (40, 0)];
-        let panes = [Pane::Worktrees, Pane::Sessions, Pane::Files];
+        let corners = [(0, 0), (0, sessions)];
+        let panes = [Pane::Worktrees, Pane::Sessions];
         for (i, focused) in panes.into_iter().enumerate() {
             assert_eq!(app.focus, focused);
             let buffer = styles(&mut app, 100, 20);
