@@ -1151,6 +1151,21 @@ $1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t\t@2\t1
         assert_eq!(programs.len(), 7);
     }
 
+    /// `read`, once `until` holds of it, or after 5 s. A program tatou starts runs
+    /// in its pane only once the wrapping `sh` has started it: before, the pane
+    /// runs `tmux` (not yet exec'd), then `sh`.
+    fn eventually<T>(read: impl Fn() -> T, until: impl Fn(&T) -> bool) -> T {
+        let mut value = read();
+        for _ in 0..50 {
+            if until(&value) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            value = read();
+        }
+        value
+    }
+
     #[test]
     fn a_program_started_through_a_link_goes_by_the_links_name() {
         let Some((server, dir)) = sh_server() else {
@@ -1163,8 +1178,11 @@ $1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t\t@2\t1
         server
             .new_session("app", dir.path(), Some(&command))
             .unwrap();
-        let sessions = server.sessions().unwrap();
-        assert_eq!(sessions[0].command.as_deref(), Some("claude"));
+        let program = eventually(
+            || server.sessions().unwrap()[0].command.clone(),
+            |program| program.as_deref() == Some("claude"),
+        );
+        assert_eq!(program.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -1424,7 +1442,10 @@ $3\tshort\t/home/me
             .new_session("app", dir.path(), Some("sleep 1000"))
             .unwrap();
         server.new_window(&session.id, dir.path(), None).unwrap();
-        let windows = server.sessions().unwrap()[0].windows.clone();
+        let windows = eventually(
+            || server.sessions().unwrap()[0].windows.clone(),
+            |windows| windows[0].command.as_deref() == Some("sleep"),
+        );
         let current: Vec<_> = windows.iter().map(|w| (w.index, w.current)).collect();
         assert_eq!(current, [(0, false), (1, true)], "the one opened last");
         assert_eq!(windows[0].command.as_deref(), Some("sleep"));
