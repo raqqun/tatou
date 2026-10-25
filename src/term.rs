@@ -25,7 +25,9 @@ pub fn key_bytes(key: KeyEvent, modes: Modes) -> Vec<u8> {
             None => c.to_string().into_bytes(),
         },
         KeyCode::Char(c) => c.to_string().into_bytes(),
-        // Agents read Alt-Enter as a new line, as many do Shift-Enter
+        // Shift-Enter, which the dashboard's terminal reports only through the kitty
+        // keyboard protocol, goes as Alt-Enter: agents read both as a new line, and
+        // this one needs nothing of the shown terminal
         KeyCode::Enter if shift => return b"\x1b\r".to_vec(),
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Tab => vec![b'\t'],
