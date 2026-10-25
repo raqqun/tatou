@@ -13,13 +13,8 @@ use crate::tmux::Server;
 /// An action the UI asks for.
 #[derive(Debug, PartialEq)]
 pub enum Task {
-    /// Shows the session with this id in the dashboard's client.
-    Switch(String),
-    /// Shows a window: makes it its session's current one, then shows the session.
-    Window {
-        session: String,
-        window: String,
-    },
+    /// Shows the pane with this id in the dashboard's slot.
+    Show(String),
     NewWorktree(NewWorktree),
     /// An agent in a new session, for a worktree that has none.
     StartAgent(StartAgent),
@@ -137,18 +132,9 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
         let _ = events.send(event);
     };
     match task {
-        Task::Switch(session) => {
-            if let Err(err) = server.switch_client(&session) {
-                tracing::warn!(session, %err, "switch failed");
-                send(Event::Failed(err.to_string()));
-            }
-        }
-        Task::Window { session, window } => {
-            let shown = server
-                .select_window(&window)
-                .and_then(|()| server.switch_client(&session));
-            if let Err(err) = shown {
-                tracing::warn!(session, window, %err, "switch failed");
+        Task::Show(pane) => {
+            if let Err(err) = server.show(&pane) {
+                tracing::warn!(pane, %err, "show failed");
                 send(Event::Failed(err.to_string()));
             }
         }
@@ -158,9 +144,11 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
                 "{}: starting the agent",
                 start.name
             )));
-            let started = server.new_session(&start.session, &start.path, Some(&start.command));
+            let started = server
+                .new_session(&start.session, &start.path, Some(&start.command))
+                .and_then(|session| show_started(server, &session.pane));
             send(match started {
-                Ok(_) => Event::Started,
+                Ok(()) => Event::Started,
                 Err(err) => Event::Failed(format!("{}: {err}", start.name)),
             });
         }
@@ -216,27 +204,24 @@ fn remove_worktree(remove: RemoveWorktree, server: &Server) -> Event {
 }
 
 /// A new window with the program in the worktree's session, or a new session
-/// with it, without an agent pane, then shows it.
+/// with it, without an agent pane, then shows it in the dashboard's slot.
 fn open_program(program: &Program, server: &Server) -> crate::error::Result<()> {
     let (name, path) = (&program.session_name, &program.path);
-    let session = match (&program.session, &program.command) {
-        (Some(session), command) => {
-            server.new_window(session, path, command.as_deref())?;
-            session.clone()
-        }
-        (None, Some(command)) => server.new_plain_session(name, path, command)?.id,
-        (None, None) => server.new_session(name, path, None)?.id,
+    let pane = match (&program.session, &program.command) {
+        (Some(session), command) => server.new_window(session, path, command.as_deref())?,
+        (None, Some(command)) => server.new_plain_session(name, path, command)?.pane,
+        (None, None) => server.new_session(name, path, None)?.pane,
     };
-    server.switch_client(&session)
+    show_started(server, &pane)
 }
 
 /// Respawns the agent's pane; without one, or when it is gone, starts the agent
 /// in a new window of the session and makes that the agent's pane, so that
-/// nothing the user started is killed.
+/// nothing the user started is killed. Then shows it in the dashboard's slot.
 fn restart_agent(restart: &RestartAgent, server: &Server) -> crate::error::Result<()> {
     if let Some(pane) = &restart.pane {
         match server.respawn_agent(pane, &restart.command) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return show_started(server, pane),
             Err(Error::Command { stderr, .. }) if stderr.starts_with("can't find pane") => {
                 tracing::info!(pane, "agent pane gone: starting the agent in a new window");
             }
@@ -244,7 +229,8 @@ fn restart_agent(restart: &RestartAgent, server: &Server) -> crate::error::Resul
         }
     }
     let pane = server.new_window(&restart.session, &restart.path, Some(&restart.command))?;
-    server.set_agent_pane(&restart.session, &pane)
+    server.set_agent_pane(&restart.session, &pane)?;
+    show_started(server, &pane)
 }
 
 /// `git worktree add`, then `on_create` in the new worktree, then the agent's
@@ -276,12 +262,27 @@ fn new_worktree(new: &NewWorktree, server: &Server, send: &dyn Fn(Event)) {
     match server.new_session(&new.session, &path, Some(&new.command)) {
         Ok(session) => {
             tracing::info!(name, session = session.name, "agent started");
+            if let Err(err) = show_started(server, &session.pane) {
+                send(Event::Failed(format!("{name}: {err}")));
+            }
             send(Event::Started);
         }
         Err(err) => {
             tracing::warn!(name, %err, "agent not started");
             send(Event::Failed(format!("{name}: {err}")));
         }
+    }
+}
+
+/// Shows `pane`, just started, in the dashboard's slot; without a slot it still
+/// runs, only not shown.
+fn show_started(server: &Server, pane: &str) -> crate::error::Result<()> {
+    match server.show(pane) {
+        Err(Error::NoSlot) => {
+            tracing::warn!(pane, "started, but the dashboard has no slot to show it in");
+            Ok(())
+        }
+        shown => shown,
     }
 }
 
@@ -558,13 +559,45 @@ mod tests {
         program(path, session, Some(EDITOR))
     }
 
-    /// No client is attached in a test: the shell is ready, and showing it fails.
+    /// No dashboard runs in most tests: the program is started, and not shown.
     fn not_shown(events: &[Event]) -> bool {
-        matches!(events, [Event::Failed(err)] if err.starts_with("fix: ") && err.contains("switch-client"))
+        events == [Event::Started]
     }
 
     #[test]
-    fn a_window_is_selected_then_shown() {
+    fn a_shell_is_shown_in_the_dashboards_slot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some(server) = sh_server(tmp.path()) else {
+            return;
+        };
+        let dir = tmp.path().to_str().unwrap();
+        let args = [
+            "new-session",
+            "-d",
+            "-s",
+            "tatou",
+            "-c",
+            dir,
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ];
+        let output = server.run(&[&args[..], &["sleep 1000"]].concat()).unwrap();
+        let board = output.stdout.trim_end().to_string();
+        let placeholder = server.open_slot(&board).unwrap();
+
+        let events = events(shell(tmp.path(), None), &server);
+        assert_eq!(events, [Event::Started]);
+        let shell = show(&server, "tatou:", "#{pane_id}");
+        assert_ne!(
+            shell, board,
+            "the focus is on the shell, beside the dashboard"
+        );
+        assert_eq!(show(&server, "app-fix:", "#{pane_id}"), placeholder);
+    }
+
+    #[test]
+    fn showing_without_the_dashboards_slot_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let Some(server) = sh_server(tmp.path()) else {
             return;
@@ -572,16 +605,12 @@ mod tests {
         let session = server
             .new_session("app-fix", tmp.path(), Some("sleep 1000"))
             .unwrap();
-        server.new_window(&session.id, tmp.path(), None).unwrap();
-        let first = server.sessions().unwrap()[0].windows[0].id.clone();
-        let task = Task::Window {
-            session: session.id.clone(),
-            window: first.clone(),
-        };
-        let events = events(task, &server);
-        // No client is attached in a test: selected, and showing it fails
-        assert!(matches!(&events[..], [Event::Failed(_)]), "{events:?}");
-        assert!(server.sessions().unwrap()[0].windows[0].current);
+        let events = events(Task::Show(session.pane), &server);
+        let message = Error::NoSlot.to_string();
+        assert!(
+            matches!(&events[..], [Event::Failed(m)] if *m == message),
+            "{events:?}"
+        );
     }
 
     #[test]

@@ -20,10 +20,24 @@ const SOCKET: &str = "tatou";
 pub const DASHBOARD: &str = "tatou";
 
 /// POSIX `sh` run after each command tatou starts in a window, while its pane
-/// still exists: the clients whose current window is this pane's go back to the
-/// dashboard. Only those, so a program ending elsewhere moves nobody; without a
-/// dashboard session, the switch fails quietly.
-const BACK_TO_DASHBOARD: &str = r##"w=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}'); for c in $(tmux list-clients -f "#{==:#{window_id},$w}" -F '#{client_name}'); do tmux switch-client -c "$c" -t '=tatou' 2>/dev/null; done"##;
+/// still exists. Shown in the dashboard's slot, the pane first goes back to its
+/// window, the placeholder taking the slot again and the dashboard the focus, so
+/// that it ends where it came from. Then the clients whose current window is this
+/// pane's go back to the dashboard. Only those, so a program ending elsewhere moves
+/// nobody; without a dashboard session, the switch fails quietly.
+const BACK_TO_DASHBOARD: &str = r##"if [ "$(tmux display-message -p -t "$TMUX_PANE" '#{@tatou_shown}')" = 1 ]; then p=$(tmux list-panes -a -f '#{@tatou_placeholder}' -F '#{pane_id}'); tmux swap-pane -d -s "$TMUX_PANE" -t "$p" \; set-option -pu -t "$TMUX_PANE" @tatou_shown \; select-pane -t "$p" -L; fi; w=$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}'); for c in $(tmux list-clients -f "#{==:#{window_id},$w}" -F '#{client_name}'); do tmux switch-client -c "$c" -t '=tatou' 2>/dev/null; done"##;
+
+/// POSIX `sh` run once the dashboard has ended, however it ended: the pane shown in
+/// its slot goes back to its window, and the placeholder is closed, which closes the
+/// dashboard's window and session.
+const CLOSE_SLOT: &str = r##"p=$(tmux list-panes -a -f '#{@tatou_placeholder}' -F '#{pane_id}'); s=$(tmux list-panes -a -f '#{@tatou_shown}' -F '#{pane_id}'); if [ -n "$s" ] && [ -n "$p" ]; then tmux swap-pane -d -s "$s" -t "$p" \; set-option -pu -t "$s" @tatou_shown; fi; [ -n "$p" ] && tmux kill-pane -t "$p"; true"##;
+
+/// What the dashboard's slot runs while no window is shown there, and in a shown
+/// window's place meanwhile: a line saying which, from the session it is in.
+const PLACEHOLDER: &str = r##"printf '\033[?25l'; while :; do if [ "$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}')" = tatou ]; then m='Enter on a worktree or a window shows it here'; else m="Shown in tatou's dashboard"; fi; if [ "$m" != "$o" ]; then printf '\033[H\033[2J\n  %s\n' "$m"; o=$m; fi; sleep 1; done"##;
+
+/// The dashboard's slot, right of it, as a share of its window.
+const SLOT_WIDTH: &str = "60%";
 
 /// The shell code a window tatou opens runs: `command`, or without one the user's
 /// shell as a login shell (as tmux starts it), then `BACK_TO_DASHBOARD`. A newline,
@@ -39,7 +53,10 @@ const MIN_VERSION: (u32, u32) = (3, 2);
 /// The fields `sessions` reads for each pane, tab-separated; empty when an option is
 /// not set. Panes rather than sessions, because only a window's activity follows the
 /// output of its panes: `session_activity` changes on keyboard input alone.
-const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}\t#{window_id}\t#{window_index}";
+const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}\t#{window_id}\t#{window_index}\t#{@tatou_placeholder}\t#{@tatou_shown}";
+
+/// The marks `show` looks for: the slot's placeholder, and the pane shown in it.
+const MARKS_FORMAT: &str = "#{pane_id}\t#{@tatou_placeholder}\t#{@tatou_shown}";
 
 /// What `ps` lists of each process, to tell what runs in the foreground of each
 /// pane's terminal; the same columns on Linux and macOS.
@@ -101,12 +118,6 @@ impl Server {
             Err(Error::Command { stderr, .. }) if no_server(&stderr) => Ok(()),
             Err(err) => Err(err),
         }
-    }
-
-    /// Shows `session` (an id: `$3`) in the client this process runs in: the one
-    /// showing the dashboard, found by tmux from `$TMUX`.
-    pub fn switch_client(&self, session: &str) -> Result<()> {
-        self.run(&["switch-client", "-t", session]).map(|_| ())
     }
 
     /// Starts `command`, an agent, in a new detached session in `path`, named
@@ -217,15 +228,52 @@ impl Server {
         Ok(output.stdout.trim_end().to_string())
     }
 
+    /// Opens the dashboard's slot right of `dashboard`, its pane: the placeholder,
+    /// which a shown pane swaps places with. Returns its id.
+    pub fn open_slot(&self, dashboard: &str) -> Result<String> {
+        let args = [
+            "split-window",
+            "-h",
+            "-d",
+            "-l",
+            SLOT_WIDTH,
+            "-t",
+            dashboard,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            PLACEHOLDER,
+        ];
+        let output = self.run(&args)?;
+        let pane = output.stdout.trim_end().to_string();
+        self.run(&["set-option", "-p", "-t", &pane, "@tatou_placeholder", "1"])?;
+        Ok(pane)
+    }
+
+    /// Shows `pane` in the dashboard's slot, the placeholder taking its place in
+    /// its window, and gives it the focus. The pane shown before goes back to its
+    /// own window first, so that the placeholder is in the slot again.
+    pub fn show(&self, pane: &str) -> Result<()> {
+        let output = self.run(&["list-panes", "-a", "-F", MARKS_FORMAT])?;
+        let (placeholder, shown) = parse_marks(&output.stdout);
+        let placeholder = placeholder.ok_or(Error::NoSlot)?;
+        let mut args = Vec::new();
+        if let Some(shown) = shown.as_deref() {
+            if shown == pane {
+                return self.run(&["select-pane", "-t", pane]).map(|_| ());
+            }
+            args.extend(["swap-pane", "-d", "-s", shown, "-t", &placeholder, ";"]);
+            args.extend(["set-option", "-pu", "-t", shown, "@tatou_shown", ";"]);
+        }
+        args.extend(["swap-pane", "-d", "-s", pane, "-t", &placeholder, ";"]);
+        args.extend(["set-option", "-p", "-t", pane, "@tatou_shown", "1", ";"]);
+        args.extend(["select-pane", "-t", pane]);
+        self.run(&args).map(|_| ())
+    }
+
     /// Kills `session` (an id) and everything running in it.
     pub fn kill_session(&self, session: &str) -> Result<()> {
         self.run(&["kill-session", "-t", session])?;
-        Ok(())
-    }
-
-    /// Makes `window` (an id: `@3`) its session's current window.
-    pub fn select_window(&self, window: &str) -> Result<()> {
-        self.run(&["select-window", "-t", window])?;
         Ok(())
     }
 
@@ -269,6 +317,8 @@ pub struct Session {
 pub struct Window {
     /// `@3`: the target for commands.
     pub id: String,
+    /// Its active pane, the one to show: `%4`.
+    pub pane: String,
     pub index: u32,
     /// The session's current window.
     pub current: bool,
@@ -301,6 +351,20 @@ pub enum AgentStatus {
     Idle,
 }
 
+/// The placeholder and the pane shown in the dashboard's slot, from `MARKS_FORMAT`
+/// lines; either may be missing.
+fn parse_marks(text: &str) -> (Option<String>, Option<String>) {
+    let (mut placeholder, mut shown) = (None, None);
+    for line in text.lines() {
+        match line.split('\t').collect::<Vec<_>>()[..] {
+            [pane, "1", _] => placeholder = Some(pane.to_string()),
+            [pane, _, "1"] => shown = Some(pane.to_string()),
+            _ => {}
+        }
+    }
+    (placeholder, shown)
+}
+
 /// tmux's messages when nothing listens on the socket: the server exited, or never started.
 fn no_server(stderr: &str) -> bool {
     stderr.starts_with("no server running on ")
@@ -313,13 +377,16 @@ fn no_server(stderr: &str) -> bool {
 /// first appear. A line in another shape, such as one with a tab or a newline inside
 /// a path, is skipped so the other sessions still show.
 fn parse_sessions(text: &str, programs: &HashMap<String, String>) -> Vec<Session> {
+    let mut lines = Vec::new();
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        match parse_pane(line) {
+            Some(parsed) => lines.push(parsed),
+            None => tracing::warn!(line, "skipping a tmux pane line in an unexpected shape"),
+        }
+    }
     // Each session with its panes
     let mut sessions: Vec<(Session, Vec<Pane>)> = Vec::new();
-    for line in text.lines().filter(|line| !line.is_empty()) {
-        let Some((session, pane)) = parse_pane(line) else {
-            tracing::warn!(line, "skipping a tmux pane line in an unexpected shape");
-            continue;
-        };
+    for (session, pane) in in_their_windows(lines) {
         match sessions
             .iter_mut()
             .find(|(known, _)| known.id == session.id)
@@ -346,6 +413,7 @@ fn parse_sessions(text: &str, programs: &HashMap<String, String>) -> Vec<Session
                 let tty = pane.tty.trim_start_matches("/dev/");
                 Window {
                     id: pane.window_id.clone(),
+                    pane: pane.id.clone(),
                     index: pane.window_index,
                     current: pane.window_active,
                     // tmux's own name for it, when ps had nothing to say
@@ -364,6 +432,44 @@ fn parse_sessions(text: &str, programs: &HashMap<String, String>) -> Vec<Session
     result
 }
 
+/// The panes, each where it belongs: the one shown in the dashboard's slot in its
+/// own window, where its placeholder stands, keeping the activity of the window it
+/// prints in; the placeholder nowhere.
+fn in_their_windows(lines: Vec<(Session, Pane)>) -> Vec<(Session, Pane)> {
+    let home = lines
+        .iter()
+        .find(|(_, pane)| pane.placeholder)
+        .map(|(session, pane)| {
+            (
+                session.clone(),
+                pane.window_id.clone(),
+                pane.window_index,
+                pane.window_active,
+                pane.pane_active,
+            )
+        });
+    let mut result = Vec::new();
+    for (session, pane) in lines {
+        if pane.placeholder {
+            continue;
+        }
+        match &home {
+            Some((home, window_id, window_index, window_active, pane_active)) if pane.shown => {
+                let pane = Pane {
+                    window_id: window_id.clone(),
+                    window_index: *window_index,
+                    window_active: *window_active,
+                    pane_active: *pane_active,
+                    ..pane
+                };
+                result.push((home.clone(), pane));
+            }
+            _ => result.push((session, pane)),
+        }
+    }
+    result
+}
+
 /// A pane of a session, from one line.
 struct Pane {
     id: String,
@@ -378,6 +484,10 @@ struct Pane {
     command: Option<String>,
     /// Its terminal: `/dev/ttys012`, `/dev/pts/3`.
     tty: String,
+    /// The dashboard's placeholder, standing in for the shown pane when there is one.
+    placeholder: bool,
+    /// Shown in the dashboard's slot.
+    shown: bool,
 }
 
 /// One line: the pane's session (its activity and command not set yet) and the pane.
@@ -398,6 +508,8 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         tty,
         window_id,
         window_index,
+        placeholder,
+        shown,
     ] = fields[..]
     else {
         return None;
@@ -423,6 +535,8 @@ fn parse_pane(line: &str) -> Option<(Session, Pane)> {
         pane_active: pane_active == "1",
         command: set(command),
         tty: tty.to_string(),
+        placeholder: placeholder == "1",
+        shown: shown == "1",
     };
     Some((session, pane))
 }
@@ -604,13 +718,13 @@ pub fn write_conf(config: &Config) -> Result<()> {
 }
 
 /// The shell command the dashboard session runs: this binary, by absolute path so
-/// the session works whatever its `$PATH`.
+/// the session works whatever its `$PATH`, then `CLOSE_SLOT`, however it ended.
 pub fn dashboard_command() -> String {
     let exe = match env::current_exe() {
         Ok(exe) => exe.to_string_lossy().into_owned(),
         Err(_) => "tatou".to_string(),
     };
-    format!("{} --dashboard", exec::shell_quote(&exe))
+    format!("{} --dashboard; {CLOSE_SLOT}", exec::shell_quote(&exe))
 }
 
 /// The contents of tatou's `tmux.conf`: the user's own tmux config when inherited,
@@ -663,11 +777,13 @@ fn conf(tmux: &config::Tmux, user_confs: &[PathBuf], local_conf: &Path, dashboar
         lines.push(format!("set-option -g prefix {}", quote(prefix)));
         lines.push(format!("bind-key {} send-prefix", quote(prefix)));
     }
-    // The dashboard, started again when its session is gone (`q` ends it). The
-    // format finds a session named exactly `tatou`; `{ }` keep the command's
-    // quoting as is. Not `new-session -A`: it attaches only a terminal's client
+    // The dashboard, with the focus on it rather than on its slot (the leftmost
+    // pane), started again when its session is gone (`q` ends it). The format finds
+    // a session named exactly `tatou`; `{ }` keep the command's quoting as is. Not
+    // `new-session -A`: it attaches only a terminal's client
     let exists = format!("#{{S:#{{?#{{==:#{{session_name}},{DASHBOARD}}},1,}}}}");
-    let switch = format!("switch-client -t '={DASHBOARD}'");
+    let switch =
+        format!("switch-client -t '={DASHBOARD}' ; select-pane -t '={DASHBOARD}:.{{left}}'");
     let start = format!(
         "new-session -d -s {DASHBOARD} -n {DASHBOARD} {}",
         quote(dashboard)
@@ -881,7 +997,7 @@ set-option -g window-status-format '#S-#I#{?window_flags,#{window_flags}, }'
 set-option -g window-status-current-format '#S-#I#{?window_flags,#{window_flags}, }'
 
 # tatou's bindings
-bind-key -n 'M-d' if-shell -F '#{S:#{?#{==:#{session_name},tatou},1,}}' { switch-client -t '=tatou' } { new-session -d -s tatou -n tatou ''\\''/usr/bin/tatou'\\'' --dashboard' ; switch-client -t '=tatou' }
+bind-key -n 'M-d' if-shell -F '#{S:#{?#{==:#{session_name},tatou},1,}}' { switch-client -t '=tatou' ; select-pane -t '=tatou:.{left}' } { new-session -d -s tatou -n tatou ''\\''/usr/bin/tatou'\\'' --dashboard' ; switch-client -t '=tatou' ; select-pane -t '=tatou:.{left}' }
 
 source-file -q '/home/me/.config/tatou/tmux.local.conf'
 ";
@@ -895,7 +1011,7 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
             ..Default::default()
         };
         let text = generate(&tmux);
-        let binding = r"bind-key -n 'C-q' if-shell -F '#{S:#{?#{==:#{session_name},tatou},1,}}' { switch-client -t '=tatou' } { new-session -d -s tatou -n tatou ''\''/usr/bin/tatou'\'' --dashboard' ; switch-client -t '=tatou' }";
+        let binding = r"bind-key -n 'C-q' if-shell -F '#{S:#{?#{==:#{session_name},tatou},1,}}' { switch-client -t '=tatou' ; select-pane -t '=tatou:.{left}' } { new-session -d -s tatou -n tatou ''\''/usr/bin/tatou'\'' --dashboard' ; switch-client -t '=tatou' ; select-pane -t '=tatou:.{left}' }";
         assert!(text.contains(&format!("\n{binding}\n")), "{text}");
         assert!(!text.contains("'M-d'"));
     }
@@ -980,7 +1096,8 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
         let path = dir.join("tmux.conf");
         config::write_atomic(
             &path,
-            &conf(&tmux, &[user_conf], &local_conf, DASHBOARD_COMMAND),
+            // The real dashboard command, with its quotes and formats
+            &conf(&tmux, &[user_conf], &local_conf, &dashboard_command()),
         )
         .unwrap();
 
@@ -1124,8 +1241,9 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
         assert_eq!(without_windows, expected);
 
         // Each session's windows, by index, each named by its active pane
-        let window = |id: &str, index, current, command: &str| Window {
+        let window = |id: &str, pane: &str, index, current, command: &str| Window {
             id: id.into(),
+            pane: pane.into(),
             index,
             current,
             command: Some(command.into()),
@@ -1134,17 +1252,17 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
         assert_eq!(
             windows,
             [
-                vec![window("@2", 0, true, "claude")],
+                vec![window("@2", "%2", 0, true, "claude")],
                 // The agent's window, then the shell's, split, with vim active
                 vec![
-                    window("@1", 0, false, "claude"),
-                    window("@4", 1, true, "vim")
+                    window("@1", "%1", 0, false, "claude"),
+                    window("@4", "%5", 1, true, "vim")
                 ],
                 vec![
-                    window("@3", 0, false, "claude"),
-                    window("@6", 1, true, "less")
+                    window("@3", "%3", 0, false, "claude"),
+                    window("@6", "%6", 1, true, "less")
                 ],
-                vec![window("@0", 0, true, "tatou")],
+                vec![window("@0", "%0", 0, true, "tatou")],
             ]
         );
         // Without ps, tmux's names
@@ -1158,8 +1276,8 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
     #[test]
     fn a_closed_agent_pane_falls_back_to_the_most_recent_window() {
         let text = "\
-$1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh\t\t@1\t0
-$1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t\t@2\t1
+$1\tapp\t/a\t\t%9\t/a\t%1\t100\t0\t1\tzsh\t\t@1\t0\t\t
+$1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t\t@2\t1\t\t
 ";
         assert_eq!(parse_sessions(text, &HashMap::new())[0].activity, 200);
     }
@@ -1231,9 +1349,9 @@ $1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t\t@2\t1
     #[test]
     fn lines_in_another_shape_are_skipped() {
         let text = "\
-$0\ttatou\t\t\t\t/home/me\t%0\t1792788783\t1\t1\ttatou\t\t@0\t0
-$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh\t\t@2\t1
-$2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh\t\t@2\t1
+$0\ttatou\t\t\t\t/home/me\t%0\t1792788783\t1\t1\ttatou\t\t@0\t0\t\t
+$1\ttab\t\t\t\t/home/me/a\tb\t%1\t1792788783\t1\t1\tzsh\t\t@2\t1\t\t
+$2\tactivity\t\t\t\t/home/me\t%2\tnot a number\t1\t1\tzsh\t\t@2\t1\t\t
 $3\tshort\t/home/me
 ";
         let names: Vec<_> = parse_sessions(text, &HashMap::new())
@@ -1265,20 +1383,6 @@ $3\tshort\t/home/me
             "error connecting to /tmp/tmux-0/tatou (Permission denied)"
         ));
         assert!(!no_server("unknown option -- F"));
-    }
-
-    #[test]
-    fn switching_without_a_client_reports_tmux_error() {
-        let Some(server) = TestServer::new() else {
-            return;
-        };
-        let output = server.run(&["new-session", "-d", "-P", "-F", "#{session_id}"]);
-        let id = output.unwrap().stdout.trim_end().to_string();
-        // No client is attached in a test; jumping for real is the PR's manual check
-        match server.switch_client(&id) {
-            Err(Error::Command { stderr, .. }) => assert!(!stderr.is_empty()),
-            other => panic!("{other:?}"),
-        }
     }
 
     /// A test server whose default shell is `/bin/sh`, so that commands never run
@@ -1492,7 +1596,7 @@ $3\tshort\t/home/me
     }
 
     #[test]
-    fn selects_a_window_and_lists_each_one() {
+    fn lists_each_window_with_its_pane() {
         let Some((server, dir)) = sh_server() else {
             return;
         };
@@ -1507,10 +1611,167 @@ $3\tshort\t/home/me
         let current: Vec<_> = windows.iter().map(|w| (w.index, w.current)).collect();
         assert_eq!(current, [(0, false), (1, true)], "the one opened last");
         assert_eq!(windows[0].command.as_deref(), Some("sleep"));
+        assert_eq!(windows[0].pane, session.pane);
+    }
 
-        server.select_window(&windows[0].id).unwrap();
-        let windows = server.sessions().unwrap()[0].windows.clone();
-        assert!(windows[0].current && !windows[1].current);
+    /// A dashboard stand-in running `command` in a session named `tatou`, and its
+    /// slot: (dashboard pane, placeholder).
+    fn dashboard(server: &Server, dir: &Path, command: &str) -> (String, String) {
+        let args = [
+            "new-session",
+            "-d",
+            "-s",
+            DASHBOARD,
+            "-x",
+            "120",
+            "-y",
+            "30",
+        ];
+        let output = server.run(
+            &[
+                &args[..],
+                &[
+                    "-c",
+                    &dir.to_string_lossy(),
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    command,
+                ],
+            ]
+            .concat(),
+        );
+        let pane = output.unwrap().stdout.trim_end().to_string();
+        let placeholder = server.open_slot(&pane).unwrap();
+        (pane, placeholder)
+    }
+
+    /// The panes of `target`'s window, in order.
+    fn panes_of(server: &Server, target: &str) -> Vec<String> {
+        let output = server.run(&["list-panes", "-t", target, "-F", "#{pane_id}"]);
+        output.unwrap().stdout.lines().map(String::from).collect()
+    }
+
+    #[test]
+    fn a_shown_pane_swaps_places_with_the_placeholder() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let (board, placeholder) = dashboard(&server, dir.path(), "sleep 1000");
+        assert_eq!(
+            panes_of(&server, &board),
+            [board.clone(), placeholder.clone()]
+        );
+        let app = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
+        let web = server
+            .new_session("web", dir.path(), Some("sleep 1000"))
+            .unwrap();
+
+        server.show(&app.pane).unwrap();
+        assert_eq!(panes_of(&server, &board), [board.clone(), app.pane.clone()]);
+        assert_eq!(
+            panes_of(&server, &app.id),
+            std::slice::from_ref(&placeholder)
+        );
+        assert_eq!(show(&server, "tatou:", "#{pane_id}"), app.pane, "the focus");
+        // Listed in its own session, the placeholder nowhere
+        let sessions = server.sessions().unwrap();
+        let listed = |name: &str| {
+            let session = sessions.iter().find(|s| s.name == name).unwrap();
+            session
+                .windows
+                .iter()
+                .map(|w| w.pane.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(listed("app"), std::slice::from_ref(&app.pane));
+        assert!(!listed(DASHBOARD).contains(&app.pane), "only in its own");
+
+        // Another: the first goes home
+        server.show(&web.pane).unwrap();
+        assert_eq!(panes_of(&server, &board), [board.clone(), web.pane.clone()]);
+        assert_eq!(panes_of(&server, &app.id), std::slice::from_ref(&app.pane));
+        assert_eq!(panes_of(&server, &web.id), [placeholder]);
+        assert_eq!(show(&server, &app.pane, "#{@tatou_shown}"), "");
+    }
+
+    #[test]
+    fn a_shown_program_that_ends_goes_home_first() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let (board, placeholder) = dashboard(&server, dir.path(), "sleep 1000");
+        let app = server
+            .new_session("app", dir.path(), Some("sleep 1"))
+            .unwrap();
+        server.show(&app.pane).unwrap();
+        // It ends in its own window, which closes with its session
+        let names = eventually(
+            || {
+                let sessions = server.sessions().unwrap();
+                sessions.into_iter().map(|s| s.name).collect::<Vec<_>>()
+            },
+            |names| names.len() == 1,
+        );
+        assert_eq!(names, [DASHBOARD]);
+        assert_eq!(panes_of(&server, &board), [board.clone(), placeholder]);
+        assert_eq!(show(&server, "tatou:", "#{pane_id}"), board, "the focus");
+    }
+
+    #[test]
+    fn the_dashboard_ending_sends_the_shown_pane_home_and_closes_its_slot() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let (_, _) = dashboard(&server, dir.path(), &format!("sleep 1; {CLOSE_SLOT}"));
+        let app = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
+        server.show(&app.pane).unwrap();
+        let names = eventually(
+            || {
+                let sessions = server.sessions().unwrap();
+                sessions.into_iter().map(|s| s.name).collect::<Vec<_>>()
+            },
+            |names| names.len() == 1,
+        );
+        assert_eq!(names, ["app"]);
+        assert_eq!(panes_of(&server, &app.id), std::slice::from_ref(&app.pane));
+        assert_eq!(show(&server, &app.pane, "#{@tatou_shown}"), "");
+    }
+
+    #[test]
+    fn showing_without_a_slot_says_so() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let app = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
+        assert!(matches!(server.show(&app.pane), Err(Error::NoSlot)));
+    }
+
+    #[test]
+    fn the_shown_pane_is_listed_where_its_placeholder_stands() {
+        let text = "\
+$0\ttatou\t\t\t\t/h\t%0\t500\t1\t0\ttatou\t\t@0\t0\t\t
+$0\ttatou\t\t\t\t/h\t%1\t500\t1\t1\tclaude\t\t@0\t0\t\t1
+$1\tapp\t/a\t\t%1\t/a\t%2\t100\t1\t1\tsh\t\t@1\t0\t1\t
+";
+        let sessions = parse_sessions(text, &HashMap::new());
+        let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, [DASHBOARD, "app"]);
+        assert!(
+            sessions[0].windows.iter().all(|w| w.pane != "%1"),
+            "only in its own"
+        );
+        let app = &sessions[1];
+        assert_eq!(app.windows[0].pane, "%1");
+        assert_eq!(app.windows[0].id, "@1");
+        assert_eq!(app.command.as_deref(), Some("claude"));
+        assert_eq!(app.activity, 500, "where it prints");
     }
 
     #[test]

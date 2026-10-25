@@ -83,7 +83,7 @@ impl Action {
             Action::Collapse => "collapse",
             Action::Expand => "expand",
             Action::SwitchPane => "switch pane",
-            Action::Jump => "jump",
+            Action::Jump => "show",
             Action::NewWorktree => "new",
             Action::StartAgent => "start agent",
             Action::Shell => "shell",
@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "⏎ jump",
+                "⏎ show",
                 "n new",
                 "s start agent",
                 "t shell",
@@ -362,7 +362,7 @@ mod tests {
             .into_iter()
             .map(|(k, a)| format!("{k} {a}"))
             .collect();
-        assert_eq!(sessions, ["⏎ jump", "? help", "q quit"]);
+        assert_eq!(sessions, ["⏎ show", "? help", "q quit"]);
     }
 
     #[test]

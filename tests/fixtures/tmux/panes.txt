@@ -1,7 +1,7 @@
-$2	api-docs	/home/me/code/api.worktrees/docs	input	%2	/home/me/code/api.worktrees/docs	%2	1792793302	1	1	2.1.310	/dev/ttys002	@2	0
-$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%1	1792793302	0	1	2.1.310	/dev/ttys001	@1	0
-$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%4	1792793305	1	0	zsh	/dev/ttys004	@4	1
-$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%5	1792793305	1	1	vim	/dev/ttys005	@4	1
-$3	scratch				/home/me/notes and ideas	%3	1792793302	0	1	zsh	/dev/ttys003	@3	0
-$3	scratch				/home/me/notes and ideas	%6	1792793307	1	1	less	/dev/ttys006	@6	1
-$0	tatou				/home/me	%0	1792793302	1	1	tatou	/dev/ttys000	@0	0
+$2	api-docs	/home/me/code/api.worktrees/docs	input	%2	/home/me/code/api.worktrees/docs	%2	1792793302	1	1	2.1.310	/dev/ttys002	@2	0		
+$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%1	1792793302	0	1	2.1.310	/dev/ttys001	@1	0		
+$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%4	1792793305	1	0	zsh	/dev/ttys004	@4	1		
+$1	my-app-fix login	/home/me/code/my-app.worktrees/fix login		%1	/home/me/code/my-app.worktrees/fix login	%5	1792793305	1	1	vim	/dev/ttys005	@4	1		
+$3	scratch				/home/me/notes and ideas	%3	1792793302	0	1	zsh	/dev/ttys003	@3	0		
+$3	scratch				/home/me/notes and ideas	%6	1792793307	1	1	less	/dev/ttys006	@6	1		
+$0	tatou				/home/me	%0	1792793302	1	1	tatou	/dev/ttys000	@0	0		

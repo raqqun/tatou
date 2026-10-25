@@ -46,6 +46,21 @@ impl Sessions {
         self.selected.as_ref()
     }
 
+    /// The pane Enter shows: the selected window's active pane, or on a session,
+    /// its current window's.
+    pub fn selected_pane(&self) -> Option<String> {
+        let (session, window) = match self.selected.as_ref()? {
+            Row::Session(id) => (id, None),
+            Row::Window { session, window } => (session, Some(window)),
+        };
+        let session = self.sessions.iter().find(|s| &s.id == session)?;
+        let window = match window {
+            Some(id) => session.windows.iter().find(|w| &w.id == id),
+            None => session.windows.iter().find(|w| w.current),
+        };
+        window.map(|w| w.pane.clone())
+    }
+
     pub fn up(&mut self) {
         self.select(self.index.saturating_sub(1));
     }

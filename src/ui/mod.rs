@@ -23,7 +23,7 @@ use crate::config::{self, Config, Tmux};
 use crate::error::{Error, Result};
 use crate::git;
 use crate::keys::{Action, Key, Keymap, Pane};
-use crate::model::{Sources, WorktreeView};
+use crate::model::{SessionView, Sources, WorktreeView};
 use crate::refresh::{ConfigWatch, Refresh, Update};
 use crate::tmux::{self, Server};
 use dialog::{Choice, Confirm, Dialog, Field, Form, Message, Outcome};
@@ -53,6 +53,12 @@ pub fn run() -> Result<()> {
     let config = config::load().map_err(|err| err.to_string());
     let (updates, received) = mpsc::channel();
     let server = Server::tatou(&tmux::conf_path()?);
+    // The slot right of the dashboard, where windows are shown
+    if let Ok(pane) = std::env::var("TMUX_PANE")
+        && let Err(err) = server.open_slot(&pane)
+    {
+        tracing::warn!(%err, "cannot open the dashboard's slot");
+    }
     let projects = match &config {
         Ok(config) => project_paths(config),
         Err(_) => Vec::new(),
@@ -373,14 +379,12 @@ impl App {
             Action::Down if sessions => self.sessions.down(),
             Action::Collapse if sessions => self.sessions.collapse(),
             Action::Expand if sessions => self.sessions.expand(),
-            // A session, or one of its windows
-            Action::Jump if sessions => match self.sessions.selected().cloned() {
-                Some(sessions::Row::Session(id)) => self.tasks.push(Task::Switch(id)),
-                Some(sessions::Row::Window { session, window }) => {
-                    self.tasks.push(Task::Window { session, window });
+            // A session's current window, or one of its windows
+            Action::Jump if sessions => {
+                if let Some(pane) = self.sessions.selected_pane() {
+                    self.tasks.push(Task::Show(pane));
                 }
-                None => {}
-            },
+            }
             Action::Up if worktrees => self.tree.up(),
             Action::Down if worktrees => self.tree.down(),
             Action::Collapse if worktrees => self.tree.collapse(),
@@ -633,13 +637,17 @@ impl App {
         })
     }
 
-    /// On a worktree, switches to its session; on a project, folds or unfolds it.
+    /// On a worktree, shows its session's current window in the slot; on a project,
+    /// folds or unfolds it.
     fn jump(&mut self) {
         match self.tree.selected_worktree() {
             Some(WorktreeView {
-                session: Some(session),
+                session:
+                    Some(SessionView {
+                        pane: Some(pane), ..
+                    }),
                 ..
-            }) => self.tasks.push(Task::Switch(session.id.clone())),
+            }) => self.tasks.push(Task::Show(pane.clone())),
             // Starting an agent comes with `s` (#22)
             Some(worktree) => {
                 self.message = Some(format!("No session for {} yet", worktree.label()));
@@ -1035,6 +1043,7 @@ mod tests {
             id: "$3".into(),
             name: "app-fix".into(),
             agent_pane: None,
+            pane: Some("%7".into()),
         });
         showing(vec![app_project])
     }
@@ -1044,12 +1053,12 @@ mod tests {
     }
 
     #[test]
-    fn enter_switches_to_the_worktrees_session() {
+    fn enter_shows_the_worktrees_session() {
         let mut app = with_a_session();
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.tasks, [Task::Switch("$3".into())]);
+        assert_eq!(app.tasks, [Task::Show("%7".into())]);
         assert_eq!(app.message, None);
     }
 
@@ -1095,7 +1104,7 @@ mod tests {
             "no session, and the main worktree: no remove"
         );
         press(&mut app, KeyCode::Char('j'));
-        assert!(hint_line(&mut app).starts_with("⏎ jump  n new"), "session");
+        assert!(hint_line(&mut app).starts_with("⏎ show  n new"), "session");
     }
 
     /// Applies `result` as if `config.toml` had just been loaded again.
@@ -1818,6 +1827,7 @@ unknown field `popop`, expected one of `popup`, `back`";
     fn with_windows(id: &str, name: &str, path: &str) -> tmux::Session {
         let window = |n: u32, current, command: &str| tmux::Window {
             id: format!("@{id}{n}").replace('$', ""),
+            pane: format!("%{id}{n}").replace('$', ""),
             index: n,
             current,
             command: Some(command.into()),
@@ -1884,11 +1894,11 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
-        let shown = Task::Window {
-            session: "$1".into(),
-            window: "@11".into(),
-        };
-        assert_eq!(app.tasks, [Task::Switch("$1".into()), shown]);
+        // The session's current window, then window 1
+        assert_eq!(
+            app.tasks,
+            [Task::Show("%11".into()), Task::Show("%11".into())]
+        );
 
         // A window opened before it: still on window 1
         let mut more = with_windows("$1", "app-fix", "/code/app.worktrees/fix");
@@ -1896,6 +1906,7 @@ unknown field `popop`, expected one of `popup`, `back`";
             0,
             tmux::Window {
                 id: "@9".into(),
+                pane: "%9".into(),
                 index: 0,
                 current: false,
                 command: None,
@@ -1935,17 +1946,27 @@ unknown field `popop`, expected one of `popup`, `back`";
     }
 
     #[test]
-    fn enter_in_the_sessions_pane_jumps_and_the_selection_follows_its_session() {
+    fn enter_in_the_sessions_pane_shows_and_the_selection_follows_its_session() {
+        let notes = tmux::Session {
+            windows: vec![tmux::Window {
+                id: "@2".into(),
+                pane: "%2".into(),
+                index: 0,
+                current: true,
+                command: None,
+            }],
+            ..tmux_session("$2", "notes", "/home/me/notes")
+        };
         let mut app = with_sessions(vec![
             tmux_session("$1", "app-fix", "/code/app.worktrees/fix"),
-            tmux_session("$2", "notes", "/home/me/notes"),
+            notes,
         ]);
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Sessions);
-        assert!(hint_line(&mut app).starts_with("⏎ jump  ? help"));
+        assert!(hint_line(&mut app).starts_with("⏎ show  ? help"));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.tasks, [Task::Switch("$2".into())]);
+        assert_eq!(app.tasks, [Task::Show("%2".into())]);
         // A session listed before it: still on notes
         app.sources.apply(Update::Sessions(Ok(vec![
             tmux_session("$3", "aaa", "/tmp"),

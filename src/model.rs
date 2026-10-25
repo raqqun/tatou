@@ -45,6 +45,8 @@ pub struct SessionView {
     pub id: String,
     pub name: String,
     pub agent_pane: Option<String>,
+    /// Its current window's active pane: what Enter shows.
+    pub pane: Option<String>,
 }
 
 impl WorktreeView {
@@ -195,6 +197,7 @@ pub fn merge(
                             id: s.id.clone(),
                             name: s.name.clone(),
                             agent_pane: s.agent_pane.clone(),
+                            pane: s.windows.iter().find(|w| w.current).map(|w| w.pane.clone()),
                         }),
                     });
                 }
@@ -356,6 +359,7 @@ mod tests {
                         id: "$1".into(),
                         name: "app-fix".into(),
                         agent_pane: Some("%1".into()),
+                        pane: None,
                     }),
                     status: Status::Active,
                 },

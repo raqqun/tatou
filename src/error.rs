@@ -50,6 +50,10 @@ pub enum Error {
     #[error("unexpected output from tmux: `{output}`")]
     TmuxOutput { output: String },
 
+    /// The dashboard's slot, where windows are shown, is gone.
+    #[error("the dashboard has no pane to show windows in: run `tatou` again")]
+    NoSlot,
+
     /// The command ran and failed; `stderr` is its own message, shown to the user as is.
     #[error("`{command}` failed ({status}): {stderr}")]
     Command {
