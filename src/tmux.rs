@@ -1173,8 +1173,11 @@ $1\tapp\t/a\t\t%9\t/a\t%2\t200\t1\t1\tzsh\t\t@2\t1
         };
         // As Claude Code: tmux names the file, ps the link it was started through
         let link = dir.path().join("claude");
-        std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
-        let command = format!("{} 1000", link.display());
+        // To `sh`, not `sleep`: Ubuntu's coreutils are one program that runs the
+        // tool its link is named after, and knows no `claude`. `; exit` keeps `sh`
+        // from exec'ing `sleep` in its place
+        std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
+        let command = format!("{} -c 'sleep 1000; exit'", link.display());
         server
             .new_session("app", dir.path(), Some(&command))
             .unwrap();
