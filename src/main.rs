@@ -1,5 +1,7 @@
 mod actions;
+mod client;
 mod config;
+mod daemon;
 mod error;
 mod exec;
 mod gh;
@@ -9,6 +11,7 @@ mod launcher;
 mod logging;
 mod model;
 mod platform;
+mod protocol;
 mod refresh;
 mod tmux;
 mod ui;

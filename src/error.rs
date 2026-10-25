@@ -50,6 +50,10 @@ pub enum Error {
     #[error("unexpected output from tmux: `{output}`")]
     TmuxOutput { output: String },
 
+    /// The daemon said no, or cannot be reached; its own message.
+    #[error("{0}")]
+    Daemon(String),
+
     /// The command ran and failed; `stderr` is its own message, shown to the user as is.
     #[error("`{command}` failed ({status}): {stderr}")]
     Command {
