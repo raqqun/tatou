@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, ThreadId};
 
 use crossterm::cursor::Show;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -29,14 +29,15 @@ impl Drop for Guard {
     }
 }
 
-/// Raw mode, the alternate screen and mouse capture, until the guard is dropped.
+/// Raw mode, the alternate screen and bracketed paste, until the guard is dropped.
+/// The mouse is left to the terminal, to select text in the shown terminal.
 pub fn enter() -> io::Result<(Tui, Guard)> {
     install_panic_hook(thread::current().id());
     enable_raw_mode()?;
     // From here on, a failure still restores what was already changed
     ENTERED.store(true, Ordering::SeqCst);
     let guard = Guard;
-    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
     let terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     Ok((terminal, guard))
 }
@@ -49,7 +50,7 @@ fn restore() {
         return;
     }
     // Nothing more can be done if the terminal refuses
-    let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, Show);
+    let _ = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen, Show);
     let _ = disable_raw_mode();
 }
 

@@ -9,23 +9,27 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, SystemTime};
 
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
+use tui_term::vt100;
+use tui_term::widget::PseudoTerminal;
 
 use crate::actions::{
     self, EDITOR, NewWorktree, Program, RemoveWorktree, RestartAgent, StartAgent, Task,
 };
-use crate::config::{self, Config, Tmux};
+use crate::client::{Client, Stream};
+use crate::config::{self, Config};
 use crate::error::{Error, Result};
 use crate::git;
 use crate::keys::{Action, Key, Keymap, Pane};
-use crate::model::{Sources, WorktreeView};
+use crate::model::{self, SessionView, Sources, WorktreeView};
+use crate::protocol::{Reply, Request};
 use crate::refresh::{ConfigWatch, Refresh, Update};
-use crate::tmux::{self, Server};
+use crate::term::{self, Modes};
 use dialog::{Choice, Confirm, Dialog, Field, Form, Message, Outcome};
 use projects::Tree;
 use sessions::Sessions;
@@ -33,8 +37,15 @@ use sessions::Sessions;
 /// The focused pane's border and title: cyan, as the `repo` tag.
 const ACCENT: Color = Color::Cyan;
 
-/// How long to wait for input before applying updates and drawing again.
-const TICK: Duration = Duration::from_millis(100);
+/// How long to wait for input before applying updates and drawing again; short
+/// enough for a shown terminal's output to appear as it comes.
+const TICK: Duration = Duration::from_millis(15);
+
+/// Moves the focus from the shown terminal back to the dashboard.
+const BACK: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::ALT);
+
+/// Lines of scrollback kept for the shown terminal.
+const SCROLLBACK: usize = 1_000;
 
 /// The worktree actions, hidden from the hint bar on a project row.
 const WORKTREE_ACTIONS: [Action; 5] = [
@@ -45,26 +56,28 @@ const WORKTREE_ACTIONS: [Action; 5] = [
     Action::RemoveWorktree,
 ];
 
-/// Runs the dashboard until the user quits.
-pub fn run() -> Result<()> {
+/// Runs the dashboard until the user quits; the daemon keeps every terminal.
+pub fn run(client: Client) -> Result<()> {
     let path = config::path()?;
     // Before loading, so that a change made meanwhile is loaded again
     let seen = config::stamp(&path);
     let config = config::load().map_err(|err| err.to_string());
     let (updates, received) = mpsc::channel();
-    let server = Server::tatou(&tmux::conf_path()?);
     let projects = match &config {
         Ok(config) => project_paths(config),
         Err(_) => Vec::new(),
     };
     let watch = ConfigWatch::new(path, seen);
-    let refresh = Refresh::start(server.clone(), watch, &projects, &updates);
+    let refresh = Refresh::start(client.clone(), watch, &projects, &updates);
     let (events, happened) = mpsc::channel();
+    // Open while the dashboard runs, which also keeps the daemon from ending
+    let (stream, streamed) = client.stream()?;
 
     let (mut terminal, guard) = terminal::enter().map_err(Error::Terminal)?;
     let mut app = App::new(config);
     // Dropped with the app when the dashboard ends, which stops the workers
     app.refresh = Some(refresh);
+    app.stream = Some(stream);
     // Debug builds only: checks that a panic leaves the terminal usable
     let panic_after_first_frame =
         cfg!(debug_assertions) && std::env::var_os("TATOU_PANIC").is_some();
@@ -79,26 +92,26 @@ pub fn run() -> Result<()> {
             app.input(event::read().map_err(Error::Terminal)?);
         }
         for task in app.tasks.drain(..) {
-            actions::start(task, &server, &events);
+            actions::start(task, &client, &events);
+        }
+        while let Ok(reply) = streamed.try_recv() {
+            app.streamed(reply);
         }
         app.apply_all(&received, &happened);
         app.update_view(unix_now());
         if app.quit {
             drop(guard);
-            leave(&server);
             return Ok(());
         }
     }
 }
 
-/// `q`: leaves tatou. The clients looking at the dashboard detach, back to the
-/// terminal they were attached from; every agent and shell keeps running, and
-/// `tatou` attaches again. Then the dashboard ends, and its session with it.
-fn leave(server: &Server) {
-    let dashboard = format!("={}", tmux::DASHBOARD);
-    if let Err(err) = server.run(&["detach-client", "-s", &dashboard]) {
-        tracing::warn!(%err, "cannot detach from the dashboard");
-    }
+/// The terminal shown on the right: the daemon's, drawn from the screen it sent
+/// and the output since.
+struct Shown {
+    /// `%3`.
+    terminal: String,
+    screen: vt100::Parser,
 }
 
 /// An open dialog, and what its answer is for.
@@ -137,8 +150,6 @@ struct App {
     config: std::result::Result<Config, String>,
     /// Why the config could not be loaded again; the last valid one stays meanwhile.
     reload_error: Option<String>,
-    /// The `[tmux]` that `tmux.conf` was generated from, at launch.
-    launched_tmux: Option<Tmux>,
     /// `None` in tests.
     refresh: Option<Refresh>,
     sources: Sources,
@@ -158,13 +169,17 @@ struct App {
     select_when_listed: Option<PathBuf>,
     /// Asked for since the loop last took them.
     tasks: Vec<Task>,
+    /// The connection the shown terminal comes over; `None` in tests.
+    stream: Option<Stream>,
+    shown: Option<Shown>,
+    /// The shown terminal's size inside its pane, as last drawn: (rows, cols).
+    slot: (u16, u16),
     quit: bool,
 }
 
 impl App {
     fn new(config: std::result::Result<Config, String>) -> App {
         App {
-            launched_tmux: config.as_ref().ok().map(|config| config.tmux.clone()),
             config,
             reload_error: None,
             refresh: None,
@@ -179,14 +194,35 @@ impl App {
             progress: None,
             select_when_listed: None,
             tasks: Vec::new(),
+            stream: None,
+            shown: None,
+            slot: (24, 80),
             quit: false,
         }
     }
 
     fn input(&mut self, event: Event) {
+        if let Event::Paste(text) = &event
+            && self.focus == Pane::Terminal
+        {
+            let bytes = term::paste_bytes(text, self.modes());
+            return self.send(Request::Input(bytes));
+        }
         let Event::Key(key) = event else {
             return;
         };
+        if key.kind == KeyEventKind::Release {
+            return;
+        }
+        // Every key goes to the shown terminal's program, but the one back
+        if self.focus == Pane::Terminal && self.dialog.is_none() {
+            if (key.code, key.modifiers) == BACK {
+                self.focus = Pane::Worktrees;
+            } else {
+                self.send(Request::Input(term::key_bytes(key, self.modes())));
+            }
+            return;
+        }
         if key.kind != KeyEventKind::Press {
             return;
         }
@@ -256,8 +292,9 @@ impl App {
                 // Not over another dialog: its first line, then
                 Some(_) => self.message = output.lines().next().map(String::from),
             },
-            Event::Started => {
+            Event::Started(terminal) => {
                 self.progress = None;
+                self.show(&terminal);
                 if let Some(refresh) = &self.refresh {
                     refresh.sessions_now();
                 }
@@ -326,14 +363,6 @@ impl App {
             Err(err) if self.config.is_ok() => return self.reload_error = Some(err),
             Err(err) => return self.config = Err(err),
         };
-        // Only the launcher writes tmux.conf, and reloads the server with it
-        let launched = self
-            .launched_tmux
-            .get_or_insert_with(|| config.tmux.clone());
-        let previous = self.config.as_ref().ok().map(|config| &config.tmux);
-        if config.tmux != *launched && previous != Some(&config.tmux) {
-            self.message = Some("[tmux] changed: run `tatou` again to apply it".to_string());
-        }
         if let Some(refresh) = &mut self.refresh {
             refresh.set_projects(&project_paths(&config));
         }
@@ -373,14 +402,12 @@ impl App {
             Action::Down if sessions => self.sessions.down(),
             Action::Collapse if sessions => self.sessions.collapse(),
             Action::Expand if sessions => self.sessions.expand(),
-            // A session, or one of its windows
-            Action::Jump if sessions => match self.sessions.selected().cloned() {
-                Some(sessions::Row::Session(id)) => self.tasks.push(Task::Switch(id)),
-                Some(sessions::Row::Window { session, window }) => {
-                    self.tasks.push(Task::Window { session, window });
+            // A session's current terminal, or one of its terminals
+            Action::Jump if sessions => {
+                if let Some(terminal) = self.sessions.selected_terminal() {
+                    self.show(&terminal);
                 }
-                None => {}
-            },
+            }
             Action::Up if worktrees => self.tree.up(),
             Action::Down if worktrees => self.tree.down(),
             Action::Collapse if worktrees => self.tree.collapse(),
@@ -392,8 +419,9 @@ impl App {
             Action::Edit if worktrees => self.open(Some(EDITOR), true),
             Action::RemoveWorktree if worktrees => self.confirm_remove(),
             Action::SwitchPane => {
-                self.focus = match self.focus {
-                    Pane::Worktrees => Pane::Sessions,
+                self.focus = match (self.focus, &self.shown) {
+                    (Pane::Worktrees, _) => Pane::Sessions,
+                    (Pane::Sessions, Some(_)) => Pane::Terminal,
                     _ => Pane::Worktrees,
                 }
             }
@@ -484,7 +512,7 @@ impl App {
         self.tasks.push(Task::Program(Program {
             path: worktree.path.clone(),
             session: worktree.session.as_ref().map(|s| s.id.clone()),
-            session_name: tmux::session_name(&project.name, &name),
+            session_name: model::session_name(&project.name, &name),
             name,
             command: command.map(String::from),
         }));
@@ -502,7 +530,7 @@ impl App {
         let name = worktree.label().to_string();
         let target = AgentFor {
             path: worktree.path.clone(),
-            session_name: tmux::session_name(&project.name, &name),
+            session_name: model::session_name(&project.name, &name),
             session: (worktree.session.as_ref()).map(|s| (s.id.clone(), s.agent_pane.clone())),
             name,
         };
@@ -628,18 +656,26 @@ impl App {
             base: (!base.is_empty()).then(|| base.to_string()),
             path: git::worktree_path(project, name, settings.worktree_dir.as_deref()),
             on_create: settings.on_create.clone(),
-            session: tmux::session_name(&project_name, name),
+            session: model::session_name(&project_name, name),
             command: command.clone(),
         })
     }
 
-    /// On a worktree, switches to its session; on a project, folds or unfolds it.
+    /// On a worktree, shows its session's current terminal; on a project, folds or
+    /// unfolds it.
     fn jump(&mut self) {
         match self.tree.selected_worktree() {
             Some(WorktreeView {
-                session: Some(session),
+                session:
+                    Some(SessionView {
+                        current: Some(terminal),
+                        ..
+                    }),
                 ..
-            }) => self.tasks.push(Task::Switch(session.id.clone())),
+            }) => {
+                let terminal = terminal.clone();
+                self.show(&terminal);
+            }
             // Starting an agent comes with `s` (#22)
             Some(worktree) => {
                 self.message = Some(format!("No session for {} yet", worktree.label()));
@@ -667,18 +703,83 @@ impl App {
         }
     }
 
+    /// Shows `terminal` on the right and gives it the focus: the daemon sends its
+    /// screen, then its output, over the stream.
+    fn show(&mut self, terminal: &str) {
+        let (rows, cols) = self.slot;
+        self.send(Request::Attach {
+            terminal: terminal.to_string(),
+            rows,
+            cols,
+        });
+        self.shown = Some(Shown {
+            terminal: terminal.to_string(),
+            screen: vt100::Parser::new(rows, cols, SCROLLBACK),
+        });
+        self.focus = Pane::Terminal;
+    }
+
+    /// What the daemon streams for the shown terminal.
+    fn streamed(&mut self, reply: Reply) {
+        match (reply, &mut self.shown) {
+            (Reply::Screen(bytes), Some(shown)) => {
+                let (rows, cols) = self.slot;
+                shown.screen = vt100::Parser::new(rows, cols, SCROLLBACK);
+                shown.screen.process(&bytes);
+            }
+            (Reply::Output(bytes), Some(shown)) => shown.screen.process(&bytes),
+            // Its program ended, and the terminal with it
+            (Reply::Exited, _) => {
+                self.shown = None;
+                if self.focus == Pane::Terminal {
+                    self.focus = Pane::Worktrees;
+                }
+                if let Some(refresh) = &self.refresh {
+                    refresh.sessions_now();
+                }
+            }
+            (Reply::Error(message), _) => {
+                self.shown = None;
+                self.focus = Pane::Worktrees;
+                self.message = Some(message);
+            }
+            _ => {}
+        }
+    }
+
+    fn send(&self, request: Request) {
+        if let Some(stream) = &self.stream {
+            stream.send(request);
+        }
+    }
+
+    /// The shown terminal's modes, which some keys' bytes follow.
+    fn modes(&self) -> Modes {
+        match &self.shown {
+            Some(shown) => Modes {
+                application_cursor: shown.screen.screen().application_cursor(),
+                bracketed_paste: shown.screen.screen().bracketed_paste(),
+            },
+            None => Modes::default(),
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let [main, hints] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
-        // Sessions as tall as its rows and borders, up to a third of the screen; not
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(main);
+        self.render_terminal(frame, right);
+        // Sessions as tall as its rows and borders, up to a third of the column; not
         // drawn when a third has no room for one row, so the projects keep theirs
         let wanted = self.sessions.len().max(1) as u16 + 2;
-        let height = match wanted.min(main.height / 3) {
+        let height = match wanted.min(left.height / 3) {
             fits @ 3.. => fits,
             _ => 0,
         };
         let [projects, sessions] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(main);
+            Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).areas(left);
         // Without room for the sessions, their error goes below the projects
         self.render_projects(frame, projects, height == 0);
         if height > 0 {
@@ -690,7 +791,46 @@ impl App {
         }
     }
 
-    /// Every session on tatou's server; a tmux error at the bottom.
+    /// The shown terminal, at the pane's size, which the daemon follows; what to do
+    /// when none is shown.
+    fn render_terminal(&mut self, frame: &mut Frame, area: Rect) {
+        let title = match &self.shown {
+            Some(shown) => format!(" {} ", self.sessions.title(&shown.terminal)),
+            None => " Terminal ".to_string(),
+        };
+        let block = self.pane_block_titled(title, Pane::Terminal);
+        let inner = block.inner(area);
+        let size = (inner.height.max(1), inner.width.max(1));
+        if size != self.slot {
+            self.slot = size;
+            if let Some(shown) = &mut self.shown {
+                shown.screen.screen_mut().set_size(size.0, size.1);
+                self.send(Request::Resize {
+                    rows: size.0,
+                    cols: size.1,
+                });
+            }
+        }
+        match &self.shown {
+            Some(shown) => {
+                let mut cursor = tui_term::widget::Cursor::default();
+                if self.focus != Pane::Terminal {
+                    cursor.hide();
+                }
+                let widget = PseudoTerminal::new(shown.screen.screen())
+                    .block(block)
+                    .cursor(cursor);
+                frame.render_widget(widget, area);
+            }
+            None => {
+                let text = "Enter on a worktree or a session shows its terminal here";
+                let body = Paragraph::new(text).wrap(Wrap { trim: false });
+                frame.render_widget(body.block(block), area);
+            }
+        }
+    }
+
+    /// Every session the daemon has; its error at the bottom.
     fn render_sessions(&mut self, frame: &mut Frame, area: Rect) {
         let mut block = self.pane_block(" Sessions ", Pane::Sessions);
         if let Some(err) = self.sources.sessions_error() {
@@ -727,6 +867,10 @@ impl App {
     /// The focused pane's border and title are in the accent color; the other
     /// panes are dim, borders, titles and contents.
     fn pane_block(&self, title: &'static str, pane: Pane) -> Block<'static> {
+        self.pane_block_titled(title.to_string(), pane)
+    }
+
+    fn pane_block_titled(&self, title: String, pane: Pane) -> Block<'static> {
         let block = Block::bordered().title(title);
         if self.focus == pane {
             let accent = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
@@ -744,6 +888,14 @@ impl App {
         }
         if let (None, Some(progress)) = (&self.dialog, &self.progress) {
             return Paragraph::new(format!("… {progress}"));
+        }
+        if self.focus == Pane::Terminal && self.dialog.is_none() {
+            let bold = Style::new().add_modifier(Modifier::BOLD);
+            let keys = vec![
+                Span::styled("M-d", bold),
+                Span::raw(" back to the dashboard; every other key goes to the terminal"),
+            ];
+            return Paragraph::new(Line::from(keys));
         }
         let hints = match &self.dialog {
             Some(open) => open
@@ -796,7 +948,7 @@ fn error_style() -> Style {
     Style::new().fg(Color::Red).remove_modifier(Modifier::DIM)
 }
 
-/// Seconds since the Unix epoch, like tmux's activity times.
+/// Seconds since the Unix epoch, like the daemon's activity times.
 fn unix_now() -> u64 {
     let since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
     since_epoch.map_or(0, |elapsed| elapsed.as_secs())
@@ -810,7 +962,8 @@ mod tests {
 
     use super::projects::tests::{project, worktree};
     use super::*;
-    use crate::model::{ProjectView, SessionView, Status};
+    use crate::model::{ProjectView, Status};
+    use crate::protocol;
 
     fn app() -> App {
         App::new(Err("not loaded".into()))
@@ -833,10 +986,11 @@ mod tests {
             .collect()
     }
 
-    /// The projects' pane's text inside its borders, on a 40-column screen.
+    /// The projects' pane's text inside its borders, on a 100-column screen, where
+    /// the left column is 40 wide.
     fn projects_pane(app: &mut App, height: u16) -> Vec<String> {
         // Three more rows for the sessions' pane below, empty: the same room as before it
-        let lines = screen(app, 40, height + 3);
+        let lines = screen(app, 100, height + 3);
         let bottom = lines.iter().position(|l| l.starts_with('└')).unwrap();
         // Taller when the sessions' pane has no room: only empty lines more
         let inner = &lines[1..bottom.min(height as usize - 2)];
@@ -867,16 +1021,16 @@ mod tests {
             project("/code/web", &[]),
         ]);
         let expected = [
-            "┌ Projects ──────────────────────────────┐",
-            "│▾ app                                   │",
-            "│  · main  repo                          │",
-            "│  · fix-login                           │",
-            "│▾ web                                   │",
-            "│  · main  repo                          │",
-            "└────────────────────────────────────────┘",
+            "┌ Projects ──────────────────┐┌ Terminal ──────────────────────────────────┐",
+            "│▾ app                       ││Enter on a worktree or a session shows its  │",
+            "│  · main  repo              ││terminal here                               │",
+            "│  · fix-login               ││                                            │",
+            "│▾ web                       ││                                            │",
+            "│  · main  repo              ││                                            │",
+            "└────────────────────────────┘└────────────────────────────────────────────┘",
             "n new  e edit  ? help  q quit",
         ];
-        assert_eq!(screen(&mut app, 42, 8), expected);
+        assert_eq!(screen(&mut app, 76, 8), expected);
     }
 
     #[test]
@@ -950,10 +1104,9 @@ mod tests {
     #[test]
     fn a_tmux_error_shows_at_the_bottom_of_the_pane() {
         let mut app = showing(vec![project("/code/app", &[])]);
-        app.sources
-            .apply(Update::Sessions(Err("tmux: no server".into())));
+        app.sources.apply(Update::Sessions(Err("no daemon".into())));
         let lines = screen(&mut app, 60, 5);
-        assert!(lines[3].starts_with("└ tmux: no server ─"), "{lines:?}");
+        assert!(lines[3].starts_with("└ no daemon ─"), "{lines:?}");
     }
 
     #[test]
@@ -1017,12 +1170,12 @@ mod tests {
         let (updates, received) = mpsc::channel();
         let (failures, failed) = mpsc::channel();
         updates
-            .send(Update::Sessions(Err("tmux: boom".into())))
+            .send(Update::Sessions(Err("daemon: boom".into())))
             .unwrap();
         let failure = actions::Event::Failed("can't find session: $9".to_string());
         failures.send(failure).unwrap();
         app.apply_all(&received, &failed);
-        assert_eq!(app.sources.sessions_error(), Some("tmux: boom"));
+        assert_eq!(app.sources.sessions_error(), Some("daemon: boom"));
         assert_eq!(app.message.as_deref(), Some("can't find session: $9"));
         // Nothing more to apply: returns at once
         app.apply_all(&received, &failed);
@@ -1035,6 +1188,7 @@ mod tests {
             id: "$3".into(),
             name: "app-fix".into(),
             agent_pane: None,
+            current: Some("%7".into()),
         });
         showing(vec![app_project])
     }
@@ -1044,12 +1198,13 @@ mod tests {
     }
 
     #[test]
-    fn enter_switches_to_the_worktrees_session() {
+    fn enter_shows_the_worktrees_terminal_and_gives_it_the_focus() {
         let mut app = with_a_session();
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.tasks, [Task::Switch("$3".into())]);
+        assert_eq!(shown(&app), Some("%7"));
+        assert_eq!(app.focus, Pane::Terminal);
         assert_eq!(app.message, None);
     }
 
@@ -1147,28 +1302,6 @@ unknown field `popop`, expected one of `popup`, `back`";
     }
 
     #[test]
-    fn a_tmux_change_says_to_run_tatou_again_once() {
-        let mut app = App::new(Ok(test_config()));
-        reload(&mut app, Ok(test_config()));
-        assert_eq!(app.message, None, "nothing changed");
-
-        let changed = || {
-            let mut config = test_config();
-            config.tmux.back = "M-b".into();
-            config
-        };
-        reload(&mut app, Ok(changed()));
-        let expected = "[tmux] changed: run `tatou` again to apply it";
-        assert_eq!(app.message.as_deref(), Some(expected));
-        app.message = None;
-        reload(&mut app, Ok(changed()));
-        assert_eq!(app.message, None, "said once");
-        // Back to what tmux.conf has: nothing to apply
-        reload(&mut app, Ok(test_config()));
-        assert_eq!(app.message, None);
-    }
-
-    #[test]
     fn config_errors_fit_on_one_line() {
         let path = std::path::Path::new("/c/config.toml");
         assert_eq!(
@@ -1212,10 +1345,10 @@ unknown field `popop`, expected one of `popup`, `back`";
         let (updates, received) = mpsc::channel();
         let (_failures, failed) = mpsc::channel();
         updates
-            .send(Update::Sessions(Err("tmux: boom".into())))
+            .send(Update::Sessions(Err("daemon: boom".into())))
             .unwrap();
         app.apply_all(&received, &failed);
-        assert_eq!(app.sources.sessions_error(), Some("tmux: boom"));
+        assert_eq!(app.sources.sessions_error(), Some("daemon: boom"));
 
         press(&mut app, KeyCode::Esc);
         assert!(app.dialog.is_none());
@@ -1404,8 +1537,14 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(selected, Some(path));
         assert!(app.select_when_listed.is_none());
 
-        event(&mut app, actions::Event::Started);
-        assert!(hint_line(&mut app).starts_with("n new"), "progress done");
+        // Progress done, and the agent shown, with the focus
+        event(&mut app, actions::Event::Started("%1".into()));
+        assert_eq!(shown(&app), Some("%1"));
+        assert!(
+            hint_line(&mut app).starts_with("M-d back"),
+            "{}",
+            hint_line(&mut app)
+        );
     }
 
     #[test]
@@ -1710,25 +1849,27 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert!(lines.contains("use 'remove -f -f' to override"), "{lines}");
     }
 
-    /// A session tatou did not tag, in `path`, active at `NOW`.
-    fn tmux_session(id: &str, name: &str, path: &str) -> tmux::Session {
-        tmux::Session {
+    /// A session in `path`, active at `NOW`, without terminals listed.
+    fn daemon_session(id: &str, name: &str, path: &str) -> protocol::Session {
+        protocol::Session {
             id: id.into(),
             name: name.into(),
-            tatou_path: None,
-            status: None,
-            agent_pane: None,
             path: path.into(),
+            agent: None,
             activity: NOW,
-            command: None,
             windows: Vec::new(),
         }
+    }
+
+    /// The terminal the dashboard shows.
+    fn shown(app: &App) -> Option<&str> {
+        app.shown.as_ref().map(|shown| shown.terminal.as_str())
     }
 
     const NOW: u64 = 1_000_000;
 
     /// `app` with its `fix` worktree and `sessions` on the server, as refreshed.
-    fn with_sessions(sessions: Vec<tmux::Session>) -> App {
+    fn with_sessions(sessions: Vec<protocol::Session>) -> App {
         let mut app = with_a_project(None);
         app.home = Some("/home/me".into());
         let worktrees = vec![
@@ -1783,11 +1924,10 @@ unknown field `popop`, expected one of `popup`, `back`";
     }
 
     #[test]
-    fn the_sessions_pane_lists_every_session_but_the_dashboards() {
+    fn the_sessions_pane_lists_every_session() {
         let mut app = with_sessions(vec![
-            tmux_session("$1", "app-fix", "/code/app.worktrees/fix"),
-            tmux_session("$2", "notes", "/home/me/notes"),
-            tmux_session("$0", tmux::DASHBOARD, "/code/app"),
+            daemon_session("$1", "app-fix", "/code/app.worktrees/fix"),
+            daemon_session("$2", "notes", "/home/me/notes"),
         ]);
         assert_eq!(
             sessions_pane(&mut app, 20),
@@ -1798,34 +1938,41 @@ unknown field `popop`, expected one of `popup`, `back`";
 
     #[test]
     fn a_session_shows_what_runs_in_its_current_window() {
-        let running = |command: &str| tmux::Session {
-            command: Some(command.into()),
-            ..tmux_session("$1", "app-fix", "/code/app.worktrees/fix")
+        let running = |command: &str| protocol::Session {
+            windows: vec![protocol::Window {
+                id: "%1".into(),
+                index: 0,
+                current: true,
+                command: command.into(),
+            }],
+            ..daemon_session("$1", "app-fix", "/code/app.worktrees/fix")
         };
         let mut app = with_sessions(vec![running("claude")]);
         assert_eq!(
             sessions_pane(&mut app, 20),
-            ["▾ ● app-fix  claude  app/fix"]
+            ["▾ ● app-fix  claude  app/fix", "    0 claude *"]
         );
         // Another window, or another program: the next refresh says so
         app.sources
             .apply(Update::Sessions(Ok(vec![running("zsh")])));
         app.update_view(NOW);
-        assert_eq!(sessions_pane(&mut app, 20), ["▾ ● app-fix  zsh  app/fix"]);
+        assert_eq!(
+            sessions_pane(&mut app, 20),
+            ["▾ ● app-fix  zsh  app/fix", "    0 zsh *"]
+        );
     }
 
-    /// `tmux_session` with windows 0 (`claude`) and 1 (`zsh`, current).
-    fn with_windows(id: &str, name: &str, path: &str) -> tmux::Session {
-        let window = |n: u32, current, command: &str| tmux::Window {
-            id: format!("@{id}{n}").replace('$', ""),
+    /// `daemon_session` with windows 0 (`claude`) and 1 (`zsh`, current).
+    fn with_windows(id: &str, name: &str, path: &str) -> protocol::Session {
+        let window = |n: u32, current, command: &str| protocol::Window {
+            id: format!("%{id}{n}").replace('$', ""),
             index: n,
             current,
-            command: Some(command.into()),
+            command: command.into(),
         };
-        tmux::Session {
-            command: Some("zsh".into()),
+        protocol::Session {
             windows: vec![window(0, false, "claude"), window(1, true, "zsh")],
-            ..tmux_session(id, name, path)
+            ..daemon_session(id, name, path)
         }
     }
 
@@ -1857,7 +2004,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Char('l'));
         let window = sessions::Row::Window {
             session: "$1".into(),
-            window: "@10".into(),
+            window: "%10".into(),
         };
         assert_eq!(app.sessions.selected(), Some(&window));
         press(&mut app, KeyCode::Char('h'));
@@ -1880,32 +2027,33 @@ unknown field `popop`, expected one of `popup`, `back`";
             "/code/app.worktrees/fix",
         )]);
         app.focus = Pane::Sessions;
+        // The session's current window
         press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Down);
+        assert_eq!(shown(&app), Some("%11"));
+        // Window 0, from the sessions' pane again
+        app.focus = Pane::Sessions;
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
-        let shown = Task::Window {
-            session: "$1".into(),
-            window: "@11".into(),
-        };
-        assert_eq!(app.tasks, [Task::Switch("$1".into()), shown]);
+        assert_eq!(shown(&app), Some("%10"));
+        app.focus = Pane::Sessions;
+        press(&mut app, KeyCode::Down);
 
         // A window opened before it: still on window 1
         let mut more = with_windows("$1", "app-fix", "/code/app.worktrees/fix");
         more.windows.insert(
             0,
-            tmux::Window {
-                id: "@9".into(),
+            protocol::Window {
+                id: "%9".into(),
                 index: 0,
                 current: false,
-                command: None,
+                command: "sh".into(),
             },
         );
         app.sources.apply(Update::Sessions(Ok(vec![more])));
         app.update_view(NOW);
         let window = sessions::Row::Window {
             session: "$1".into(),
-            window: "@11".into(),
+            window: "%11".into(),
         };
         assert_eq!(app.sessions.selected(), Some(&window));
     }
@@ -1919,7 +2067,7 @@ unknown field `popop`, expected one of `popup`, `back`";
     #[test]
     fn the_sessions_pane_takes_at_most_a_third_of_the_column() {
         let many = (0..20)
-            .map(|n| tmux_session(&format!("${n}"), &format!("s{n:02}"), "/tmp"))
+            .map(|n| daemon_session(&format!("${n}"), &format!("s{n:02}"), "/tmp"))
             .collect();
         let mut app = with_sessions(many);
         // 30 rows: a column of 29, so 9 for the pane, 7 inside its borders
@@ -1936,21 +2084,30 @@ unknown field `popop`, expected one of `popup`, `back`";
 
     #[test]
     fn enter_in_the_sessions_pane_jumps_and_the_selection_follows_its_session() {
+        let notes = protocol::Session {
+            windows: vec![protocol::Window {
+                id: "%2".into(),
+                index: 0,
+                current: true,
+                command: "vim".into(),
+            }],
+            ..daemon_session("$2", "notes", "/home/me/notes")
+        };
         let mut app = with_sessions(vec![
-            tmux_session("$1", "app-fix", "/code/app.worktrees/fix"),
-            tmux_session("$2", "notes", "/home/me/notes"),
+            daemon_session("$1", "app-fix", "/code/app.worktrees/fix"),
+            notes,
         ]);
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Sessions);
         assert!(hint_line(&mut app).starts_with("⏎ jump  ? help"));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.tasks, [Task::Switch("$2".into())]);
+        assert_eq!(shown(&app), Some("%2"));
         // A session listed before it: still on notes
         app.sources.apply(Update::Sessions(Ok(vec![
-            tmux_session("$3", "aaa", "/tmp"),
-            tmux_session("$1", "app-fix", "/code/app.worktrees/fix"),
-            tmux_session("$2", "notes", "/home/me/notes"),
+            daemon_session("$3", "aaa", "/tmp"),
+            daemon_session("$1", "app-fix", "/code/app.worktrees/fix"),
+            daemon_session("$2", "notes", "/home/me/notes"),
         ])));
         app.update_view(NOW);
         assert_eq!(
@@ -1968,10 +2125,9 @@ unknown field `popop`, expected one of `popup`, `back`";
     #[test]
     fn a_tmux_error_shows_below_the_sessions() {
         let mut app = with_sessions(vec![]);
-        app.sources
-            .apply(Update::Sessions(Err("tmux: no server".into())));
+        app.sources.apply(Update::Sessions(Err("no daemon".into())));
         let lines = screen(&mut app, 60, 20);
-        assert!(lines[18].starts_with("└ tmux: no server ─"), "{lines:?}");
+        assert!(lines[18].starts_with("└ no daemon ─"), "{lines:?}");
     }
 
     /// The style of each cell on a `width`×`height` screen, by (x, y).
@@ -1994,7 +2150,7 @@ unknown field `popop`, expected one of `popup`, `back`";
 
     #[test]
     fn the_focused_pane_stands_out_and_the_others_are_dim() {
-        let mut app = with_sessions(vec![tmux_session(
+        let mut app = with_sessions(vec![daemon_session(
             "$1",
             "app-fix",
             "/code/app.worktrees/fix",
@@ -2028,7 +2184,7 @@ unknown field `popop`, expected one of `popup`, `back`";
 
     #[test]
     fn a_dim_pane_dims_its_contents_and_keeps_its_selection() {
-        let mut app = with_sessions(vec![tmux_session(
+        let mut app = with_sessions(vec![daemon_session(
             "$1",
             "app-fix",
             "/code/app.worktrees/fix",
@@ -2048,69 +2204,18 @@ unknown field `popop`, expected one of `popup`, `back`";
     #[test]
     fn errors_stay_bright_in_a_dim_pane() {
         let mut app = with_sessions(vec![]);
-        app.sources
-            .apply(Update::Sessions(Err("tmux: no server".into())));
+        app.sources.apply(Update::Sessions(Err("no daemon".into())));
         // Projects focused: the sessions' pane, with the error, is dim
         let lines = screen(&mut app, 60, 20);
         let y = lines
             .iter()
-            .position(|l| l.starts_with("└ tmux: no server"))
+            .position(|l| l.starts_with("└ no daemon"))
             .unwrap() as u16;
         let buffer = styles(&mut app, 60, 20);
         assert!(dim(&buffer, 0, y), "the border");
         let cell = &buffer[(3, y)];
         assert_eq!(cell.fg, Color::Red);
         assert!(!cell.modifier.contains(Modifier::DIM), "the error");
-    }
-
-    #[test]
-    fn leaving_detaches_the_dashboards_clients_and_keeps_every_session() {
-        use crate::tmux::testing::{Client, TestServer, client_on};
-        let Some(server) = TestServer::new() else {
-            return;
-        };
-        for name in [tmux::DASHBOARD, "work"] {
-            server
-                .run(&["new-session", "-d", "-s", name, "sleep 1000"])
-                .unwrap();
-        }
-        let _on_dashboard = Client::attach(&server, &format!("={}", tmux::DASHBOARD));
-        let _on_work = Client::attach(&server, "=work");
-        let both = |s: &str| s.lines().count() == 2;
-        assert_eq!(client_count(&server, both), 2);
-
-        leave(&server);
-        assert_eq!(client_count(&server, |s| s.lines().count() == 1), 1);
-        assert_eq!(
-            client_on(&server, |s| s == "work"),
-            "work",
-            "the other client stays"
-        );
-        let names: Vec<_> = server
-            .sessions()
-            .unwrap()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert_eq!(
-            names,
-            [tmux::DASHBOARD, "work"],
-            "every session keeps running"
-        );
-    }
-
-    /// How many clients the server has, once `until` holds of their list, within 5 s.
-    fn client_count(server: &Server, until: impl Fn(&str) -> bool) -> usize {
-        let mut clients = String::new();
-        for _ in 0..50 {
-            let output = server.run(&["list-clients", "-F", "#{client_session}"]);
-            clients = output.map(|o| o.stdout).unwrap_or_default();
-            if until(&clients) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        clients.lines().count()
     }
 
     fn test_config() -> Config {

@@ -1,5 +1,5 @@
-//! The sessions' pane, below the projects: every session on tatou's server, and
-//! under each, its windows.
+//! The sessions' pane, below the projects: every session the daemon has, and
+//! under each, its terminals, which it calls windows.
 
 use std::collections::HashSet;
 
@@ -44,6 +44,32 @@ impl Sessions {
 
     pub fn selected(&self) -> Option<&Row> {
         self.selected.as_ref()
+    }
+
+    /// The terminal Enter shows: the selected window, or on a session, its
+    /// current one.
+    pub fn selected_terminal(&self) -> Option<String> {
+        let (session, window) = match self.selected.as_ref()? {
+            Row::Session(id) => (id, None),
+            Row::Window { session, window } => (session, Some(window)),
+        };
+        let session = self.sessions.iter().find(|s| &s.id == session)?;
+        let window = match window {
+            Some(id) => session.windows.iter().find(|w| &w.id == id),
+            None => session.windows.iter().find(|w| w.current),
+        };
+        window.map(|w| w.id.clone())
+    }
+
+    /// What the shown terminal's pane is titled: its session, the window's index
+    /// and what runs in it, `app-fix:1 zsh`.
+    pub fn title(&self, terminal: &str) -> String {
+        for session in &self.sessions {
+            if let Some(window) = session.windows.iter().find(|w| w.id == terminal) {
+                return format!("{}:{} {}", session.name, window.index, window.command);
+            }
+        }
+        terminal.to_string()
     }
 
     pub fn up(&mut self) {
@@ -143,7 +169,7 @@ impl Sessions {
                 continue;
             }
             for window in &session.windows {
-                let command = window.command.as_deref().unwrap_or("");
+                let command = &window.command;
                 let current = if window.current { " *" } else { "" };
                 let line = format!("    {} {command}{current}", window.index);
                 items.push(ListItem::new(line));

@@ -179,14 +179,18 @@ fn unexpected(reply: Reply) -> Error {
     Error::Daemon(format!("unexpected reply from the daemon: {reply:?}"))
 }
 
+/// A daemon for tests.
 #[cfg(test)]
-mod tests {
-    use std::time::Instant;
+pub mod testing {
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use super::*;
+    use super::Client;
+    use crate::daemon;
 
-    /// A daemon in this process on a socket of its own, which never ends it.
-    fn daemon() -> (tempfile::TempDir, Client) {
+    /// A daemon in this process on a socket of its own, which never ends the
+    /// process; it serves until the test ends.
+    pub fn daemon() -> (tempfile::TempDir, Client) {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("d.sock");
         let path = socket.clone();
@@ -199,6 +203,27 @@ mod tests {
         }
         (dir, client)
     }
+
+    /// Waits until `client` lists `n` sessions, up to 5 s; programs end, and their
+    /// terminals with them, a moment after they are killed.
+    pub fn sessions_become(client: &Client, n: usize) {
+        let started = Instant::now();
+        while client.sessions().unwrap().len() != n {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "never {n} sessions"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::testing::{daemon, sessions_become};
+    use super::*;
 
     /// Replies from `received` until `until` holds of what was printed, or 5 s.
     fn printed(received: &Receiver<Reply>, until: impl Fn(&str) -> bool) -> (String, bool) {
@@ -256,11 +281,7 @@ mod tests {
         stream.send(Request::Input(vec![4]));
         let (_, exited) = printed(&received, |_| false);
         assert!(exited);
-        let started = Instant::now();
-        while !client.sessions().unwrap().is_empty() {
-            assert!(started.elapsed() < Duration::from_secs(5));
-            thread::sleep(Duration::from_millis(20));
-        }
+        sessions_become(&client, 0);
     }
 
     #[test]
@@ -288,11 +309,7 @@ mod tests {
         assert_eq!(windows, [(first, false), (second, true)]);
 
         client.kill_session(&session).unwrap();
-        let started = Instant::now();
-        while client.sessions().unwrap().len() != 1 {
-            assert!(started.elapsed() < Duration::from_secs(5));
-            thread::sleep(Duration::from_millis(20));
-        }
+        sessions_become(&client, 1);
     }
 
     #[test]

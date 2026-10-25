@@ -27,7 +27,8 @@ use crate::protocol::{Reply, Request, Session, Window};
 /// Lines of scrollback kept per terminal.
 const SCROLLBACK: usize = 10_000;
 
-/// How long a daemon nobody connected to waits before ending.
+/// How long a daemon with nothing to do waits before ending, in case a dashboard
+/// connects meanwhile: one just starting, between its first requests.
 const ALONE_FOR: Duration = Duration::from_secs(10);
 
 /// The daemon's socket: `$XDG_STATE_HOME/tatou/tatou.sock`.
@@ -68,13 +69,7 @@ pub fn serve(path: &Path, ends: bool) -> io::Result<()> {
     let listener = UnixListener::bind(path)?;
     tracing::info!(?path, "daemon listening");
     let daemon = Daemon::new(path, ends);
-    {
-        let daemon = daemon.clone();
-        thread::spawn(move || {
-            thread::sleep(ALONE_FOR);
-            daemon.end_if_idle();
-        });
-    }
+    daemon.end_if_idle_later();
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -249,7 +244,7 @@ impl Daemon {
             terminal.watchers.retain(|(id, _)| *id != client);
         }
         drop(state);
-        self.end_if_idle();
+        self.end_if_idle_later();
     }
 
     /// The reply to `request`; none for input and resizes, which only an attached
@@ -470,7 +465,7 @@ impl Daemon {
         }
         state.sessions.retain(|s| !s.terminals.is_empty());
         drop(state);
-        self.end_if_idle();
+        self.end_if_idle_later();
     }
 
     /// Attaches the connection to terminal `id` at this size: the screen now, its
@@ -516,6 +511,15 @@ impl Daemon {
             }
         }
         Reply::Ok
+    }
+
+    /// Ends the daemon in `ALONE_FOR` if it still has nothing to do then.
+    fn end_if_idle_later(&self) {
+        let daemon = self.clone();
+        thread::spawn(move || {
+            thread::sleep(ALONE_FOR);
+            daemon.end_if_idle();
+        });
     }
 
     /// Ends the daemon when it has nothing left to do: no terminal, nobody connected.

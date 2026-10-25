@@ -5,6 +5,8 @@ mod common;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use common::Sandbox;
 
@@ -14,14 +16,6 @@ fn run(command: &mut Command) -> Output {
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
-}
-
-fn tmux_installed() -> bool {
-    let installed = Command::new("tmux").arg("-V").output().is_ok();
-    if !installed {
-        eprintln!("tmux is not installed: skipping");
-    }
-    installed
 }
 
 #[test]
@@ -52,7 +46,7 @@ fn help_prints_the_usage() {
 #[test]
 fn a_wrong_argument_prints_the_usage_and_exits_with_2() {
     let sandbox = Sandbox::new();
-    for args in [&["--nope"][..], &["status", "extra"]] {
+    for args in [&["--nope"][..], &["stop", "extra"]] {
         let output = run(&mut sandbox.tatou(args));
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert_eq!(text(&output.stdout), "", "{args:?}");
@@ -63,82 +57,62 @@ fn a_wrong_argument_prints_the_usage_and_exits_with_2() {
 }
 
 #[test]
-fn commands_not_implemented_yet_say_so() {
-    let sandbox = Sandbox::new();
-    let output = run(&mut sandbox.tatou(&["hooks"]));
-    assert_eq!(output.status.code(), Some(1));
-    assert_eq!(
-        text(&output.stderr),
-        "tatou: hooks is not implemented yet (#26)\n"
-    );
-}
-
-#[test]
-fn status_logs_only_problems() {
-    let sandbox = Sandbox::new();
-    let log = sandbox.state().join("tatou/tatou.log");
-    run(&mut sandbox.tatou(&["status"]));
-    assert_eq!(fs::read_to_string(&log).unwrap(), "");
-
-    let output = run(sandbox.tatou(&["status"]).env("TATOU_LOG", "info"));
-    assert_eq!(output.status.code(), Some(1));
-    let log = fs::read_to_string(&log).unwrap();
-    assert!(log.contains("started"), "{log}");
-}
-
-#[test]
-fn the_dashboard_only_runs_inside_tatous_server() {
-    let sandbox = Sandbox::new();
-    let output = run(&mut sandbox.tatou(&["--dashboard"]));
-    assert_eq!(output.status.code(), Some(1));
-    assert!(text(&output.stderr).contains("run `tatou` to start it"));
-    // Not run inside: the dashboard would open the terminal running the tests
-}
-
-#[test]
-fn the_launcher_needs_tmux() {
+fn the_launcher_needs_git() {
     let sandbox = Sandbox::new();
     let output = run(sandbox.tatou(&[]).env("PATH", "/nonexistent"));
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
         text(&output.stderr),
-        "tatou: tatou needs tmux 3.2 or later, but `tmux` was not found; install it and try again\n"
+        "tatou: tatou needs git, but `git` was not found; install it and try again\n"
     );
 }
 
 #[test]
 fn the_launcher_stops_on_an_invalid_config() {
-    if !tmux_installed() {
-        return;
-    }
     let sandbox = Sandbox::new();
     let dir = sandbox.config().join("tatou");
     fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("config.toml"), "[tmux]\npopop = \"M-g\"\n").unwrap();
+    fs::write(dir.join("config.toml"), "[tmux]\nback = \"M-d\"\n").unwrap();
     let output = run(&mut sandbox.tatou(&[]));
     assert_eq!(output.status.code(), Some(1));
     let stderr = text(&output.stderr);
     assert!(stderr.contains("config.toml"), "{stderr}");
-    assert!(stderr.contains("popop"), "{stderr}");
-    assert!(!dir.join("tmux.conf").exists());
+    assert!(stderr.contains("tmux"), "{stderr}");
+    // No daemon was started
+    assert!(!sandbox.state().join("tatou/tatou.sock").exists());
 }
 
 #[test]
-fn the_launcher_asks_before_nesting_and_quits_without_an_answer() {
-    if !tmux_installed() {
-        return;
-    }
+fn stop_without_a_daemon_does_nothing() {
     let sandbox = Sandbox::new();
-    let other = "/tmp/tmux-501/default,1234,0";
-    let output = run(sandbox.tatou(&[]).env("TMUX", other));
-    assert_eq!(output.status.code(), Some(1));
-    let stderr = text(&output.stderr);
-    assert!(stderr.contains("already inside tmux"), "{stderr}");
-    assert!(stderr.ends_with("Attach anyway? [y/N] "), "{stderr}");
-    // The config was prepared before asking
-    let dir = sandbox.config().join("tatou");
-    assert!(dir.join("config.toml").exists());
-    assert!(dir.join("tmux.conf").exists());
+    let output = run(&mut sandbox.tatou(&["stop"]));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+}
+
+#[test]
+fn the_daemon_listens_until_stopped() {
+    let sandbox = Sandbox::new();
+    let socket = sandbox.state().join("tatou/tatou.sock");
+    let mut daemon = sandbox
+        .tatou(&["daemon"])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while !socket.exists() {
+        assert!(started.elapsed() < Duration::from_secs(5), "no socket");
+        thread::sleep(Duration::from_millis(20));
+    }
+    // A second one refuses: one daemon per user
+    let second = run(&mut sandbox.tatou(&["daemon"]));
+    assert_eq!(second.status.code(), Some(1));
+    assert!(text(&second.stderr).contains("already running"));
+
+    let output = run(&mut sandbox.tatou(&["stop"]));
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let status = daemon.wait().unwrap();
+    assert!(status.success());
+    assert!(!socket.exists());
 }
 
 /// Runs git in `dir` without the user's or the system's config.

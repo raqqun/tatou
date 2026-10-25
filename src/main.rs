@@ -13,7 +13,7 @@ mod model;
 mod platform;
 mod protocol;
 mod refresh;
-mod tmux;
+mod term;
 mod ui;
 
 use std::env;
@@ -28,15 +28,13 @@ use tracing::level_filters::LevelFilter;
 const USAGE: &str = "\
 Usage: tatou [command]
 
-Runs coding agents in parallel, each in its own git worktree and tmux session.
+Runs coding agents in parallel, each in its own git worktree.
 
 Commands:
-  (none)         attach to tatou's tmux server and its dashboard
+  (none)         run the dashboard, starting the daemon that keeps the agents
   add [path]     add the repository at path (default: here) to config.toml
-  status         print a short summary of agent statuses, for tmux's status line
-  hooks          print the hooks that let agents report their status
-  --dashboard    run the dashboard; `tatou` starts it inside tatou's tmux server
-  --popup        run the dashboard in a tmux popup; bound to the popup key
+  stop           end every agent, shell and editor, and the daemon
+  daemon         run the daemon; `tatou` starts it when needed
   -h, --help     print this help
   -V, --version  print the version
 ";
@@ -47,10 +45,8 @@ enum Command {
     Launch,
     /// The folder given, if any.
     Add(Option<PathBuf>),
-    Dashboard,
-    Popup,
-    Status,
-    Hooks,
+    Stop,
+    Daemon,
     Help,
     Version,
 }
@@ -70,10 +66,8 @@ fn parse_args(args: &[OsString]) -> Result<Command, String> {
             Err(format!("unexpected argument `{}`", extra.to_string_lossy()))
         }
         [arg] => match arg.to_str() {
-            Some("--dashboard") => Ok(Command::Dashboard),
-            Some("--popup") => Ok(Command::Popup),
-            Some("status") => Ok(Command::Status),
-            Some("hooks") => Ok(Command::Hooks),
+            Some("stop") => Ok(Command::Stop),
+            Some("daemon") => Ok(Command::Daemon),
             Some("-h" | "--help") => Ok(Command::Help),
             Some("-V" | "--version") => Ok(Command::Version),
             _ => Err(format!("unknown argument `{}`", arg.to_string_lossy())),
@@ -101,8 +95,6 @@ fn main() -> ExitCode {
             println!("tatou {}", version());
             return ExitCode::SUCCESS;
         }
-        // Runs every few seconds from tmux's status line: only problems are worth a log line
-        Command::Status => LevelFilter::WARN,
         _ => LevelFilter::INFO,
     };
 
@@ -121,26 +113,22 @@ fn main() -> ExitCode {
     match command {
         Command::Launch => launcher::run(),
         Command::Add(path) => add(path.as_deref().unwrap_or(Path::new("."))),
-        Command::Dashboard => dashboard(),
-        Command::Popup => not_implemented("--popup", 25),
-        Command::Status => not_implemented("status", 30),
-        Command::Hooks => not_implemented("hooks", 26),
+        Command::Stop => stop(),
+        Command::Daemon => daemon::run(),
         // Handled before logging starts
         Command::Help | Command::Version => ExitCode::SUCCESS,
     }
 }
 
-/// The dashboard lives in the `tatou` session on tatou's tmux server, where the
-/// launcher starts it.
-fn dashboard() -> ExitCode {
-    if tmux::nesting() != tmux::Nesting::Tatou {
-        eprintln!("tatou: the dashboard runs inside tatou's tmux server; run `tatou` to start it");
-        return ExitCode::FAILURE;
-    }
-    match ui::run() {
+/// `tatou stop`: ends every terminal, then the daemon; nothing to do without one.
+fn stop() -> ExitCode {
+    let stopped = client::Client::daemon().and_then(|client| match client.is_up() {
+        true => client.stop(),
+        false => Ok(()),
+    });
+    match stopped {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            tracing::error!(%err, "dashboard failed");
             eprintln!("tatou: {err}");
             ExitCode::FAILURE
         }
@@ -171,12 +159,6 @@ fn add(dir: &Path) -> ExitCode {
     }
 }
 
-/// Placeholder until the command's own step fills it in.
-fn not_implemented(what: &str, issue: u32) -> ExitCode {
-    eprintln!("tatou: {what} is not implemented yet (#{issue})");
-    ExitCode::FAILURE
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,10 +178,8 @@ mod tests {
     fn parses_every_command() {
         let cases = [
             (&[][..], Command::Launch),
-            (&["--dashboard"], Command::Dashboard),
-            (&["--popup"], Command::Popup),
-            (&["status"], Command::Status),
-            (&["hooks"], Command::Hooks),
+            (&["stop"], Command::Stop),
+            (&["daemon"], Command::Daemon),
             (&["add"], Command::Add(None)),
             (&["add", "../app"], Command::Add(Some("../app".into()))),
             (&["-h"], Command::Help),
@@ -220,7 +200,7 @@ mod tests {
         );
         assert_eq!(parse(&["help"]), Err("unknown argument `help`".into()));
         assert_eq!(
-            parse(&["status", "-v"]),
+            parse(&["stop", "-v"]),
             Err("unexpected argument `-v`".into())
         );
         assert_eq!(

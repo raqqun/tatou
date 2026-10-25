@@ -11,6 +11,8 @@ pub enum Pane {
     Worktrees,
     /// Every session on tatou's server, below the projects.
     Sessions,
+    /// The shown terminal: every key goes to its program, but the back key.
+    Terminal,
     /// Navigation and the app itself, in any pane.
     Any,
 }

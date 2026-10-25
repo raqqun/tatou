@@ -1,8 +1,8 @@
-//! Background refresh: worker threads list tmux's sessions and each project's
+//! Background refresh: worker threads list the daemon's sessions and each project's
 //! worktrees, watch `config.toml`, and send the results to the UI loop over one
 //! channel.
 //!
-//! One thread for tmux, one per project, so a slow or broken repository only
+//! One thread for the daemon, one per project, so a slow or broken repository only
 //! delays itself, and one for the config. Each refreshes on its interval, or at
 //! once when woken (after tatou itself changed something). A worker ends quietly
 //! when the UI drops the receiving end, or drops `Refresh`.
@@ -13,9 +13,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
+use crate::client::Client;
 use crate::config::{self, Config, Stamp};
 use crate::git::{self, Worktree};
-use crate::tmux::{Server, Session};
+use crate::protocol::Session;
 
 const SESSIONS_EVERY: Duration = Duration::from_secs(1);
 const WORKTREES_EVERY: Duration = Duration::from_secs(5);
@@ -51,17 +52,22 @@ impl Refresh {
     /// watching the config, sending every result to `updates`; the first sessions
     /// and worktrees come right away.
     pub fn start(
-        server: Server,
+        client: Client,
         mut watch: ConfigWatch,
         projects: &[PathBuf],
         updates: &Sender<Update>,
     ) -> Refresh {
         let mut last_error = None;
-        let sessions = spawn("refresh-tmux", SESSIONS_EVERY, updates.clone(), move || {
-            let result = server.sessions().map_err(|err| err.to_string());
-            log_change(&mut last_error, &result, "tmux sessions");
-            Some(Update::Sessions(result))
-        });
+        let sessions = spawn(
+            "refresh-daemon",
+            SESSIONS_EVERY,
+            updates.clone(),
+            move || {
+                let result = client.sessions().map_err(|err| err.to_string());
+                log_change(&mut last_error, &result, "daemon sessions");
+                Some(Update::Sessions(result))
+            },
+        );
         let config = spawn("refresh-config", CONFIG_EVERY, updates.clone(), move || {
             let result = watch.check()?;
             match &result {
@@ -209,7 +215,6 @@ mod tests {
     use std::time::{Instant, SystemTime};
 
     use super::*;
-    use crate::tmux::testing::TestServer;
 
     /// A fake source: each fetch sends the number of fetches so far as a session list.
     fn counter() -> impl FnMut() -> Option<Update> {
@@ -298,20 +303,18 @@ mod tests {
     fn errors_are_logged_only_when_they_change() {
         let mut last = None;
         let failed: Result<(), String> = Err("boom".into());
-        log_change(&mut last, &failed, "tmux");
+        log_change(&mut last, &failed, "daemon");
         assert_eq!(last.as_deref(), Some("boom"));
-        log_change(&mut last, &failed, "tmux");
+        log_change(&mut last, &failed, "daemon");
         assert_eq!(last.as_deref(), Some("boom"));
-        log_change(&mut last, &Ok::<(), String>(()), "tmux");
+        log_change(&mut last, &Ok::<(), String>(()), "daemon");
         assert_eq!(last, None);
     }
 
     #[test]
-    fn starts_with_tmux_and_each_project() {
-        let Some(server) = TestServer::new() else {
-            return;
-        };
+    fn starts_with_the_daemon_and_each_project() {
         let dir = tempfile::tempdir().unwrap();
+        let nobody = Client::new(&dir.path().join("no.sock"));
         let (good, broken) = (dir.path().join("good"), dir.path().join("missing"));
         fs::create_dir(&good).unwrap();
         let init = std::process::Command::new("git")
@@ -324,7 +327,7 @@ mod tests {
         assert!(init.success());
         let (updates, received) = mpsc::channel();
         let refresh = Refresh::start(
-            Server::clone(&server),
+            nobody,
             unchanged(&dir.path().join("config.toml")),
             &[good.clone(), broken.clone()],
             &updates,
@@ -334,8 +337,9 @@ mod tests {
         while seen.len() < 3 {
             match received.recv_timeout(Duration::from_secs(10)).unwrap() {
                 Update::Sessions(result) => {
-                    assert_eq!(result.unwrap(), [], "no server yet: no sessions");
-                    seen.insert("tmux".to_string(), true);
+                    let err = result.unwrap_err();
+                    assert!(err.contains("cannot reach the daemon"), "{err}");
+                    seen.insert("daemon".to_string(), true);
                 }
                 Update::Worktrees {
                     project, result, ..
@@ -359,14 +363,12 @@ mod tests {
 
     #[test]
     fn new_projects_start_and_removed_ones_stop() {
-        let Some(server) = TestServer::new() else {
-            return;
-        };
         let dir = tempfile::tempdir().unwrap();
+        let nobody = Client::new(&dir.path().join("no.sock"));
         let (first, second) = (dir.path().join("first"), dir.path().join("second"));
         let watch = unchanged(&dir.path().join("config.toml"));
         let (updates, received) = mpsc::channel();
-        let mut refresh = Refresh::start(Server::clone(&server), watch, &[first], &updates);
+        let mut refresh = Refresh::start(nobody, watch, &[first], &updates);
         refresh.set_projects(std::slice::from_ref(&second));
         // The second project's worktrees come right away, though they fail
         let listed = received.iter().find_map(|update| match update {

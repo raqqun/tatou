@@ -20,12 +20,6 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # Agent started in new worktrees, one of the agents below
 # default_agent = "claude"
 
-# [tmux]
-# popup = "M-g"               # opens `tatou --popup`
-# back = "M-d"                # returns to the dashboard
-# prefix = "C-b"              # prefix key on tatou's tmux server
-# inherit_user_conf = false   # also source your own tmux config before tatou's settings
-
 # Commands that start an agent; added to the built-in claude and codex, or
 # replacing one of them when the name is the same. Shells are `t`'s job
 # [agents]
@@ -36,14 +30,10 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # jump = "Enter"
 # new_worktree = "n"
 
-# Custom actions in the tatou UI: key = tmux command template;
-# {path}, {session}, {pane} are substituted
+# Custom actions in the tatou UI: key = shell command template;
+# {path} is substituted
 # [keys.custom]
-# "g" = "display-popup -E -d {path} lazygit"
-
-# Extra bindings written into tatou's tmux config (active everywhere on the tatou server)
-# [keys.tmux]
-# "M-|" = "split-window -h -c '#{pane_current_path}'"
+# "g" = "lazygit"
 
 # Projects are not set here: each is a file in projects/, next to this one,
 # written by `tatou add <path>` and yours to edit. projects/my-app.toml:
@@ -59,7 +49,6 @@ pub struct Config {
     /// Where it was loaded from, shown in the UI's empty state.
     pub path: PathBuf,
     pub default_agent: String,
-    pub tmux: Tmux,
     /// Built-in agents merged with the user's `[agents]`.
     pub agents: BTreeMap<String, String>,
     pub keys: Keys,
@@ -67,35 +56,13 @@ pub struct Config {
     pub projects: Vec<Project>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Tmux {
-    pub popup: String,
-    pub back: String,
-    pub prefix: Option<String>,
-    pub inherit_user_conf: bool,
-}
-
-impl Default for Tmux {
-    fn default() -> Self {
-        Tmux {
-            popup: "M-g".into(),
-            back: "M-d".into(),
-            prefix: None,
-            inherit_user_conf: false,
-        }
-    }
-}
-
-// Not read yet: the keymap and the tmux config generator use it (#41, #42, #43)
+// Not read yet: the keymap uses it (#41, #42)
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct Keys {
-    /// `[keys.custom]`: key → tmux command template run from the tatou UI.
+    /// `[keys.custom]`: key → shell command template run from the tatou UI.
     pub custom: BTreeMap<String, String>,
-    /// `[keys.tmux]`: key → tmux command bound on tatou's tmux server.
-    pub tmux: BTreeMap<String, String>,
     /// Action name → key. Names are checked against the keymap's actions (#41);
     /// serde cannot reject unknown fields next to `flatten`.
     #[serde(flatten)]
@@ -122,8 +89,6 @@ pub struct Project {
 #[serde(deny_unknown_fields)]
 struct File {
     default_agent: Option<String>,
-    #[serde(default)]
-    tmux: Tmux,
     #[serde(default)]
     agents: BTreeMap<String, String>,
     #[serde(default)]
@@ -411,7 +376,6 @@ fn parse(text: &str, path: &Path) -> std::result::Result<Config, String> {
     Ok(Config {
         path: path.to_path_buf(),
         default_agent,
-        tmux: file.tmux,
         agents,
         keys: file.keys,
         projects: Vec::new(),
@@ -483,18 +447,13 @@ pub fn state_dir() -> Result<PathBuf> {
     Ok(base.join("tatou"))
 }
 
-/// `$XDG_CONFIG_HOME`, or `~/.config`; also where tmux looks for the user's `tmux/tmux.conf`.
+/// `$XDG_CONFIG_HOME`, or `~/.config`.
 pub fn config_home() -> Result<PathBuf> {
     xdg_base(
         env::var_os("XDG_CONFIG_HOME"),
         env::var_os("HOME"),
         ".config",
     )
-}
-
-/// `$HOME`, which must be absolute.
-pub fn home_dir() -> Result<PathBuf> {
-    absolute_home(env::var_os("HOME"))
 }
 
 /// An XDG base directory. Following the XDG spec, the variable is ignored when it
@@ -568,7 +527,6 @@ mod tests {
         let config = parse_ok("");
         assert_eq!(config.path, PathBuf::from("/c/config.toml"));
         assert_eq!(config.default_agent, "claude");
-        assert_eq!(config.tmux, Tmux::default());
         assert_eq!(
             config.agents.keys().collect::<Vec<_>>(),
             ["claude", "codex"]
@@ -588,12 +546,6 @@ mod tests {
             r#"
             default_agent = "claude"
 
-            [tmux]
-            popup = "M-g"
-            back  = "M-d"
-            prefix = "C-a"
-            inherit_user_conf = true
-
             [agents]
             claude = "claude"
             codex  = "codex"
@@ -603,24 +555,12 @@ mod tests {
             new_worktree = "n"
             edit = "e"
             [keys.custom]
-            "g" = "display-popup -E -d {path} lazygit"
-
-            [keys.tmux]
-            "M-|" = "split-window -h -c '#{pane_current_path}'"
+            "g" = "lazygit"
             "#,
         );
-        assert_eq!(config.tmux.prefix.as_deref(), Some("C-a"));
-        assert!(config.tmux.inherit_user_conf);
         assert_eq!(config.keys.actions["edit"], "e");
         assert_eq!(config.keys.actions.len(), 3);
-        assert_eq!(
-            config.keys.custom["g"],
-            "display-popup -E -d {path} lazygit"
-        );
-        assert_eq!(
-            config.keys.tmux["M-|"],
-            "split-window -h -c '#{pane_current_path}'"
-        );
+        assert_eq!(config.keys.custom["g"], "lazygit");
     }
 
     #[test]
@@ -649,8 +589,8 @@ mod tests {
         assert!(message.contains("line 2"), "{message}");
         assert!(message.contains("show_hidden"), "{message}");
 
-        let message = parse_err("[tmux]\npopup_key = \"M-g\"\n");
-        assert!(message.contains("popup_key"), "{message}");
+        let message = parse_err("[tmux]\nback = \"M-d\"\n");
+        assert!(message.contains("tmux"), "{message}");
 
         let (_dir, projects) = projects(&[("app.toml", "path = \"/\"\nbranch = \"main\"\n")]);
         let message = projects[0].error.as_deref().unwrap();
@@ -937,7 +877,7 @@ mod tests {
     #[test]
     fn write_atomic_replaces_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config/tmux.conf");
+        let path = dir.path().join("config/config.toml");
         write_atomic(&path, "old\n").unwrap();
         write_atomic(&path, "new\n").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "new\n");
@@ -945,7 +885,7 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(names, ["tmux.conf"]);
+        assert_eq!(names, ["config.toml"]);
     }
 
     #[test]
