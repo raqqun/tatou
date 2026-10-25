@@ -230,7 +230,7 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        // From anywhere but a dialog, the focus staying where it is
+        // From anywhere but a dialog
         let step = match (key.code, key.modifiers) {
             NEXT => Some((Step::Session, 1)),
             PREVIOUS => Some((Step::Session, -1)),
@@ -753,7 +753,7 @@ impl App {
 
     /// Shows the current terminal of the session `step` away from the shown one's,
     /// or the window `step` away in its session, wrapping around; from the first or
-    /// the last session when none is shown. The focus stays where it is.
+    /// the last session when none is shown. The focus goes to it, as with Enter.
     fn step(&mut self, by: Step, step: isize) {
         let shown = self.shown.as_ref().map(|shown| shown.terminal.clone());
         let next = match by {
@@ -763,9 +763,7 @@ impl App {
         let Some(terminal) = next else {
             return;
         };
-        let focus = self.focus;
         self.show(&terminal);
-        self.focus = focus;
     }
 
     /// What the daemon streams for the shown terminal.
@@ -2167,10 +2165,10 @@ unknown field `popop`, expected one of `popup`, `back`";
             with_windows("$2", "notes", "/home/me/notes"),
             with_windows("$3", "zzz", "/tmp"),
         ]);
-        // Nothing shown: the first, and the focus stays in the dashboard
+        // Nothing shown: the first, and the focus goes to its terminal
         alt(&mut app, 'l');
         assert_eq!(shown(&app), Some("%11"), "its current window");
-        assert_eq!(app.focus, Pane::Worktrees);
+        assert_eq!(app.focus, Pane::Terminal);
         let selected = app.sessions.selected().cloned();
         assert_eq!(selected, Some(sessions::Row::Session("$1".into())));
         // From the terminal, whose program never sees them: the focus stays there
@@ -2198,7 +2196,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         // Nothing shown: the first session's first window
         alt(&mut app, 'j');
         assert_eq!(shown(&app), Some("%10"));
-        assert_eq!(app.focus, Pane::Worktrees, "the focus stays");
+        assert_eq!(app.focus, Pane::Terminal, "the focus goes to it");
         let selected = app.sessions.selected().cloned();
         let window = |w: &str| sessions::Row::Window {
             session: "$1".into(),
