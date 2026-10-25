@@ -21,7 +21,7 @@ Config, generated tmux config, launcher, list projects/worktrees from git, sessi
 Depends on: —
 
 - `cargo init` a single binary crate named `tatou`, edition 2024, MSRV = current stable noted in `Cargo.toml` (`rust-version`).
-- Dependencies: `ratatui`, `crossterm`, `serde` (derive), `toml`, `thiserror`, `tracing`. Dev: `tempfile`. (`ignore` arrives in 4.2, not before.)
+- Dependencies: `ratatui`, `crossterm`, `serde` (derive), `toml`, `thiserror`, `tracing`. Dev: `tempfile`.
 - Empty modules matching `CLAUDE.md` layout: `config`, `exec`, `platform`, `git`, `tmux`, `gh`, `files`, `model`, `keys`, `ui/`; `tests/fixtures/` with a `.gitkeep`.
 - `rustfmt.toml` only if a non-default setting is actually wanted.
 - `Cargo.lock` committed (binary crate).
@@ -375,7 +375,7 @@ Depends on: 1.16, 1.6
 - `tatou --popup`: same UI; jumping or launching an action exits, which closes the popup.
 - Generated `tmux.conf` binds the popup key: `bind-key -n <popup> display-popup -E -w 90% -h 80% '<exe> --popup'`.
 - Verify which client `switch-client` targets from inside a popup; if ambiguous, pass `#{client_name}` from the binding as an argument.
-- Verify how actions that open their own popup (view/diff in M4) behave when started from a popup (tmux does not nest popups) and document the chosen approach.
+- Verify how actions that open their own popup (custom actions such as `display-popup … lazygit`, 6.2) behave when started from a popup (tmux does not nest popups) and document the chosen approach.
 - Only the dashboard instance will send notifications (3.4); the popup must not.
 
 **Done when**
@@ -486,6 +486,19 @@ Depends on: 1.12
 - Unit test: the generated conf has the three options; tmux reads the format back as written.
 - Manual check documented in the PR: an agent's session shows `<project>-<worktree>-<index>` for each window.
 
+### 2.18 Drop the Files pane; `e` edits the worktree (#103)
+
+Depends on: 2.6
+
+- Decided: no Files pane. The right-hand file tree (M4) is dropped with every file action (view `v`, diff `D`, send to agent `@`, copy path `y`, open `o`), the ignored-files toggle (`show_ignored`, now an unknown key in `config.toml`) and `platform::open`. Projects and Sessions take the full width; `Tab` moves between those two.
+- `e` on a worktree, or on a project (its main worktree, the repository), opens a window in its session running `${EDITOR:-vi} .` in the worktree, or a new session with just the editor (no agent pane) when it has none, then switches to it; quitting the editor lands on the dashboard (2.16). `t` and `e` share the task (`Task::Program`); `$EDITOR` stays unquoted so that `code -w` keeps its argument.
+- M4's steps 4.1–4.6 are closed as not planned; 4.7, mouse support, moves to M6 as 6.6. 3.3 is notify only; `{file}` leaves 6.2's templates.
+
+**Done when**
+- `TestBackend` tests: no Files pane, `Tab` between Projects and Sessions only; `e` in the hints of a worktree and a project.
+- Unit test on the editor task for a worktree and for a project; integration tests on a unique socket: the editor opens in the worktree's session, or in a new session without an agent pane.
+- Manual check documented in the PR: `e` on a worktree opens `$EDITOR`, quitting it lands on the dashboard.
+
 ---
 
 ## M3 — Status
@@ -512,12 +525,11 @@ Depends on: 3.1, 1.12
 **Done when**
 - Findings recorded in the PR; DESIGN §8.4 corrected if the hooks needed changes.
 
-### 3.3 `platform.rs`: notify and open (#28)
+### 3.3 `platform.rs`: notify (#28)
 
 Depends on: 1.4
 
 - `notify(title, body)`: `notify-send` on Linux; on macOS `osascript` with the text passed as `argv` (`on run argv … display notification (item 2 of argv) with title (item 1 of argv)`), never interpolated into the script. Missing tool → silently skipped, logged.
-- `open(path)`: `xdg-open` on Linux, `open` on macOS (used in 4.6).
 - All `cfg(target_os)` lives here and nowhere else.
 
 **Done when**
@@ -546,83 +558,9 @@ Depends on: 1.8, 1.12
 
 ---
 
-## M4 — Files
+## M4 — Files (dropped)
 
-Right-pane file tree with git markers and file actions.
-
-### 4.1 Parse `git status` (#31)
-
-Depends on: 1.9
-
-- `git -C <worktree> status --porcelain=v1 -z --untracked-files=all`; pure parser to `path -> marker` (`M`, `A`, `D`, `?`, `R` mapped as in DESIGN §6; staged and unstaged both count).
-- Handles renames (two paths in `-z` mode), paths with spaces and non-ASCII.
-
-**Done when**
-- Fixture tests in `tests/fixtures/git/` covering every marker, a rename and odd paths; TempDir test on a real repo.
-
-### 4.2 `files.rs`: build the tree (#32)
-
-Depends on: 4.1
-
-- Add the `ignore` crate. Walk the worktree respecting `.gitignore` (hidden and ignored files shown only when `show_ignored` / the toggle is on). Never descend into `.git`.
-- Merge git markers; deleted files appear even though they are not on disk; directories show that they contain changes.
-- Optional "changed files only" filter. Directories first, then files, case-insensitive order.
-- A cap on entries for huge trees, with a visible "truncated" line.
-
-**Done when**
-- TempDir tests: ignored file hidden then shown, deleted file listed, changed-only filter, ordering.
-
-### 4.3 Load files in the background (#33)
-
-Depends on: 4.2, 1.13
-
-- Load the tree for the selected worktree only, on selection change (debounced) and on an interval; drop results for a worktree that is no longer selected.
-
-**Done when**
-- Fast scrolling through worktrees does not freeze the UI on a large repository (manual check documented in the PR).
-
-### 4.4 Right pane UI (#34)
-
-Depends on: 4.3
-
-- Tree rendering with markers, expand/collapse, scrolling, `Tab` to switch focus, title `Files: <project>/<worktree>`.
-- Toggles: show ignored/hidden, changed only.
-- The right pane hides when the terminal is narrow.
-
-**Done when**
-- `TestBackend` tests: markers, collapsed directory, narrow layout hides the pane.
-
-### 4.5 Edit, view and diff (#35)
-
-Depends on: 4.4
-
-- Edit `e`: `new-window -c <worktree> "$EDITOR <file>"`; View `v`: `display-popup -E -d <worktree> "$PAGER <file>"`; Diff `D`: `display-popup -E -d <worktree> "git diff -- <file>"` (user's git pager).
-- File paths are shell-quoted; `$EDITOR` falls back to `vi`, `$PAGER` to `less`.
-- Untracked files: diff against `/dev/null` (`git diff --no-index`), deleted files: view disabled.
-- Behaviour from popup mode as decided in 2.8; while 2.8 is on hold, view and diff need to work from the dashboard only.
-
-**Done when**
-- Unit tests on the built tmux arguments with awkward file names (spaces, quotes, leading `-`).
-
-### 4.6 Send to agent, copy path, open (#36)
-
-Depends on: 4.4, 3.3
-
-- `@`: `send-keys -t <agent pane> -l "@<relative path> "` (no Enter); disabled with a message when there is no agent pane.
-- `y`: `set-buffer -w <absolute path>`.
-- `o`: `platform::open(path)`.
-
-**Done when**
-- Integration test on a unique socket: `send-keys` text lands in a pane's input (checked via a shell reading stdin, not by capturing agent output in the UI).
-
-### 4.7 Mouse support (#37)
-
-Depends on: 4.4
-
-- Click selects in both panes and moves focus; wheel scrolls the pane under the cursor; clicks on dialogs go to the dialog.
-
-**Done when**
-- Unit tests mapping mouse events to actions by layout area.
+Dropped in 2.18 (#103): no file pane. Editing is `e`'s, with `$EDITOR` (2.18); reading and diffing files is the editor's job and the agent's. Its steps 4.1–4.6 (#31–#36) were closed as not planned; mouse support (4.7, #37) moved to M6 as 6.6.
 
 ---
 
@@ -681,8 +619,8 @@ Depends on: 1.14, 1.5
 
 Depends on: 6.1
 
-- Template substitution of `{path}`, `{file}`, `{session}`, `{pane}` with shell-quoted values, then `run_sh` of `tmux -L tatou -f <conf> <template>`.
-- An action needing a value that is not available (no file selected, no session) is disabled with a message.
+- Template substitution of `{path}`, `{session}`, `{pane}` with shell-quoted values, then `run_sh` of `tmux -L tatou -f <conf> <template>`.
+- An action needing a value that is not available (no session, no agent pane) is disabled with a message.
 
 **Done when**
 - Unit tests for substitution and quoting, including values containing quotes and `{`.
@@ -715,6 +653,16 @@ Depends on: 2.3, 6.1, 1.17, 1.18
 
 **Done when**
 - `TestBackend` test of the dialog; unit test that confirming writes the project file.
+
+### 6.6 Mouse support (#37)
+
+Depends on: 2.15
+
+- Click selects a row in Projects or Sessions and moves the focus there; wheel scrolls the pane under the cursor; clicks on dialogs go to the dialog.
+- Moved from M4 (4.7) when the Files pane was dropped (2.18).
+
+**Done when**
+- Unit tests mapping mouse events to actions by layout area.
 
 ---
 

@@ -1,1 +1,1 @@
-//! The only platform-specific code: `open(path)` and `notify(title, body)`.
+//! The only platform-specific code: `notify(title, body)`.

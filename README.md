@@ -51,11 +51,12 @@ In the dashboard:
 | `j` / `k`, `↓` / `↑` | move |
 | `h` / `l`, `←` / `→` | fold / unfold a project |
 | `Enter` | jump to the selected worktree's session (on a project: fold / unfold) |
+| `e` | open `$EDITOR` in the selected worktree (on a project: its repository), in a window of its session |
 | `q` | leave tatou: back to your terminal; agents and shells keep running, `tatou` comes back to them |
 
 Each worktree shows its agent's status: `●` busy, `⚠` needs input, `○` idle, `·` no session. Without the agent hooks from [DESIGN.md §8.4](DESIGN.md#84-agent-status), a dim `●` means output in the last 10 seconds and a dim `○` none.
 
-**Back to the dashboard:** `Alt-d` from any session on tatou's server (it starts the dashboard again if it was closed), or leave a window's agent or shell that tatou started: when it exits, you are back on the dashboard. On macOS, the terminal must send Option as Meta (Terminal: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*). The key can be changed with `back` under `[tmux]` in `config.toml`; run `tatou` again to apply it.
+**Back to the dashboard:** `Alt-d` from any session on tatou's server (it starts the dashboard again if it was closed), or leave a window's agent, shell or editor that tatou started: when it exits, you are back on the dashboard. On macOS, the terminal must send Option as Meta (Terminal: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*). The key can be changed with `back` under `[tmux]` in `config.toml`; run `tatou` again to apply it.
 
 ## Start an agent by hand (for now)
 

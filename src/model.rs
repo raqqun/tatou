@@ -258,7 +258,6 @@ mod tests {
         Config {
             path: "/c/config.toml".into(),
             default_agent: "claude".into(),
-            show_ignored: false,
             tmux: Tmux::default(),
             agents: BTreeMap::new(),
             keys: Keys::default(),
