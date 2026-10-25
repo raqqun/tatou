@@ -61,6 +61,34 @@ impl Sessions {
         window.map(|w| w.id.clone())
     }
 
+    /// The current terminal of the session `step` away from `terminal`'s, wrapping
+    /// around: from none, the first session forward, the last backward. That
+    /// session becomes the selected row.
+    pub fn step(&mut self, terminal: Option<&str>, step: isize) -> Option<String> {
+        let count = self.sessions.len() as isize;
+        if count == 0 {
+            return None;
+        }
+        let from = terminal.and_then(|terminal| {
+            (self.sessions.iter()).position(|s| s.windows.iter().any(|w| w.id == terminal))
+        });
+        let index = match from {
+            Some(from) => (from as isize + step).rem_euclid(count),
+            None if step > 0 => 0,
+            None => count - 1,
+        } as usize;
+        let session = &self.sessions[index];
+        let window = session
+            .windows
+            .iter()
+            .find(|w| w.current)
+            .or(session.windows.first())?;
+        let shown = window.id.clone();
+        self.selected = Some(Row::Session(session.id.clone()));
+        self.reselect();
+        Some(shown)
+    }
+
     /// Forgets `terminal`, whose program ended, until the next refresh says so, and
     /// its session with its last terminal. Returns what to show instead: another
     /// terminal of its session, the one after it or else before; else the current

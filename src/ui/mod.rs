@@ -44,6 +44,10 @@ const TICK: Duration = Duration::from_millis(15);
 /// Moves the focus from the shown terminal back to the dashboard.
 const BACK: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::ALT);
 
+/// Show the next and the previous session's terminal, from anywhere.
+const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::ALT);
+const PREVIOUS: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::ALT);
+
 /// Lines of scrollback kept for the shown terminal.
 const SCROLLBACK: usize = 1_000;
 
@@ -214,7 +218,20 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        // Every key goes to the shown terminal's program, but the one back
+        // From anywhere but a dialog, the focus staying where it is
+        let step = match (key.code, key.modifiers) {
+            NEXT => Some(1),
+            PREVIOUS => Some(-1),
+            _ => None,
+        };
+        if let (Some(step), None) = (step, &self.dialog) {
+            if key.kind == KeyEventKind::Press {
+                self.message = None;
+                self.step_session(step);
+            }
+            return;
+        }
+        // Every key goes to the shown terminal's program, but these and the one back
         if self.focus == Pane::Terminal && self.dialog.is_none() {
             if (key.code, key.modifiers) == BACK {
                 self.focus = Pane::Worktrees;
@@ -720,6 +737,19 @@ impl App {
         self.focus = Pane::Terminal;
     }
 
+    /// Shows the current terminal of the session `step` away from the shown one's,
+    /// wrapping around; the first or the last session when none is shown. The
+    /// focus stays where it is.
+    fn step_session(&mut self, step: isize) {
+        let shown = self.shown.as_ref().map(|shown| shown.terminal.clone());
+        let Some(terminal) = self.sessions.step(shown.as_deref(), step) else {
+            return;
+        };
+        let focus = self.focus;
+        self.show(&terminal);
+        self.focus = focus;
+    }
+
     /// What the daemon streams for the shown terminal.
     fn streamed(&mut self, reply: Reply) {
         match (reply, &mut self.shown) {
@@ -898,7 +928,9 @@ impl App {
             let bold = Style::new().add_modifier(Modifier::BOLD);
             let keys = vec![
                 Span::styled("M-d", bold),
-                Span::raw(" back to the dashboard; every other key goes to the terminal"),
+                Span::raw(" dashboard  "),
+                Span::styled("M-j/M-k", bold),
+                Span::raw(" next/previous session; every other key goes to the terminal"),
             ];
             return Paragraph::new(Line::from(keys));
         }
@@ -1555,7 +1587,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         event(&mut app, actions::Event::Started("%1".into()));
         assert_eq!(shown(&app), Some("%1"));
         assert!(
-            hint_line(&mut app).starts_with("M-d back"),
+            hint_line(&mut app).starts_with("M-d dashboard"),
             "{}",
             hint_line(&mut app)
         );
@@ -2099,6 +2131,42 @@ unknown field `popop`, expected one of `popup`, `back`";
         }
         assert_eq!(shown(&app), None);
         assert_eq!(app.focus, Pane::Worktrees);
+    }
+
+    fn alt(app: &mut App, c: char) {
+        app.input(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::ALT,
+        )));
+    }
+
+    #[test]
+    fn alt_j_and_alt_k_step_through_the_sessions() {
+        let mut app = with_sessions(vec![
+            with_windows("$1", "app-fix", "/code/app.worktrees/fix"),
+            with_windows("$2", "notes", "/home/me/notes"),
+            with_windows("$3", "zzz", "/tmp"),
+        ]);
+        // Nothing shown: the first, and the focus stays in the dashboard
+        alt(&mut app, 'j');
+        assert_eq!(shown(&app), Some("%11"), "its current window");
+        assert_eq!(app.focus, Pane::Worktrees);
+        let selected = app.sessions.selected().cloned();
+        assert_eq!(selected, Some(sessions::Row::Session("$1".into())));
+        // From the terminal, whose program never sees them: the focus stays there
+        app.focus = Pane::Terminal;
+        alt(&mut app, 'j');
+        assert_eq!(shown(&app), Some("%21"));
+        assert_eq!(app.focus, Pane::Terminal);
+        alt(&mut app, 'j');
+        alt(&mut app, 'j');
+        assert_eq!(shown(&app), Some("%11"), "round to the first");
+        alt(&mut app, 'k');
+        assert_eq!(shown(&app), Some("%31"), "back round to the last");
+        // From another window of a session, its session counts
+        app.show("%20");
+        alt(&mut app, 'k');
+        assert_eq!(shown(&app), Some("%11"));
     }
 
     #[test]
