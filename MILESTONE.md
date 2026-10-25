@@ -475,6 +475,17 @@ Depends on: 2.4, 2.5, 2.6
 - Integration tests on a unique socket, with a control-mode client: a wrapped command exiting in the viewed window moves that client to `tatou`; one exiting in another window leaves it where it is.
 - Manual check documented in the PR: `exit` in a shell from `t`, and an agent ending, land on the dashboard.
 
+### 2.17 Name windows in the status bar after their session (#101)
+
+Depends on: 1.12
+
+- In an agent's session, tmux's status bar showed `[kdbg-mast] 0:2.1.310* 1:bash-`: the session's name cut at 10 characters (`status-left-length`), and windows named after their program's file, which for Claude is its version.
+- Decided: every window shows as `<session>-<index>`, the session's name being `<project>-<worktree>`: `kdbg-master-0* kdbg-master-1-`. The generated `tmux.conf` sets `status-left ''` and both `window-status-format` and `window-status-current-format` to `#S-#I#{?window_flags,#{window_flags}, }` (tmux's own format, the session's name in place of the window's). `tmux.local.conf` can override them.
+
+**Done when**
+- Unit test: the generated conf has the three options; tmux reads the format back as written.
+- Manual check documented in the PR: an agent's session shows `<project>-<worktree>-<index>` for each window.
+
 ---
 
 ## M3 — Status

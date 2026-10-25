@@ -632,6 +632,16 @@ fn conf(tmux: &config::Tmux, user_confs: &[PathBuf], local_conf: &Path, dashboar
     lines.push("set-option -g detach-on-destroy off".to_string());
 
     lines.push(String::new());
+    lines.push("# The status bar: every window as <session>-<index>, `kdbg-master-0`".to_string());
+    lines.push("set-option -g status-left ''".to_string());
+    // tmux's own window format, with the session's name for the window's: tmux
+    // names windows after their program's file, and Claude's is its version
+    let window = "#S-#I#{?window_flags,#{window_flags}, }";
+    for option in ["window-status-format", "window-status-current-format"] {
+        lines.push(format!("set-option -g {option} {}", quote(window)));
+    }
+
+    lines.push(String::new());
     lines.push("# tatou's bindings".to_string());
     if let Some(prefix) = &tmux.prefix {
         lines.push(format!("set-option -g prefix {}", quote(prefix)));
@@ -849,6 +859,11 @@ set-option -gq allow-passthrough on
 set-option -g history-limit 50000
 set-option -g detach-on-destroy off
 
+# The status bar: every window as <session>-<index>, `kdbg-master-0`
+set-option -g status-left ''
+set-option -g window-status-format '#S-#I#{?window_flags,#{window_flags}, }'
+set-option -g window-status-current-format '#S-#I#{?window_flags,#{window_flags}, }'
+
 # tatou's bindings
 bind-key -n 'M-d' if-shell -F '#{S:#{?#{==:#{session_name},tatou},1,}}' { switch-client -t '=tatou' } { new-session -d -s tatou -n tatou ''\\''/usr/bin/tatou'\\'' --dashboard' ; switch-client -t '=tatou' }
 
@@ -957,8 +972,12 @@ source-file -q '/home/me/.config/tatou/tmux.local.conf'
         for option in ["@tatou_user", "@tatou_local", "prefix"] {
             args.extend([";", "show-options", "-gv", option]);
         }
+        args.extend([";", "show-options", "-gwv", "window-status-format"]);
         let result = server.run(&args);
-        assert_eq!(result.unwrap().stdout, "on\non\nC-a\n");
+        assert_eq!(
+            result.unwrap().stdout,
+            "on\non\nC-a\n#S-#I#{?window_flags,#{window_flags}, }\n"
+        );
     }
 
     #[test]

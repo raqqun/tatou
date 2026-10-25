@@ -143,6 +143,7 @@ Refresh: tmux every ~1 s; each project's worktrees every 5 s, on a thread of its
 **Generated config.** `~/.config/tatou/tmux.conf` is written by tatou at every launch from `config.toml`, and is never edited by hand. It contains:
 - Settings agents need: `escape-time 10`, `extended-keys on` (e.g. Shift+Enter), `focus-events on`, `set-clipboard on`, `allow-passthrough on`, `mouse on`, a large `history-limit`, true-colour terminal features.
 - `detach-on-destroy off`: a session that ends moves its clients to another session, never out of tmux.
+- A status bar naming every window `<session>-<index>` (`kdbg-master-0`), with nothing on its left: tmux would name a window after its program's file, and Claude's is its version (`2.1.310`).
 - tatou's bindings: popup key, back-to-dashboard key (`if-shell -F` on a session named exactly `tatou`: switch to it, else start it detached and switch), and any `[keys.tmux]` entries from config.
 - A status bar showing `#(tatou status)`.
 - As its last line: `source-file -q ~/.config/tatou/tmux.local.conf`, the user's own overrides (created by the user, never by tatou). Optionally, `inherit_user_conf = true` also sources the user's own tmux config first: `~/.tmux.conf` and `$XDG_CONFIG_HOME/tmux/tmux.conf`, the files tmux itself loads.
