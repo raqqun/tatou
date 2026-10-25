@@ -48,6 +48,10 @@ const BACK: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::ALT);
 const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::ALT);
 const PREVIOUS: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::ALT);
 
+/// Show the next and the previous window of the shown session, from anywhere.
+const NEXT_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('l'), KeyModifiers::ALT);
+const PREVIOUS_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::ALT);
+
 /// Lines of scrollback kept for the shown terminal.
 const SCROLLBACK: usize = 1_000;
 
@@ -108,6 +112,14 @@ pub fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
+}
+
+/// What Alt-j/Alt-k and Alt-l/Alt-h step through.
+#[derive(Clone, Copy)]
+enum Step {
+    Session,
+    /// The windows of the shown terminal's session.
+    Window,
 }
 
 /// The terminal shown on the right: the daemon's, drawn from the screen it sent
@@ -220,14 +232,16 @@ impl App {
         }
         // From anywhere but a dialog, the focus staying where it is
         let step = match (key.code, key.modifiers) {
-            NEXT => Some(1),
-            PREVIOUS => Some(-1),
+            NEXT => Some((Step::Session, 1)),
+            PREVIOUS => Some((Step::Session, -1)),
+            NEXT_WINDOW => Some((Step::Window, 1)),
+            PREVIOUS_WINDOW => Some((Step::Window, -1)),
             _ => None,
         };
-        if let (Some(step), None) = (step, &self.dialog) {
+        if let (Some((by, step)), None) = (step, &self.dialog) {
             if key.kind == KeyEventKind::Press {
                 self.message = None;
-                self.step_session(step);
+                self.step(by, step);
             }
             return;
         }
@@ -738,11 +752,15 @@ impl App {
     }
 
     /// Shows the current terminal of the session `step` away from the shown one's,
-    /// wrapping around; the first or the last session when none is shown. The
-    /// focus stays where it is.
-    fn step_session(&mut self, step: isize) {
+    /// or the window `step` away in its session, wrapping around; from the first or
+    /// the last session when none is shown. The focus stays where it is.
+    fn step(&mut self, by: Step, step: isize) {
         let shown = self.shown.as_ref().map(|shown| shown.terminal.clone());
-        let Some(terminal) = self.sessions.step(shown.as_deref(), step) else {
+        let next = match by {
+            Step::Session => self.sessions.step(shown.as_deref(), step),
+            Step::Window => self.sessions.step_window(shown.as_deref(), step),
+        };
+        let Some(terminal) = next else {
             return;
         };
         let focus = self.focus;
@@ -930,7 +948,9 @@ impl App {
                 Span::styled("M-d", bold),
                 Span::raw(" dashboard  "),
                 Span::styled("M-j/M-k", bold),
-                Span::raw(" next/previous session; every other key goes to the terminal"),
+                Span::raw(" next/previous session  "),
+                Span::styled("M-l/M-h", bold),
+                Span::raw(" next/previous window; other keys go to the terminal"),
             ];
             return Paragraph::new(Line::from(keys));
         }
@@ -2167,6 +2187,34 @@ unknown field `popop`, expected one of `popup`, `back`";
         app.show("%20");
         alt(&mut app, 'k');
         assert_eq!(shown(&app), Some("%11"));
+    }
+
+    #[test]
+    fn alt_l_and_alt_h_step_through_the_shown_sessions_windows() {
+        let mut app = with_sessions(vec![
+            with_windows("$1", "app-fix", "/code/app.worktrees/fix"),
+            with_windows("$2", "notes", "/home/me/notes"),
+        ]);
+        // Nothing shown: the first session's first window
+        alt(&mut app, 'l');
+        assert_eq!(shown(&app), Some("%10"));
+        assert_eq!(app.focus, Pane::Worktrees, "the focus stays");
+        let selected = app.sessions.selected().cloned();
+        let window = |w: &str| sessions::Row::Window {
+            session: "$1".into(),
+            window: w.into(),
+        };
+        assert_eq!(selected, Some(window("%10")));
+        alt(&mut app, 'l');
+        assert_eq!(shown(&app), Some("%11"));
+        alt(&mut app, 'l');
+        assert_eq!(shown(&app), Some("%10"), "round, within its session");
+        alt(&mut app, 'h');
+        assert_eq!(shown(&app), Some("%11"));
+        // In another session, its windows
+        app.show("%20");
+        alt(&mut app, 'h');
+        assert_eq!(shown(&app), Some("%21"));
     }
 
     #[test]

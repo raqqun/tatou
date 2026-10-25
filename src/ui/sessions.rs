@@ -89,6 +89,42 @@ impl Sessions {
         Some(shown)
     }
 
+    /// The window `step` away from `terminal` in its session, wrapping around:
+    /// from none, the first session's first window forward, its last backward.
+    /// That window becomes the selected row.
+    pub fn step_window(&mut self, terminal: Option<&str>, step: isize) -> Option<String> {
+        let (session, from) = match terminal.and_then(|t| self.locate(t)) {
+            Some((session, window)) => (session, Some(window)),
+            None => (0, None),
+        };
+        let session = self.sessions.get(session)?;
+        let count = session.windows.len() as isize;
+        if count == 0 {
+            return None;
+        }
+        let index = match from {
+            Some(from) => (from as isize + step).rem_euclid(count),
+            None if step > 0 => 0,
+            None => count - 1,
+        } as usize;
+        let window = session.windows[index].id.clone();
+        self.collapsed.remove(&session.id);
+        self.selected = Some(Row::Window {
+            session: session.id.clone(),
+            window: window.clone(),
+        });
+        self.reselect();
+        Some(window)
+    }
+
+    /// `terminal`'s session and window, by index.
+    fn locate(&self, terminal: &str) -> Option<(usize, usize)> {
+        self.sessions.iter().enumerate().find_map(|(i, session)| {
+            let window = session.windows.iter().position(|w| w.id == terminal)?;
+            Some((i, window))
+        })
+    }
+
     /// Forgets `terminal`, whose program ended, until the next refresh says so, and
     /// its session with its last terminal. Returns what to show instead: another
     /// terminal of its session, the one after it or else before; else the current
