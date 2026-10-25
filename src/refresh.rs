@@ -14,6 +14,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::config::{self, Config, Stamp};
+use crate::error::Error;
 use crate::git::{self, Worktree};
 use crate::tmux::{Server, Session};
 
@@ -58,6 +59,11 @@ impl Refresh {
     ) -> Refresh {
         let mut last_error = None;
         let sessions = spawn("refresh-tmux", SESSIONS_EVERY, updates.clone(), move || {
+            // First, so that what follows lists the slot put right
+            match server.mend_slot() {
+                Ok(()) | Err(Error::NoSlot) => {}
+                Err(err) => tracing::debug!(%err, "cannot mend the dashboard's slot"),
+            }
             let result = server.sessions().map_err(|err| err.to_string());
             log_change(&mut last_error, &result, "tmux sessions");
             Some(Update::Sessions(result))

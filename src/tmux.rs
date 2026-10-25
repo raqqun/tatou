@@ -42,9 +42,11 @@ const SLOT_WIDTH: &str = "60%";
 /// The shell code a window tatou opens runs: `command`, or without one the user's
 /// shell as a login shell (as tmux starts it), then `BACK_TO_DASHBOARD`. A newline,
 /// not `;`, ends the command, so a `# comment` at its end comments out nothing more.
+/// Ctrl-C reaches the whole foreground group: trapped, it leaves this shell running
+/// to `BACK_TO_DASHBOARD`, and `command`, which a trap does not follow, gets it as usual.
 fn returning(command: Option<&str>) -> String {
     let command = command.unwrap_or(r#""${SHELL:-/bin/sh}" -l"#);
-    format!("{command}\n{BACK_TO_DASHBOARD}")
+    format!("trap : INT\n{command}\n{BACK_TO_DASHBOARD}")
 }
 
 /// The oldest tmux tatou supports, as (major, minor).
@@ -55,8 +57,10 @@ const MIN_VERSION: (u32, u32) = (3, 2);
 /// output of its panes: `session_activity` changes on keyboard input alone.
 const PANE_FORMAT: &str = "#{session_id}\t#{session_name}\t#{@tatou_path}\t#{@tatou_status}\t#{@tatou_agent_pane}\t#{session_path}\t#{pane_id}\t#{window_activity}\t#{window_active}\t#{pane_active}\t#{pane_current_command}\t#{pane_tty}\t#{window_id}\t#{window_index}\t#{@tatou_placeholder}\t#{@tatou_shown}";
 
-/// The marks `show` looks for: the slot's placeholder, and the pane shown in it.
-const MARKS_FORMAT: &str = "#{pane_id}\t#{@tatou_placeholder}\t#{@tatou_shown}";
+/// The marks `show` looks for, with each pane's window: the dashboard, the slot's
+/// placeholder, and the pane shown in it.
+const MARKS_FORMAT: &str =
+    "#{pane_id}\t#{window_id}\t#{@tatou_dashboard}\t#{@tatou_placeholder}\t#{@tatou_shown}";
 
 /// What `ps` lists of each process, to tell what runs in the foreground of each
 /// pane's terminal; the same columns on Linux and macOS.
@@ -246,7 +250,17 @@ impl Server {
         ];
         let output = self.run(&args)?;
         let pane = output.stdout.trim_end().to_string();
-        self.run(&["set-option", "-p", "-t", &pane, "@tatou_placeholder", "1"])?;
+        let mut marks = vec![
+            "set-option",
+            "-p",
+            "-t",
+            &pane,
+            "@tatou_placeholder",
+            "1",
+            ";",
+        ];
+        marks.extend(["set-option", "-p", "-t", dashboard, "@tatou_dashboard", "1"]);
+        self.run(&marks)?;
         Ok(pane)
     }
 
@@ -254,9 +268,7 @@ impl Server {
     /// its window, and gives it the focus. The pane shown before goes back to its
     /// own window first, so that the placeholder is in the slot again.
     pub fn show(&self, pane: &str) -> Result<()> {
-        let output = self.run(&["list-panes", "-a", "-F", MARKS_FORMAT])?;
-        let (placeholder, shown) = parse_marks(&output.stdout);
-        let placeholder = placeholder.ok_or(Error::NoSlot)?;
+        let (placeholder, shown) = self.mended_slot()?;
         let mut args = Vec::new();
         if let Some(shown) = shown.as_deref() {
             if shown == pane {
@@ -269,6 +281,44 @@ impl Server {
         args.extend(["set-option", "-p", "-t", pane, "@tatou_shown", "1", ";"]);
         args.extend(["select-pane", "-t", pane]);
         self.run(&args).map(|_| ())
+    }
+
+    /// Puts the slot right again when a shown pane went without sending the
+    /// placeholder back (killed, or its program ended without tatou's way home):
+    /// the placeholder comes back to the slot, which closes the window it stood in.
+    pub fn mend_slot(&self) -> Result<()> {
+        self.mended_slot().map(|_| ())
+    }
+
+    /// The placeholder and the pane shown in the slot, if any, once mended: the
+    /// placeholder back in the slot when nothing is shown there, and the shown mark
+    /// off the panes outside it.
+    fn mended_slot(&self) -> Result<(String, Option<String>)> {
+        let output = self.run(&["list-panes", "-a", "-F", MARKS_FORMAT])?;
+        let marks = parse_marks(&output.stdout);
+        let (Some((dashboard, window)), Some((placeholder, placeholder_window))) =
+            (&marks.dashboard, &marks.placeholder)
+        else {
+            return Err(Error::NoSlot);
+        };
+        let mut args = Vec::new();
+        let mut in_slot = None;
+        for (pane, pane_window) in &marks.shown {
+            if pane_window == window && in_slot.is_none() {
+                in_slot = Some(pane.clone());
+            } else {
+                args.extend(["set-option", "-pu", "-t", pane, "@tatou_shown", ";"]);
+            }
+        }
+        if in_slot.is_none() && placeholder_window != window {
+            tracing::info!(placeholder, "the placeholder comes back to the slot");
+            args.extend(["join-pane", "-h", "-d", "-l", SLOT_WIDTH, "-s", placeholder]);
+            args.extend(["-t", dashboard, ";"]);
+        }
+        if args.pop().is_some() {
+            self.run(&args)?;
+        }
+        Ok((placeholder.clone(), in_slot))
     }
 
     /// Kills `session` (an id) and everything running in it.
@@ -351,18 +401,33 @@ pub enum AgentStatus {
     Idle,
 }
 
-/// The placeholder and the pane shown in the dashboard's slot, from `MARKS_FORMAT`
-/// lines; either may be missing.
-fn parse_marks(text: &str) -> (Option<String>, Option<String>) {
-    let (mut placeholder, mut shown) = (None, None);
+/// The marked panes, each as (pane, window), from `MARKS_FORMAT` lines.
+#[derive(Debug, Default, PartialEq)]
+struct Marks {
+    dashboard: Option<(String, String)>,
+    placeholder: Option<(String, String)>,
+    /// One, or none; more only when something went wrong.
+    shown: Vec<(String, String)>,
+}
+
+fn parse_marks(text: &str) -> Marks {
+    let mut marks = Marks::default();
     for line in text.lines() {
-        match line.split('\t').collect::<Vec<_>>()[..] {
-            [pane, "1", _] => placeholder = Some(pane.to_string()),
-            [pane, _, "1"] => shown = Some(pane.to_string()),
-            _ => {}
+        let [pane, window, dashboard, placeholder, shown] =
+            line.split('\t').collect::<Vec<_>>()[..]
+        else {
+            continue;
+        };
+        let at = (pane.to_string(), window.to_string());
+        if dashboard == "1" {
+            marks.dashboard = Some(at);
+        } else if placeholder == "1" {
+            marks.placeholder = Some(at);
+        } else if shown == "1" {
+            marks.shown.push(at);
         }
     }
-    (placeholder, shown)
+    marks
 }
 
 /// tmux's messages when nothing listens on the socket: the server exited, or never started.
@@ -1500,12 +1565,12 @@ $3\tshort\t/home/me
         let agent = returning(Some("claude # with a comment"));
         assert_eq!(
             agent,
-            format!("claude # with a comment\n{BACK_TO_DASHBOARD}")
+            format!("trap : INT\nclaude # with a comment\n{BACK_TO_DASHBOARD}")
         );
         let shell = returning(None);
         assert_eq!(
             shell,
-            format!("\"${{SHELL:-/bin/sh}}\" -l\n{BACK_TO_DASHBOARD}")
+            format!("trap : INT\n\"${{SHELL:-/bin/sh}}\" -l\n{BACK_TO_DASHBOARD}")
         );
     }
 
@@ -1740,6 +1805,75 @@ $3\tshort\t/home/me
         assert_eq!(names, ["app"]);
         assert_eq!(panes_of(&server, &app.id), std::slice::from_ref(&app.pane));
         assert_eq!(show(&server, &app.pane, "#{@tatou_shown}"), "");
+    }
+
+    #[test]
+    fn a_shown_program_ended_by_ctrl_c_still_goes_home() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let (board, placeholder) = dashboard(&server, dir.path(), "sleep 1000");
+        let app = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
+        server.show(&app.pane).unwrap();
+        server.run(&["send-keys", "-t", &app.pane, "C-c"]).unwrap();
+        let panes = eventually(
+            || panes_of(&server, &board),
+            |panes| panes.len() == 2 && panes[1] == placeholder,
+        );
+        assert_eq!(panes, [board, placeholder]);
+    }
+
+    #[test]
+    fn the_placeholder_left_behind_comes_back() {
+        let Some((server, dir)) = sh_server() else {
+            return;
+        };
+        let (board, placeholder) = dashboard(&server, dir.path(), "sleep 1000");
+        let app = server
+            .new_session("app", dir.path(), Some("sleep 1000"))
+            .unwrap();
+        server.show(&app.pane).unwrap();
+        // Killed: no way home ran, the placeholder stays in app's window
+        server.run(&["kill-pane", "-t", &app.pane]).unwrap();
+        assert_eq!(
+            panes_of(&server, &app.id),
+            std::slice::from_ref(&placeholder)
+        );
+
+        // The next show mends the slot first, closing app's session
+        let web = server
+            .new_session("web", dir.path(), Some("sleep 1000"))
+            .unwrap();
+        server.show(&web.pane).unwrap();
+        assert_eq!(panes_of(&server, &board), [board.clone(), web.pane.clone()]);
+        assert_eq!(
+            panes_of(&server, &web.id),
+            std::slice::from_ref(&placeholder)
+        );
+        let names: Vec<_> = server
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, [DASHBOARD, "web"]);
+
+        // And so does the refresh
+        server.run(&["kill-pane", "-t", &web.pane]).unwrap();
+        server.mend_slot().unwrap();
+        assert_eq!(panes_of(&server, &board), [board, placeholder]);
+    }
+
+    #[test]
+    fn marks_by_pane() {
+        let text = "%0\t@0\t1\t\t\n%1\t@0\t\t1\t\n%2\t@1\t\t\t1\n%3\t@2\t\t\t\nshort\n";
+        let marks = parse_marks(text);
+        let at = |pane: &str, window: &str| Some((pane.to_string(), window.to_string()));
+        assert_eq!(marks.dashboard, at("%0", "@0"));
+        assert_eq!(marks.placeholder, at("%1", "@0"));
+        assert_eq!(marks.shown, [("%2".to_string(), "@1".to_string())]);
     }
 
     #[test]
