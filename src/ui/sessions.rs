@@ -61,6 +61,38 @@ impl Sessions {
         window.map(|w| w.id.clone())
     }
 
+    /// Forgets `terminal`, whose program ended, until the next refresh says so, and
+    /// its session with its last terminal. Returns what to show instead: another
+    /// terminal of its session, the one after it or else before; else the current
+    /// one of the next session, or else of the previous one.
+    pub fn ended(&mut self, terminal: &str) -> Option<String> {
+        let index =
+            (self.sessions.iter()).position(|s| s.windows.iter().any(|w| w.id == terminal))?;
+        let session = &mut self.sessions[index];
+        let i = session.windows.iter().position(|w| w.id == terminal)?;
+        session.windows.remove(i);
+        // The one after it took its place
+        let sibling = session.windows.get(i).or_else(|| session.windows.last());
+        if let Some(window) = sibling {
+            return Some(window.id.clone());
+        }
+        self.sessions.remove(index);
+        let current = |s: &SessionRow| {
+            let window = s.windows.iter().find(|w| w.current).or(s.windows.first());
+            window.map(|w| w.id.clone())
+        };
+        let next = self.sessions.get(index).and_then(current);
+        let previous = || {
+            index
+                .checked_sub(1)
+                .and_then(|i| self.sessions.get(i))
+                .and_then(current)
+        };
+        let shown = next.or_else(previous);
+        self.reselect();
+        shown
+    }
+
     /// What the shown terminal's pane is titled: its session, the window's index
     /// and what runs in it, `app-fix:1 zsh`.
     pub fn title(&self, terminal: &str) -> String {

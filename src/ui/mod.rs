@@ -730,10 +730,14 @@ impl App {
             }
             (Reply::Output(bytes), Some(shown)) => shown.screen.process(&bytes),
             // Its program ended, and the terminal with it
+            // Its program ended, and the terminal with it: a neighbour shows instead
             (Reply::Exited, _) => {
-                self.shown = None;
-                if self.focus == Pane::Terminal {
-                    self.focus = Pane::Worktrees;
+                let next =
+                    (self.shown.take()).and_then(|shown| self.sessions.ended(&shown.terminal));
+                match next {
+                    Some(terminal) => self.show(&terminal),
+                    None if self.focus == Pane::Terminal => self.focus = Pane::Worktrees,
+                    None => {}
                 }
                 if let Some(refresh) = &self.refresh {
                     refresh.sessions_now();
@@ -2066,6 +2070,35 @@ unknown field `popop`, expected one of `popup`, `back`";
             window: "%11".into(),
         };
         assert_eq!(app.sessions.selected(), Some(&window));
+    }
+
+    #[test]
+    fn an_ended_terminal_gives_way_to_its_neighbour() {
+        let mut app = with_sessions(vec![
+            with_windows("$1", "app-fix", "/code/app.worktrees/fix"),
+            with_windows("$2", "notes", "/home/me/notes"),
+            with_windows("$3", "zzz", "/tmp"),
+        ]);
+        // Another terminal of its session: the one after, else before
+        app.show("%10");
+        app.streamed(Reply::Exited);
+        assert_eq!(shown(&app), Some("%11"));
+        assert_eq!(app.focus, Pane::Terminal);
+        // Its session's last: the next session's current terminal
+        app.streamed(Reply::Exited);
+        assert_eq!(shown(&app), Some("%21"));
+        // The last session's last: the previous session's
+        app.show("%30");
+        app.streamed(Reply::Exited);
+        app.show("%31");
+        app.streamed(Reply::Exited);
+        assert_eq!(shown(&app), Some("%21"));
+        // Nothing left: the pane empties, and the focus goes back
+        for _ in 0..2 {
+            app.streamed(Reply::Exited);
+        }
+        assert_eq!(shown(&app), None);
+        assert_eq!(app.focus, Pane::Worktrees);
     }
 
     #[test]
