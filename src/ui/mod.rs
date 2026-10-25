@@ -45,12 +45,12 @@ const TICK: Duration = Duration::from_millis(15);
 const BACK: (KeyCode, KeyModifiers) = (KeyCode::Char('d'), KeyModifiers::ALT);
 
 /// Show the next and the previous session's terminal, from anywhere.
-const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::ALT);
-const PREVIOUS: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::ALT);
+const NEXT: (KeyCode, KeyModifiers) = (KeyCode::Char('l'), KeyModifiers::ALT);
+const PREVIOUS: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::ALT);
 
 /// Show the next and the previous window of the shown session, from anywhere.
-const NEXT_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('l'), KeyModifiers::ALT);
-const PREVIOUS_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::ALT);
+const NEXT_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::ALT);
+const PREVIOUS_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::ALT);
 
 /// Lines of scrollback kept for the shown terminal.
 const SCROLLBACK: usize = 1_000;
@@ -114,7 +114,7 @@ pub fn run(client: Client) -> Result<()> {
     }
 }
 
-/// What Alt-j/Alt-k and Alt-l/Alt-h step through.
+/// What Alt-l/Alt-h and Alt-j/Alt-k step through.
 #[derive(Clone, Copy)]
 enum Step {
     Session,
@@ -947,9 +947,9 @@ impl App {
             let keys = vec![
                 Span::styled("M-d", bold),
                 Span::raw(" dashboard  "),
-                Span::styled("M-j/M-k", bold),
-                Span::raw(" next/previous session  "),
                 Span::styled("M-l/M-h", bold),
+                Span::raw(" next/previous session  "),
+                Span::styled("M-j/M-k", bold),
                 Span::raw(" next/previous window; other keys go to the terminal"),
             ];
             return Paragraph::new(Line::from(keys));
@@ -2161,42 +2161,42 @@ unknown field `popop`, expected one of `popup`, `back`";
     }
 
     #[test]
-    fn alt_j_and_alt_k_step_through_the_sessions() {
+    fn alt_l_and_alt_h_step_through_the_sessions() {
         let mut app = with_sessions(vec![
             with_windows("$1", "app-fix", "/code/app.worktrees/fix"),
             with_windows("$2", "notes", "/home/me/notes"),
             with_windows("$3", "zzz", "/tmp"),
         ]);
         // Nothing shown: the first, and the focus stays in the dashboard
-        alt(&mut app, 'j');
+        alt(&mut app, 'l');
         assert_eq!(shown(&app), Some("%11"), "its current window");
         assert_eq!(app.focus, Pane::Worktrees);
         let selected = app.sessions.selected().cloned();
         assert_eq!(selected, Some(sessions::Row::Session("$1".into())));
         // From the terminal, whose program never sees them: the focus stays there
         app.focus = Pane::Terminal;
-        alt(&mut app, 'j');
+        alt(&mut app, 'l');
         assert_eq!(shown(&app), Some("%21"));
         assert_eq!(app.focus, Pane::Terminal);
-        alt(&mut app, 'j');
-        alt(&mut app, 'j');
+        alt(&mut app, 'l');
+        alt(&mut app, 'l');
         assert_eq!(shown(&app), Some("%11"), "round to the first");
-        alt(&mut app, 'k');
+        alt(&mut app, 'h');
         assert_eq!(shown(&app), Some("%31"), "back round to the last");
         // From another window of a session, its session counts
         app.show("%20");
-        alt(&mut app, 'k');
+        alt(&mut app, 'h');
         assert_eq!(shown(&app), Some("%11"));
     }
 
     #[test]
-    fn alt_l_and_alt_h_step_through_the_shown_sessions_windows() {
+    fn alt_j_and_alt_k_step_through_the_shown_sessions_windows() {
         let mut app = with_sessions(vec![
             with_windows("$1", "app-fix", "/code/app.worktrees/fix"),
             with_windows("$2", "notes", "/home/me/notes"),
         ]);
         // Nothing shown: the first session's first window
-        alt(&mut app, 'l');
+        alt(&mut app, 'j');
         assert_eq!(shown(&app), Some("%10"));
         assert_eq!(app.focus, Pane::Worktrees, "the focus stays");
         let selected = app.sessions.selected().cloned();
@@ -2205,15 +2205,15 @@ unknown field `popop`, expected one of `popup`, `back`";
             window: w.into(),
         };
         assert_eq!(selected, Some(window("%10")));
-        alt(&mut app, 'l');
+        alt(&mut app, 'j');
         assert_eq!(shown(&app), Some("%11"));
-        alt(&mut app, 'l');
+        alt(&mut app, 'j');
         assert_eq!(shown(&app), Some("%10"), "round, within its session");
-        alt(&mut app, 'h');
+        alt(&mut app, 'k');
         assert_eq!(shown(&app), Some("%11"));
         // In another session, its windows
         app.show("%20");
-        alt(&mut app, 'h');
+        alt(&mut app, 'k');
         assert_eq!(shown(&app), Some("%21"));
     }
 
