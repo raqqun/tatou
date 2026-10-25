@@ -418,10 +418,11 @@ impl App {
             Action::Shell if worktrees => self.open(None, false),
             Action::Edit if worktrees => self.open(Some(EDITOR), true),
             Action::RemoveWorktree if worktrees => self.confirm_remove(),
+            // Between Projects and Sessions only: Enter goes into the terminal, and
+            // in it Tab is the program's
             Action::SwitchPane => {
-                self.focus = match (self.focus, &self.shown) {
-                    (Pane::Worktrees, _) => Pane::Sessions,
-                    (Pane::Sessions, Some(_)) => Pane::Terminal,
+                self.focus = match self.focus {
+                    Pane::Worktrees => Pane::Sessions,
                     _ => Pane::Worktrees,
                 }
             }
@@ -1152,6 +1153,15 @@ mod tests {
         assert_eq!(lines[11], "? help  q quit", "no session to jump to");
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Worktrees, "no third pane");
+
+        // Not into a shown terminal either, and in it Tab is the program's
+        app.show("%1");
+        app.focus = Pane::Sessions;
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Pane::Worktrees);
+        app.focus = Pane::Terminal;
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Pane::Terminal);
     }
 
     #[test]
