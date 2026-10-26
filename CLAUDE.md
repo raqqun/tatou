@@ -18,7 +18,7 @@ Read `DESIGN.md` before starting any feature. Its philosophy section is the deci
 - `serde` + `toml` for config; paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), macOS included, honouring `$XDG_*` when set
 - `thiserror` for errors, `tracing` + `tracing-subscriber` (`fmt` only) for logs (to `$XDG_STATE_HOME/tatou/tatou.log`, rotated at startup past 1 MiB, never to the terminal)
 - `std::thread` + `mpsc` for background work; no async runtime
-- External tools, called as commands: `git` (required), `gh` (optional); notifications via `notify-send` (Linux) or `osascript` (macOS)
+- External tools, called as commands: `git` (required), `gh` (optional); notifications via `notify-send` (Linux) or `osascript` (macOS); the clipboard via `pbcopy` (macOS) or `wl-copy`, `xclip`, `xsel` (Linux, optional; else OSC 52)
 - Releases: GoReleaser with the Rust builder (`.goreleaser.yaml`); GitHub Actions, one file per workflow in `.github/workflows/` (`test.yaml`, `release.yaml`)
 
 Keep the dependency list short. Before adding a crate, check whether the standard library or one of the external tools already does the job.
@@ -34,7 +34,7 @@ src/
   config.rs   # load config.toml and projects/*.toml, write project files; XDG directories
   theme.rs    # themes: the dashboard's colours, built in (themes/) or from the config's themes/
   exec.rs     # the only place that runs external commands, but the terminals' programs
-  platform.rs # the only platform-specific code: notify(title, body)
+  platform.rs # the only platform-specific code: copy(text), notify(title, body)
   git.rs      # worktrees, branches, status; output parsing
   gh.rs       # PR list; output parsing
   daemon.rs   # `tatou daemon`: terminals (pseudo-terminal + vt100 screen), sessions, the socket
@@ -64,7 +64,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 
 ## Rules
 
-- **One terminal at a time, no multiplexer.** The dashboard shows one terminal, beside the projects. No splits, layouts, tabs, copy mode or scripting; if a feature needs them, it does not belong in tatou.
+- **One terminal at a time, no multiplexer.** The dashboard shows one terminal, beside the projects. No splits, layouts, tabs, keyboard copy mode or scripting; if a feature needs them, it does not belong in tatou. Selecting with the mouse in the shown terminal, as any terminal does, is the one exception (6.9).
 - **No persistent state** besides `config.toml`, the project files in `projects/` next to it (one per repository, written by `tatou add` and the launch offer, plain TOML the user may edit) and the user's own themes in `themes/`. The daemon keeps its terminals in memory only, and its socket is a runtime file. No database, cache or other state file; derive everything from `git`, `gh` and the daemon.
 - **The daemon owns the terminals.** Every terminal is started, written to, resized and ended through the daemon's protocol (`protocol.rs`, via `client.rs`); the dashboard never runs a program in a pseudo-terminal itself. One daemon per user, on `$XDG_STATE_HOME/tatou/tatou.sock`.
 - **Don't reimplement tools.** No built-in editor, pager, diff viewer or file operations; delegate to `$EDITOR`, a shell, or the agent.

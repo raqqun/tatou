@@ -685,6 +685,20 @@ Depends on: 6.7, 2.3
 - `TestBackend` tests: `T` on the theme in use, the preview, Esc, Enter's save, a theme in error, a reload while choosing.
 - Manual check documented in the PR: choosing `monokai-pro` writes it in `config.toml`, and a second dashboard follows.
 
+### 6.9 Select text with the mouse in the shown terminal (#115)
+
+Depends on: 6.6
+
+- Decided: with the mouse always the dashboard's (6.6), tatou selects in the shown terminal for a program that did not ask for the mouse (shells, most CLIs); one that asked (Claude Code, vim, lazygit) keeps it and selects itself. "No copy mode" becomes "no keyboard copy mode; selecting with the mouse is the exception" (CLAUDE.md, DESIGN §1, §3).
+- A drag selects a span, a double click a word (a run of non-spaces), a triple click the line; the screen as drawn, without scrollback; highlighted with the theme's selection colour, else reversed (`ui/selection.rs`).
+- Copied when the mouse goes up, from tatou's own screen (vt100's `contents_between`), on a background thread (`Task::Copy`): `platform::copy` tries `pbcopy` on macOS, `wl-copy` under Wayland, `xclip`, `xsel` (`exec::feed`, stdin given, output not read); with none, OSC 52 between frames, base64 by hand. The hint bar says how many characters.
+- The highlight goes with the next click, a key or paste to the program, its output once the mouse is up, or another terminal shown.
+
+**Done when**
+- Unit tests: a backwards drag, words (wrapped, wide characters), lines, `exec::feed`, the tools per platform, base64.
+- `TestBackend` tests: a drag highlights and copies on release, dragged off the pane; double and triple click; a program reading the mouse; output while dragging and after; no tool.
+- Manual check documented in the PR: a drag in a shell puts its text in the clipboard.
+
 ---
 
 ## M7 — Ship
