@@ -1,7 +1,7 @@
 //! Puts the terminal in the state the UI needs, and always puts it back: when the
 //! guard is dropped, whatever the way out, and before a panic message is printed.
 
-use std::io::{self, Stdout, stdout};
+use std::io::{self, Stdout, Write, stdout};
 use std::panic;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, ThreadId};
@@ -63,6 +63,34 @@ pub fn enter() -> io::Result<(Tui, Guard)> {
     Ok((terminal, guard))
 }
 
+/// Asks the terminal to put `text` in the clipboard, with OSC 52: for when no
+/// clipboard tool is there, e.g. over SSH. A terminal that does not support it
+/// ignores it.
+pub fn copy(text: &str) -> io::Result<()> {
+    let mut out = stdout();
+    write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))?;
+    out.flush()
+}
+
+/// Standard base64, padded; OSC 52 is its only use, not worth a crate.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            match i <= chunk.len() {
+                true => encoded.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char),
+                false => encoded.push('='),
+            }
+        }
+    }
+    encoded
+}
+
 /// Undoes `enter`, once: after a panic both the hook and the guard call it, and
 /// leaving the alternate screen a second time would move the cursor back over the
 /// panic message.
@@ -98,4 +126,24 @@ fn install_panic_hook(ui: ThreadId) {
             tracing::error!(thread = ?name, %info, "a background thread panicked");
         }
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_as_rfc_4648_says() {
+        let cases = [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foobar", "Zm9vYmFy"),
+        ];
+        for (text, encoded) in cases {
+            assert_eq!(base64(text.as_bytes()), encoded, "{text}");
+        }
+        assert_eq!(base64("héllo ~/a?".as_bytes()), "aMOpbGxvIH4vYT8=");
+    }
 }

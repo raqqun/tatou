@@ -3,8 +3,9 @@
 //! Commands take argument vectors, never shell strings. `run_sh` is the deliberate
 //! exception, for the user's `on_create` command and custom tmux-command templates.
 //! stdin is closed and git/gh prompts are disabled, so a command run in the
-//! background never waits for input.
+//! background never waits for input; `feed` gives a command its input instead.
 
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -46,6 +47,38 @@ pub fn run(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output> {
     Ok(Output {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
     })
+}
+
+/// Runs `program` with `args`, `input` as its stdin, and waits for it. Its output
+/// is not read: a clipboard tool such as `xclip` stays behind to serve what it was
+/// given, and would hold a pipe open. A non-zero exit is `Error::Command`, without
+/// stderr.
+pub fn feed(program: &str, args: &[&str], input: &[u8]) -> Result<()> {
+    let line = command_line(program, args);
+    tracing::debug!(command = %line, bytes = input.len(), "feed");
+    let mut command = command(program, args);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let spawn_error = |source| Error::Spawn {
+        program: program.to_string(),
+        source,
+    };
+    let mut child = command.spawn().map_err(spawn_error)?;
+    // Taken, so that it closes once written and the program sees the input end
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input).map_err(spawn_error)?;
+    }
+    let status = child.wait().map_err(spawn_error)?;
+    if !status.success() {
+        return Err(Error::Command {
+            command: line,
+            status,
+            stderr: String::new(),
+        });
+    }
+    Ok(())
 }
 
 /// Runs `script` with `sh -c`. Only for commands the user wrote in the config, with
@@ -139,6 +172,19 @@ mod tests {
         assert_eq!(command, "sh -c 'echo oops >&2; exit 3'");
         assert_eq!(status.code(), Some(3));
         assert_eq!(stderr, "oops");
+    }
+
+    #[test]
+    fn feed_gives_the_program_its_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("out");
+        let script = format!("cat > {}", shell_quote(&file.to_string_lossy()));
+        feed("sh", &["-c", &script], "héllo\n".as_bytes()).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "héllo\n");
+        let failed = feed("sh", &["-c", "exit 3"], b"");
+        assert!(matches!(failed, Err(Error::Command { .. })), "{failed:?}");
+        let missing = feed("tatou-no-such-program", &[], b"");
+        assert!(matches!(missing, Err(Error::Spawn { .. })), "{missing:?}");
     }
 
     #[test]

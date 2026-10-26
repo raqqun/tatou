@@ -10,6 +10,7 @@ use crate::config;
 use crate::error::Error;
 use crate::exec;
 use crate::git;
+use crate::platform;
 
 /// An action the UI asks for.
 #[derive(Debug, PartialEq)]
@@ -29,6 +30,8 @@ pub enum Task {
         config: PathBuf,
         name: String,
     },
+    /// Puts text selected in the shown terminal in the clipboard.
+    Copy(String),
 }
 
 /// What `d` ends in the sessions' pane.
@@ -132,6 +135,10 @@ pub enum Event {
     ThemeSaved(String),
     /// The theme could not be written there; why.
     ThemeNotSaved(String),
+    /// This many characters are in the clipboard.
+    Copied(usize),
+    /// No clipboard tool could copy the text: the dashboard's terminal is asked to.
+    NoClipboardTool(String),
 }
 
 /// Runs `task` on a thread of its own, sending what happens to `events`.
@@ -195,6 +202,10 @@ fn run(task: Task, client: &Client, events: &Sender<Event>) {
                 Err(err) => Event::Failed(err.to_string()),
             });
         }
+        Task::Copy(text) => send(match platform::copy(&text) {
+            Some(_) => Event::Copied(text.chars().count()),
+            None => Event::NoClipboardTool(text),
+        }),
         Task::SaveTheme { config, name } => {
             send(match config::save_theme(&config, &name) {
                 Ok(()) => Event::ThemeSaved(name),

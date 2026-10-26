@@ -2,6 +2,7 @@
 
 mod dialog;
 mod projects;
+mod selection;
 mod sessions;
 mod terminal;
 
@@ -36,6 +37,7 @@ use crate::term::{self, Modes};
 use crate::theme::{self, Theme};
 use dialog::{Choice, Confirm, Dialog, Field, Form, Message, Outcome};
 use projects::Tree;
+use selection::{Selection, Unit};
 use sessions::Sessions;
 
 /// How long to wait for input before applying updates and drawing again; short
@@ -113,6 +115,9 @@ pub fn run(client: Client) -> Result<()> {
             app.streamed(reply);
         }
         app.apply_all(&received, &happened);
+        if let Some(text) = app.clipboard.take() {
+            terminal::copy(&text).map_err(Error::Terminal)?;
+        }
         app.update_view(unix_now());
         if app.quit {
             drop(guard);
@@ -205,9 +210,16 @@ struct App {
     /// Takes the keys while open; drawn over the panes.
     dialog: Option<Open>,
     areas: Areas,
-    /// The last left click, unless it was the second of a double one: when, and
-    /// on which cell.
-    last_click: Option<(Instant, u16, u16)>,
+    /// The last left click: when, on which cell, and how many there were in a row
+    /// there, up to three.
+    last_click: Option<(Instant, u16, u16, u8)>,
+    /// Text selected with the mouse in the shown terminal, highlighted until the
+    /// next click, key or output.
+    selection: Option<Selection>,
+    /// Whether the mouse is still down, extending the selection: output then keeps it.
+    selecting: bool,
+    /// Text for the dashboard's terminal to copy, with no clipboard tool to.
+    clipboard: Option<String>,
     /// Shown in place of the hints until the next key press.
     message: Option<String>,
     /// What a background action is doing, shown in place of the hints until it ends.
@@ -244,6 +256,9 @@ impl App {
             dialog: None,
             areas: Areas::default(),
             last_click: None,
+            selection: None,
+            selecting: false,
+            clipboard: None,
             message: None,
             progress: None,
             select_when_listed: None,
@@ -260,6 +275,7 @@ impl App {
             && self.focus == Pane::Terminal
         {
             let bytes = term::paste_bytes(text, self.modes());
+            self.selection = None;
             return self.send(Request::Input(bytes));
         }
         if let Event::Mouse(mouse) = event {
@@ -291,6 +307,7 @@ impl App {
             if (key.code, key.modifiers) == BACK {
                 self.focus = Pane::Worktrees;
             } else {
+                self.selection = None;
                 self.send(Request::Input(term::key_bytes(key, self.modes())));
             }
             return;
@@ -320,14 +337,20 @@ impl App {
         let (x, y) = (mouse.column, mouse.row);
         let position = Position::new(x, y);
         let click = mouse.kind == MouseEventKind::Down(MouseButton::Left);
-        let mut double = false;
+        let mut clicks = 0;
         if click {
             self.message = None;
-            double = self.last_click.is_some_and(|(at, cx, cy)| {
-                (cx, cy) == (x, y) && now.saturating_duration_since(at) <= DOUBLE_CLICK
-            });
-            self.last_click = if double { None } else { Some((now, x, y)) };
+            clicks = match self.last_click {
+                Some((at, cx, cy, n))
+                    if (cx, cy) == (x, y) && now.saturating_duration_since(at) <= DOUBLE_CLICK =>
+                {
+                    n % 3 + 1
+                }
+                _ => 1,
+            };
+            self.last_click = Some((now, x, y, clicks));
         }
+        let double = clicks == 2;
         let wheel = match mouse.kind {
             MouseEventKind::ScrollUp => Some(KeyCode::Up),
             MouseEventKind::ScrollDown => Some(KeyCode::Down),
@@ -348,6 +371,24 @@ impl App {
             }
             return;
         }
+        // A selection follows the mouse wherever it is dragged, and is copied when
+        // the mouse goes up
+        if self.selection.is_some() {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let cell = self.cell_at(x, y);
+                    if let Some(selection) = &mut self.selection {
+                        selection.extend(cell);
+                    }
+                    return;
+                }
+                MouseEventKind::Up(MouseButton::Left) => return self.copy_selection(),
+                _ => {}
+            }
+        }
+        if click {
+            self.selection = None;
+        }
         if self.areas.terminal.contains(position) {
             if self.shown.is_none() {
                 return;
@@ -360,6 +401,18 @@ impl App {
                 return;
             }
             let modes = self.modes();
+            // A program that leaves the mouse to the terminal: tatou selects, as a
+            // terminal would
+            if click && modes.mouse == vt100::MouseProtocolMode::None {
+                let unit = match clicks {
+                    2 => Unit::Word,
+                    3 => Unit::Line,
+                    _ => Unit::Cell,
+                };
+                self.selection = Some(Selection::new(self.cell_at(x, y), unit));
+                self.selecting = true;
+                return;
+            }
             let alternate = self
                 .shown
                 .as_ref()
@@ -405,6 +458,33 @@ impl App {
             (true, _) => self.sessions.toggle(),
             (false, _) if double => self.handle(Action::Jump),
             _ => {}
+        }
+    }
+
+    /// The shown terminal's cell at (`x`, `y`), or the nearest one inside it.
+    fn cell_at(&self, x: u16, y: u16) -> (u16, u16) {
+        let inner = self.areas.terminal_inner;
+        let clamp = |value: u16, start: u16, size: u16| {
+            value.clamp(start, start + size.saturating_sub(1)) - start
+        };
+        (
+            clamp(y, inner.y, inner.height),
+            clamp(x, inner.x, inner.width),
+        )
+    }
+
+    /// The mouse went up: the selection, unless empty, goes to the clipboard.
+    fn copy_selection(&mut self) {
+        self.selecting = false;
+        let (Some(selection), Some(shown)) = (&self.selection, &self.shown) else {
+            return;
+        };
+        if selection.is_empty() {
+            return self.selection = None;
+        }
+        let text = selection.text(shown.screen.screen());
+        if !text.is_empty() {
+            self.tasks.push(Task::Copy(text));
         }
     }
 
@@ -513,6 +593,14 @@ impl App {
             Event::ThemeNotSaved(err) => {
                 self.theme = self.configured_theme();
                 self.message = Some(format!("The theme is not saved: {err}"));
+            }
+            Event::Copied(chars) => self.message = Some(format!("Copied {chars} characters")),
+            Event::NoClipboardTool(text) => {
+                let chars = text.chars().count();
+                self.message = Some(format!(
+                    "No clipboard tool: asked the terminal to copy {chars} characters"
+                ));
+                self.clipboard = Some(text);
             }
         }
     }
@@ -1015,6 +1103,7 @@ impl App {
             terminal: terminal.to_string(),
             screen: vt100::Parser::new(rows, cols, SCROLLBACK),
         });
+        self.selection = None;
         self.focus = Pane::Terminal;
     }
 
@@ -1040,8 +1129,15 @@ impl App {
                 let (rows, cols) = self.slot;
                 shown.screen = vt100::Parser::new(rows, cols, SCROLLBACK);
                 shown.screen.process(&bytes);
+                self.selection = None;
             }
-            (Reply::Output(bytes), Some(shown)) => shown.screen.process(&bytes),
+            // What was selected may have moved; kept while the mouse is still down
+            (Reply::Output(bytes), Some(shown)) => {
+                shown.screen.process(&bytes);
+                if !self.selecting {
+                    self.selection = None;
+                }
+            }
             // Its program ended, and the terminal with it
             // Its program ended, and the terminal with it: a neighbour shows instead
             (Reply::Exited, _) => {
@@ -1152,6 +1248,7 @@ impl App {
                     .cursor(cursor);
                 frame.render_widget(widget, area);
                 self.paint_defaults(frame, inner);
+                self.paint_selection(frame, inner);
             }
             None => {
                 let text = "Enter on a worktree or a session shows its terminal here";
@@ -1177,6 +1274,27 @@ impl App {
                 }
                 if cell.bg == Color::Reset {
                     cell.bg = bg;
+                }
+            }
+        }
+    }
+
+    /// The selected cells of the shown terminal, drawn in `area`, as the theme's
+    /// selected row.
+    fn paint_selection(&self, frame: &mut Frame, area: Rect) {
+        let (Some(selection), Some(shown)) = (&self.selection, &self.shown) else {
+            return;
+        };
+        if selection.is_empty() {
+            return;
+        }
+        let bounds = selection.bounds(shown.screen.screen());
+        let style = self.theme.selected();
+        let buffer = frame.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if Selection::contains(bounds, (y - area.y, x - area.x)) {
+                    buffer[(x, y)].set_style(style);
                 }
             }
         }
@@ -2999,6 +3117,126 @@ unknown field `popop`, expected one of `popup`, `back`";
         click(&mut app, 70, 0);
         let sent: Vec<&[u8]> = vec![b"\x1b[<0;5;2M", b"\x1b[<64;1;1M"];
         assert_eq!(inputs(), sent, "no motion in mode 1000, nor the border");
+    }
+
+    /// A shell's screen shown, "one two" and "three four", its inside from (41, 1).
+    fn with_a_shell() -> App {
+        let mut app = with_sessions(vec![]);
+        let mut screen = vt100::Parser::new(18, 58, SCROLLBACK);
+        screen.process(b"one two\r\nthree four");
+        app.shown = Some(Shown {
+            terminal: "%7".into(),
+            screen,
+        });
+        screen_of(&mut app);
+        app
+    }
+
+    fn screen_of(app: &mut App) -> ratatui::buffer::Buffer {
+        styles(app, 100, 20)
+    }
+
+    fn selected(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> bool {
+        buffer[(x, y)].modifier.contains(Modifier::REVERSED)
+    }
+
+    const UP: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+    const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+
+    #[test]
+    fn a_drag_in_a_shell_selects_and_copies_on_release() {
+        let mut app = with_a_shell();
+        let now = Instant::now();
+        mouse_at(&mut app, CLICK, 45, 1, now);
+        assert_eq!(app.focus, Pane::Terminal);
+        assert!(
+            !selected(&screen_of(&mut app), 45, 1),
+            "a click selects nothing"
+        );
+        mouse_at(&mut app, DRAG, 43, 2, now);
+        let buffer = screen_of(&mut app);
+        assert!(
+            selected(&buffer, 45, 1) && selected(&buffer, 98, 1),
+            "to the line's end"
+        );
+        assert!(selected(&buffer, 41, 2) && selected(&buffer, 43, 2));
+        assert!(!selected(&buffer, 44, 1) && !selected(&buffer, 44, 2));
+        mouse_at(&mut app, UP, 43, 2, now);
+        assert_eq!(app.tasks, [Task::Copy("two\nthr".into())]);
+        assert!(
+            selected(&screen_of(&mut app), 45, 1),
+            "highlighted until the next click"
+        );
+
+        event(&mut app, actions::Event::Copied(7));
+        assert_eq!(app.message.as_deref(), Some("Copied 7 characters"));
+        press(&mut app, KeyCode::Char('x'));
+        assert!(app.selection.is_none(), "a key to the program clears it");
+
+        app.tasks.clear();
+        mouse_at(&mut app, CLICK, 45, 1, now + Duration::from_secs(1));
+        mouse_at(&mut app, UP, 45, 1, now);
+        assert_eq!(app.tasks, [], "a click alone copies nothing");
+        // Dragged off the pane: up to its edge
+        mouse_at(&mut app, CLICK, 42, 2, now + Duration::from_secs(2));
+        mouse_at(&mut app, DRAG, 20, 0, now);
+        mouse_at(&mut app, UP, 20, 0, now);
+        assert_eq!(app.tasks, [Task::Copy("one two\nth".into())]);
+    }
+
+    #[test]
+    fn a_double_click_selects_a_word_and_a_triple_one_the_line() {
+        let mut app = with_a_shell();
+        let now = Instant::now();
+        let soon = |ms| now + Duration::from_millis(ms);
+        mouse_at(&mut app, CLICK, 46, 1, now);
+        mouse_at(&mut app, UP, 46, 1, now);
+        mouse_at(&mut app, CLICK, 46, 1, soon(100));
+        mouse_at(&mut app, UP, 46, 1, soon(100));
+        assert_eq!(app.tasks, [Task::Copy("two".into())]);
+        mouse_at(&mut app, CLICK, 46, 1, soon(200));
+        mouse_at(&mut app, UP, 46, 1, soon(200));
+        assert_eq!(app.tasks[1], Task::Copy("one two".into()));
+        assert!(selected(&screen_of(&mut app), 41, 1), "the whole line");
+    }
+
+    #[test]
+    fn a_program_that_reads_the_mouse_selects_itself() {
+        let mut app = with_a_shell();
+        let shown = app.shown.as_mut().unwrap();
+        shown.screen.process(b"\x1b[?1000h");
+        let now = Instant::now();
+        mouse_at(&mut app, CLICK, 45, 1, now);
+        mouse_at(&mut app, DRAG, 43, 2, now);
+        mouse_at(&mut app, UP, 43, 2, now);
+        assert!(app.selection.is_none());
+        assert_eq!(app.tasks, []);
+    }
+
+    #[test]
+    fn output_clears_the_selection_once_the_mouse_is_up() {
+        let mut app = with_a_shell();
+        let now = Instant::now();
+        mouse_at(&mut app, CLICK, 45, 1, now);
+        mouse_at(&mut app, DRAG, 47, 1, now);
+        app.streamed(Reply::Output(b"!".to_vec()));
+        assert!(app.selection.is_some(), "still dragging");
+        mouse_at(&mut app, UP, 47, 1, now);
+        app.streamed(Reply::Output(b"!".to_vec()));
+        assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn without_a_clipboard_tool_the_terminal_is_asked_to_copy() {
+        let mut app = with_a_shell();
+        event(&mut app, actions::Event::NoClipboardTool("two".into()));
+        assert_eq!(app.clipboard.as_deref(), Some("two"));
+        assert!(
+            app.message
+                .as_deref()
+                .unwrap()
+                .contains("asked the terminal")
+        );
     }
 
     #[test]
