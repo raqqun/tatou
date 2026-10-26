@@ -26,7 +26,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
 ## 3. What it deliberately does not do
 
-- Splits, layouts, tabs, a keyboard copy mode, browsing scrollback, or more than one terminal on screen.
+- Splits, layouts, tabs, a keyboard copy mode, or more than one terminal on screen.
 - Keep agents across a reboot, or across the daemon ending: terminals live as long as the daemon.
 - A database or state file beyond its config: `config.toml` and one small file per project (§9).
 - Show, edit, create, rename or delete files itself: no file tree, viewer or diff viewer — `$EDITOR` (`e`), a shell opened in the worktree (`t`), or the agent.
