@@ -1,0 +1,11 @@
+# monokai-pro: Monokai Pro's dark palette (https://monokai.pro).
+
+background = "#2d2a2e"
+foreground = "#fcfcfa"
+accent = "#ffd866"
+selection = "#5b595c"
+error = "#ff6188"
+input = "#fc9867"
+busy = "#a9dc76"
+tag = "#ab9df2"
+key = "#78dce8"

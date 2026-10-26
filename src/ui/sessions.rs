@@ -12,6 +12,7 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use super::projects::status_icon;
 use crate::actions::End;
 use crate::model::SessionRow;
+use crate::theme::Theme;
 
 /// A row of the pane, by ids, so the selection follows it across refreshes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,7 +271,7 @@ impl Sessions {
     /// Each session's fold, status icon, name, what runs in its current window,
     /// and what it is for, dimmed; then each window's index, what runs in it, and
     /// `*` on the session's current one.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block, theme: &Theme) {
         if self.sessions.is_empty() {
             frame.render_widget(Paragraph::new("No sessions").block(block), area);
             return;
@@ -280,7 +281,7 @@ impl Sessions {
         let mut items = Vec::new();
         for session in &self.sessions {
             let collapsed = self.collapsed.contains(&session.id);
-            let (icon, style) = status_icon(session.status);
+            let (icon, style) = status_icon(session.status, theme);
             let mut spans = vec![
                 Span::raw(if collapsed { "▸ " } else { "▾ " }),
                 Span::styled(icon, style),
@@ -304,7 +305,7 @@ impl Sessions {
         }
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+            .highlight_style(theme.selected());
         self.list.select(self.selected.as_ref().map(|_| self.index));
         frame.render_stateful_widget(list, area, &mut self.list);
     }

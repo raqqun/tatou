@@ -1,0 +1,24 @@
+# terminal: the dashboard in the terminal's own colours; the default theme.
+#
+# Every key is optional; one left out takes this theme's value, and here, `reset`:
+# the terminal's default colour. Colours are "#rrggbb", ANSI names ("cyan",
+# "light-red"), indexes 0-255, or "reset".
+
+# The dashboard's background and text, and those of the shown terminal's cells
+# that its program leaves in the default colours
+# background = "reset"
+# foreground = "reset"
+
+# The focused pane's border and title
+accent = "cyan"
+# The selected row's background; without one, the row is reversed
+# selection = …
+# Errors
+error = "red"
+# Statuses: ⚠ needs input, ● busy
+input = "yellow"
+# busy = "reset"
+# The `repo` tag of a project's main worktree
+tag = "cyan"
+# Keys in the hint bar
+# key = "reset"

@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use serde::Deserialize;
 
 use crate::error::{Error, Result};
+use crate::theme::{self, Theme};
 
 /// Written when `config.toml` does not exist: every setting, commented out.
 const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
@@ -19,6 +20,10 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 
 # Agent started in new worktrees, one of the agents below
 # default_agent = "claude"
+
+# Colours of the dashboard: a built-in theme, terminal (the terminal's own
+# palette) or monokai-pro, or one of yours, a file in themes/ next to this one
+# theme = "terminal"
 
 # Commands that start an agent; added to the built-in claude and codex, or
 # replacing one of them when the name is the same. Shells are `t`'s job
@@ -52,6 +57,7 @@ pub struct Config {
     /// Built-in agents merged with the user's `[agents]`.
     pub agents: BTreeMap<String, String>,
     pub keys: Keys,
+    pub theme: Theme,
     /// From the files in `projects/`, by file name.
     pub projects: Vec<Project>,
 }
@@ -93,6 +99,7 @@ struct File {
     agents: BTreeMap<String, String>,
     #[serde(default)]
     keys: Keys,
+    theme: Option<String>,
     /// Where projects were before they moved to `projects/`; an error with a hint.
     project: Option<toml::Value>,
 }
@@ -131,27 +138,38 @@ pub fn projects_dir(path: &Path) -> PathBuf {
     path.with_file_name("projects")
 }
 
-/// When the config at `path` and its project files were last modified, to tell
-/// when it needs loading again.
+/// The folder of theme files, next to the config at `path`.
+pub fn themes_dir(path: &Path) -> PathBuf {
+    path.with_file_name("themes")
+}
+
+/// When the config at `path`, its project files and its theme files were last
+/// modified, to tell when it needs loading again.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stamp {
     config: Option<SystemTime>,
     /// By file name; adding or removing a file changes it too.
     projects: Vec<(PathBuf, Option<SystemTime>)>,
+    /// As `projects`; any theme's, not only the one in use, which is simpler.
+    themes: Vec<(PathBuf, Option<SystemTime>)>,
 }
 
 pub fn stamp(path: &Path) -> Stamp {
     let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
-    let files = project_files(&projects_dir(path)).unwrap_or_default();
-    Stamp {
-        config: modified(path),
-        projects: files
+    let files = |dir: PathBuf| -> Vec<(PathBuf, Option<SystemTime>)> {
+        let files = toml_files(&dir).unwrap_or_default();
+        files
             .into_iter()
             .map(|file| {
                 let modified = modified(&file);
                 (file, modified)
             })
-            .collect(),
+            .collect()
+    };
+    Stamp {
+        config: modified(path),
+        projects: files(projects_dir(path)),
+        themes: files(themes_dir(path)),
     }
 }
 
@@ -170,7 +188,7 @@ pub fn load_from(path: &Path, home: Option<&Path>) -> Result<Config> {
 
 /// The `.toml` files in `dir`, by name; none when `dir` does not exist. Hidden
 /// files, editors' backups and `write_atomic`'s temporary files are left out.
-fn project_files(dir: &Path) -> Result<Vec<PathBuf>> {
+pub fn toml_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -196,7 +214,7 @@ fn project_files(dir: &Path) -> Result<Vec<PathBuf>> {
 /// project another file already has, is a project with an error.
 fn load_projects(dir: &Path, home: Option<&Path>) -> Result<Vec<Project>> {
     let mut projects: Vec<Project> = Vec::new();
-    for file in project_files(dir)? {
+    for file in toml_files(dir)? {
         let read = fs::read_to_string(&file).map_err(|err| err.to_string());
         let parsed = read.and_then(|text| toml::from_str(&text).map_err(|err| err.to_string()));
         let mut project = match parsed {
@@ -373,11 +391,15 @@ fn parse(text: &str, path: &Path) -> std::result::Result<Config, String> {
         ));
     }
 
+    let name = file.theme.as_deref().unwrap_or(theme::DEFAULT);
+    let theme = theme::load(&themes_dir(path), name)?;
+
     Ok(Config {
         path: path.to_path_buf(),
         default_agent,
         agents,
         keys: file.keys,
+        theme,
         projects: Vec::new(),
     })
 }
@@ -532,6 +554,7 @@ mod tests {
             ["claude", "codex"]
         );
         assert_eq!(config.keys, Keys::default());
+        assert_eq!(config.theme, theme::terminal());
         assert_eq!(config.projects, []);
     }
 
@@ -545,6 +568,7 @@ mod tests {
         let config = parse_ok(
             r#"
             default_agent = "claude"
+            theme = "monokai-pro"
 
             [agents]
             claude = "claude"
@@ -561,6 +585,7 @@ mod tests {
         assert_eq!(config.keys.actions["edit"], "e");
         assert_eq!(config.keys.actions.len(), 3);
         assert_eq!(config.keys.custom["g"], "lazygit");
+        assert_eq!(config.theme.name, "monokai-pro");
     }
 
     #[test]
@@ -670,6 +695,26 @@ mod tests {
     }
 
     #[test]
+    fn the_theme_is_built_in_or_a_file_in_themes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::create_dir(dir.path().join("themes")).unwrap();
+        fs::write(dir.path().join("themes/mine.toml"), "accent = \"green\"\n").unwrap();
+        let theme = |text: &str| parse(text, &path).map(|config| config.theme);
+        assert_eq!(
+            theme("theme = \"monokai-pro\"").unwrap().name,
+            "monokai-pro"
+        );
+        let mine = theme("theme = \"mine\"").unwrap();
+        assert_eq!(mine.accent, ratatui::style::Color::Green);
+        let message = theme("theme = \"nope\"").unwrap_err();
+        assert_eq!(
+            message,
+            "theme = \"nope\" is not one of the themes: mine, monokai-pro, terminal"
+        );
+    }
+
+    #[test]
     fn tilde_expands_to_home() {
         let home = Some(Path::new("/home/me"));
         assert_eq!(expand_tilde("~", home).unwrap(), PathBuf::from("/home/me"));
@@ -724,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stamp_changes_with_the_config_and_its_project_files() {
+    fn the_stamp_changes_with_the_config_its_project_files_and_themes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let at = |file: &Path, secs| {
@@ -749,7 +794,18 @@ mod tests {
         fs::remove_file(&app).unwrap();
         assert_eq!(stamp(&path), first, "removed again");
         at(&path, 4_000);
-        assert_ne!(stamp(&path), first, "config.toml edited");
+        let edited = stamp(&path);
+        assert_ne!(edited, first, "config.toml edited");
+
+        let themes = dir.path().join("themes");
+        fs::create_dir(&themes).unwrap();
+        let mine = themes.join("mine.toml");
+        fs::write(&mine, "").unwrap();
+        at(&mine, 5_000);
+        let added = stamp(&path);
+        assert_ne!(added, edited, "a theme added");
+        at(&mine, 6_000);
+        assert_ne!(stamp(&path), added, "a theme edited");
     }
 
     #[test]

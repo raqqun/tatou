@@ -14,6 +14,7 @@ mod platform;
 mod protocol;
 mod refresh;
 mod term;
+mod theme;
 mod ui;
 
 use std::env;

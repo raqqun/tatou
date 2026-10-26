@@ -81,9 +81,10 @@ One binary:
 - **Right:** the shown terminal, titled `<session>:<index> <program>`, at the pane's size, which its program follows. When none is shown, what to press to show one.
 - **Widths.** The left column is 40 columns wide, or half the screen when it is narrower than 80; the terminal takes the rest.
 - **Bottom:** key hints for the selected row: on a project, only what applies to a project; on a worktree without a session, no jump. With the focus in the terminal, its keys. A message (e.g. a failed command) replaces them until the next key. `?` shows the full keymap.
-- **Focus.** `Tab` moves between Projects and Sessions only. `Enter` on a worktree shows its session's current terminal, on a session its current one, on a window that one, and gives the terminal the focus; `n`, `s`, `t`, `e` and restarts show what they start. In the terminal every key goes to its program, but four, which work from anywhere but a dialog and which no program ever sees: **Alt-d** gives the focus back to the dashboard; **Alt-l / Alt-h** show the next / previous session's current terminal, **Alt-j / Alt-k** the next / previous window of the shown session, wrapping around, with the focus in the terminal. The focused pane's border and title are cyan; the others are dim, contents included, keeping their selection and their red errors.
+- **Focus.** `Tab` moves between Projects and Sessions only. `Enter` on a worktree shows its session's current terminal, on a session its current one, on a window that one, and gives the terminal the focus; `n`, `s`, `t`, `e` and restarts show what they start. In the terminal every key goes to its program, but four, which work from anywhere but a dialog and which no program ever sees: **Alt-d** gives the focus back to the dashboard; **Alt-l / Alt-h** show the next / previous session's current terminal, **Alt-j / Alt-k** the next / previous window of the shown session, wrapping around, with the focus in the terminal. The focused pane's border and title are in the theme's accent colour (cyan by default); the others are dim, contents included, keeping their selection and their errors' colour.
 - **When the shown program ends**, a neighbour shows instead: another window of its session (the one after, else before), else the next session's current terminal, else the previous one's; with none left, the pane empties and the focus goes back to Projects.
 - **Keys and the mouse.** Where the dashboard's terminal supports the kitty keyboard protocol, tatou asks for disambiguated keys, so that Shift-Enter is not Enter; it goes to the program as Alt-Enter (`ESC CR`), which agents read as a new line. Pastes go through, bracketed when the program asked. The mouse is left to the dashboard's terminal, so text in the shown terminal is selected as anywhere else.
+- **Colours.** The dashboard's colours come from its theme (§9): the background and text, the accent, the selection, errors, the statuses, the `repo` tag and the hint bar's keys. The default theme, `terminal`, uses the terminal's own palette and background. The shown terminal keeps its program's colours; only the cells it leaves in the default colours take the theme's background and text, so the pane matches the dashboard.
 - No file pane: reading, editing and diffing files is the editor's job (`e`) and the agent's (decided in 2.18, #103).
 - Dialogs open over the panes and take every key while the dashboard keeps refreshing behind them: a form (Tab/↑↓ between fields, ←→ through a choice, Enter to confirm, Esc to cancel; text fields edit like a shell line, Ctrl-a/e/u/k/w included), a choice list, a `[y/N]` confirmation whose default each dialog picks, and a scrollable message for command output. Their keys are fixed and shown in the hint bar.
 
@@ -160,10 +161,11 @@ On a transition to `input` for a terminal that isn't shown: a desktop notificati
 
 ## 9. Configuration
 
-`$XDG_CONFIG_HOME/tatou/config.toml`, defaulting to `~/.config/tatou/config.toml` on every platform, macOS included, holds the settings; each project is a file of its own in `projects/` next to it. tatou writes only these files: `config.toml` once, the commented template when it is missing, and a project file when you add a project. Everything else is yours and left as written. A running dashboard reloads them when they change. A full `config.toml`:
+`$XDG_CONFIG_HOME/tatou/config.toml`, defaulting to `~/.config/tatou/config.toml` on every platform, macOS included, holds the settings; each project is a file of its own in `projects/` next to it, and themes of your own go in `themes/`. tatou writes only these files: `config.toml` once, the commented template when it is missing, and a project file when you add a project. Everything else is yours and left as written. A running dashboard reloads them when they change, the theme files included. A full `config.toml`:
 
 ```toml
 default_agent = "claude"
+theme = "monokai-pro"
 
 [agents]
 claude = "claude"
@@ -192,6 +194,20 @@ base = "main"
 - Project files are `projects/*.toml`, listed by file name; hidden files and other names (editor backups) are ignored. `tatou add` names a file after the repository's folder, with `-2`, `-3`, … when the name is taken; matching always goes by `path`. `[[project]]` in `config.toml` is an error that points here.
 - Unknown keys are errors, reported with the line (`[tmux]` included, since 2.19). `[keys]` action names are checked against the keymap.
 - `[agents]` is merged with the built-in `claude` and `codex`: new names add an agent, a built-in name replaces its command. `default_agent` must name one of them. There is no built-in shell agent: shells are `t`'s job, and `s` and `n` start agents; an agent of your own may still be a shell.
+- `theme` names a theme, by default `terminal`, the terminal's own palette; `monokai-pro` (Monokai Pro's dark palette) is built in too. A theme is a flat TOML file named after it, every key optional:
+  ```toml
+  # themes/monokai-pro.toml
+  background = "#2d2a2e"  # the dashboard's, and the shown terminal's default cells'
+  foreground = "#fcfcfa"  # as background, for text
+  accent     = "#ffd866"  # the focused pane's border and title
+  selection  = "#5b595c"  # the selected row's background; without one, the row is reversed
+  error      = "#ff6188"
+  input      = "#fc9867"  # ⚠ needs input
+  busy       = "#a9dc76"  # ● busy
+  tag        = "#ab9df2"  # the `repo` tag
+  key        = "#78dce8"  # keys in the hint bar
+  ```
+  Colours are `#rrggbb`, ANSI names (`cyan`, `light-red`), indexes `0`–`255` or `reset` (the terminal's default). A key left out takes `terminal`'s value; unknown keys are errors with their line. The built-in themes are files in the repository's `themes/`, compiled in: a theme is contributed by adding one there. Yours go in `themes/` next to `config.toml`, a file with a built-in's name replacing it. An unknown theme, or a theme file in error, is a config error.
 - `path` and `worktree_dir` accept `~/`; any other path must be absolute. A project whose file does not parse, or whose `path` is missing, invalid or another file's, is shown with its error, and the other projects still load.
 - `base` is optional. The new-worktree form's Base follows the selected row: on a worktree, that worktree's branch; on the project (or a detached worktree), `base`, else the remote's default branch as `origin/main` (what `origin/HEAD` points to; tatou never fetches), else the branch checked out in the main worktree.
 
@@ -204,7 +220,7 @@ base = "main"
 - Plain `std::thread` + `mpsc` channels for background work: per connection and per terminal in the daemon, per request and for the shown terminal's stream in the dashboard; no async runtime.
 - External commands go through `exec.rs`; the programs in terminals are the exception, started by the daemon through `portable-pty`.
 - Commands' stdout and stderr are read as UTF-8, lossily: file names that are not valid UTF-8 are not supported. Commands have no timeout; they run on background threads with stdin closed and git/gh prompts disabled, so a stuck command only stalls its own refresh.
-- Modules: `error`, `logging`, `config`, `exec`, `launcher`, `daemon`, `protocol`, `client`, `term`, `platform`, `git`, `gh`, `model`, `refresh`, `actions`, `keys`, `ui`.
+- Modules: `error`, `logging`, `config`, `theme`, `exec`, `launcher`, `daemon`, `protocol`, `client`, `term`, `platform`, `git`, `gh`, `model`, `refresh`, `actions`, `keys`, `ui`.
 - Parsers for git and gh output are pure and tested against captured fixtures; the protocol is tested by round trips, the daemon end to end on a temporary socket.
 - Runtime requirements: `git`. Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`).
 - Versioning: every build is an alpha until a stable v1. The `VERSION` file holds the version as its git tag (`v0.1.0-alpha.N`), mirrored in `Cargo.toml`; each task's pull request bumps `N`. Merging into `main` makes CI tag that version and publish it as a GitHub pre-release with GoReleaser (Rust builder). Tags are never created by hand.

@@ -5,11 +5,12 @@ use std::path::PathBuf;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
 
 use crate::model::{ProjectView, Status, WorktreeView};
+use crate::theme::Theme;
 
 /// A row of the pane. The selection is kept as one, so it follows its project or
 /// worktree across refreshes; a project and its main worktree share a path.
@@ -159,25 +160,26 @@ impl Tree {
         rows
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block, theme: &Theme) {
         let mut items = Vec::new();
         for project in &self.view {
             let collapsed = self.collapsed.contains(&project.path);
-            items.push(project_item(project, collapsed));
+            items.push(project_item(project, collapsed, theme));
             if !collapsed {
-                items.extend(project.worktrees.iter().map(worktree_item));
+                let worktrees = project.worktrees.iter();
+                items.extend(worktrees.map(|worktree| worktree_item(worktree, theme)));
             }
         }
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+            .highlight_style(theme.selected());
         self.list.select(self.selected.as_ref().map(|_| self.index));
         frame.render_stateful_widget(list, area, &mut self.list);
     }
 }
 
 /// The project's name, then its error, if any, a line each.
-fn project_item(project: &ProjectView, collapsed: bool) -> ListItem<'static> {
+fn project_item(project: &ProjectView, collapsed: bool, theme: &Theme) -> ListItem<'static> {
     let arrow = if collapsed { "▸" } else { "▾" };
     let mut lines = vec![Line::from(vec![
         Span::raw(format!("{arrow} ")),
@@ -187,7 +189,7 @@ fn project_item(project: &ProjectView, collapsed: bool) -> ListItem<'static> {
         ),
     ])];
     if let Some(error) = &project.error {
-        let style = Style::new().fg(Color::Red);
+        let style = Style::new().fg(theme.error);
         lines.extend(
             error
                 .lines()
@@ -198,25 +200,25 @@ fn project_item(project: &ProjectView, collapsed: bool) -> ListItem<'static> {
 }
 
 /// The status icon, then the worktree's label.
-fn worktree_item(worktree: &WorktreeView) -> ListItem<'static> {
-    let (icon, style) = status_icon(worktree.status);
+fn worktree_item(worktree: &WorktreeView, theme: &Theme) -> ListItem<'static> {
+    let (icon, style) = status_icon(worktree.status, theme);
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(icon, style),
         Span::raw(format!(" {}", worktree.label())),
     ];
     if worktree.main {
-        spans.push(Span::styled("  repo", Style::new().fg(Color::Cyan)));
+        spans.push(Span::styled("  repo", Style::new().fg(theme.tag)));
     }
     ListItem::new(Line::from(spans))
 }
 
 /// Guessed statuses, from activity without hooks, are dim.
-pub fn status_icon(status: Status) -> (&'static str, Style) {
+pub fn status_icon(status: Status, theme: &Theme) -> (&'static str, Style) {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match status {
-        Status::Busy => ("●", Style::new()),
-        Status::Input => ("⚠", Style::new().fg(Color::Yellow)),
+        Status::Busy => ("●", Style::new().fg(theme.busy)),
+        Status::Input => ("⚠", Style::new().fg(theme.input)),
         Status::Idle => ("○", Style::new()),
         Status::Active => ("●", dim),
         Status::Quiet => ("○", dim),
