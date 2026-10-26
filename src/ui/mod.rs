@@ -61,6 +61,10 @@ const LEFT_WIDTH: u16 = 40;
 /// Two clicks on one cell within this are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+/// How long the pane keeps a size before the shown terminal gets it: one resize
+/// at the end of a drag, not one a frame, each followed by its whole screen.
+const RESIZE_AFTER: Duration = Duration::from_millis(100);
+
 /// Lines the wheel scrolls the shown terminal's history by, a step.
 const WHEEL_LINES: isize = 3;
 
@@ -118,6 +122,7 @@ pub fn run(client: Client) -> Result<()> {
             app.streamed(reply);
         }
         app.apply_all(&received, &happened);
+        app.tick(Instant::now());
         if let Some(text) = app.clipboard.take() {
             terminal::copy(&text).map_err(Error::Terminal)?;
         }
@@ -236,6 +241,12 @@ struct App {
     shown: Option<Shown>,
     /// The shown terminal's size inside its pane, as last drawn: (rows, cols).
     slot: (u16, u16),
+    /// Whether `slot` changed since the last tick.
+    slot_changed: bool,
+    /// When to give the shown terminal the pane's size, once it has held.
+    resize_due: Option<Instant>,
+    /// The size the daemon last gave the shown terminal, and draws its screens at.
+    sent: (u16, u16),
     quit: bool,
 }
 
@@ -269,6 +280,9 @@ impl App {
             stream: None,
             shown: None,
             slot: (24, 80),
+            slot_changed: false,
+            resize_due: None,
+            sent: (24, 80),
             quit: false,
         }
     }
@@ -483,6 +497,22 @@ impl App {
             (true, _) => self.sessions.toggle(),
             (false, _) if double => self.handle(Action::Jump),
             _ => {}
+        }
+    }
+
+    /// Gives the shown terminal the pane's size once it has held for `RESIZE_AFTER`;
+    /// `now` is the time.
+    fn tick(&mut self, now: Instant) {
+        if std::mem::take(&mut self.slot_changed) {
+            self.resize_due = Some(now + RESIZE_AFTER);
+        }
+        if self.resize_due.is_some_and(|due| now >= due) {
+            self.resize_due = None;
+            if self.shown.is_some() && self.slot != self.sent {
+                let (rows, cols) = self.slot;
+                self.send(Request::Resize { rows, cols });
+                self.sent = self.slot;
+            }
         }
     }
 
@@ -1165,6 +1195,8 @@ impl App {
             rows,
             cols,
         });
+        self.sent = self.slot;
+        self.resize_due = None;
         self.shown = Some(Shown {
             terminal: terminal.to_string(),
             screen: vt100::Parser::new(rows, cols, SCROLLBACK),
@@ -1191,8 +1223,9 @@ impl App {
     /// What the daemon streams for the shown terminal.
     fn streamed(&mut self, reply: Reply) {
         match (reply, &mut self.shown) {
+            // On attach, and after each resize: the daemon's screen, at its size
             (Reply::Screen(bytes), Some(shown)) => {
-                let (rows, cols) = self.slot;
+                let (rows, cols) = self.sent;
                 shown.screen = vt100::Parser::new(rows, cols, SCROLLBACK);
                 shown.screen.process(&bytes);
                 self.selection = None;
@@ -1298,15 +1331,10 @@ impl App {
         self.areas.terminal = area;
         self.areas.terminal_inner = inner;
         let size = (inner.height.max(1), inner.width.max(1));
+        // The daemon resizes it once the size holds, then sends its screen anew
         if size != self.slot {
             self.slot = size;
-            if let Some(shown) = &mut self.shown {
-                shown.screen.screen_mut().set_size(size.0, size.1);
-                self.send(Request::Resize {
-                    rows: size.0,
-                    cols: size.1,
-                });
-            }
+            self.slot_changed = true;
         }
         match &self.shown {
             Some(shown) => {
@@ -3405,6 +3433,45 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(app.scrolled(), (0, 83));
         assert_eq!(inputs(&requests), [b"x".to_vec()]);
         assert!(hint_line_of(&mut app).contains("other keys go to the terminal"));
+    }
+
+    #[test]
+    fn a_resize_waits_for_the_size_to_hold_then_for_the_daemons_screen() {
+        let (mut app, requests) = with_a_long_shell();
+        let resizes = || -> Vec<(u16, u16)> {
+            let requests = requests.try_iter();
+            requests
+                .filter_map(|request| match request {
+                    Request::Resize { rows, cols } => Some((rows, cols)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let now = Instant::now();
+        let later = |ms| now + Duration::from_millis(ms);
+        // Drawn at 100×20: the pane is 17×58 inside
+        app.tick(now);
+        app.tick(later(50));
+        assert_eq!(resizes(), [], "not held long enough");
+        screen(&mut app, 90, 20);
+        app.tick(later(60));
+        app.tick(later(150));
+        assert_eq!(resizes(), [], "still being dragged");
+        app.tick(later(160));
+        assert_eq!(resizes(), [(17, 48)], "once, at the last size");
+        let shown = app.shown.as_ref().unwrap();
+        assert_eq!(shown.screen.screen().size(), (18, 58), "left to the daemon");
+
+        app.streamed(Reply::Screen(b"redrawn".to_vec()));
+        let shown = app.shown.as_ref().unwrap();
+        assert_eq!(
+            shown.screen.screen().size(),
+            (17, 48),
+            "the daemon's, at its size"
+        );
+        assert_eq!(shown.screen.screen().contents(), "redrawn");
+        app.tick(later(500));
+        assert_eq!(resizes(), [], "nothing more");
     }
 
     #[test]

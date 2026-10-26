@@ -360,6 +360,49 @@ mod tests {
         assert_eq!(plain, Some(vt100::Color::Default), "and none past them");
     }
 
+    /// The next screen in `received`, drawn at `rows` × 40.
+    fn next_screen(received: &Receiver<Reply>, rows: u16) -> vt100::Parser {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if let Ok(Reply::Screen(bytes)) = received.recv_timeout(Duration::from_millis(100)) {
+                let mut parser = vt100::Parser::new(rows, 40, daemon::SCROLLBACK);
+                parser.process(&bytes);
+                return parser;
+            }
+        }
+        panic!("no screen");
+    }
+
+    #[test]
+    fn a_resize_keeps_the_cursors_line_and_redraws_every_watcher() {
+        let (dir, client) = daemon();
+        let lines = "i=1; while [ $i -le 30 ]; do echo line $i; i=$((i + 1)); done; echo done";
+        let (stream, terminal) = printing(&client, dir.path(), lines, "done");
+        let (other, received_other) = client.stream().unwrap();
+        other.send(Request::Attach {
+            terminal: terminal.clone(),
+            rows: 10,
+            cols: 40,
+        });
+        next_screen(&received_other, 10);
+
+        stream.send(Request::Resize { rows: 5, cols: 40 });
+        let mut parser = next_screen(&received_other, 5);
+        let screen = parser.screen_mut();
+        let shown = screen.contents_between(0, 0, 4, 40);
+        assert_eq!(
+            shown, "line 28\nline 29\nline 30\ndone\n",
+            "the bottom kept"
+        );
+        assert_eq!(screen.cursor_position(), (4, 0));
+        screen.set_scrollback(usize::MAX);
+        assert_eq!(
+            screen.contents_between(1, 0, 1, 40),
+            "line 1",
+            "the rest in its history"
+        );
+    }
+
     #[test]
     fn the_alternate_screen_comes_without_history() {
         let (dir, client) = daemon();

@@ -706,10 +706,12 @@ Depends on: 6.9
 - Decided: the shown terminal's history is browsable (DESIGN §12's open question). The daemon's screen reply carries it on attach, for the main screen: each line that scrolled off, with its colours (`rows_formatted`, a screen at a time through `set_scrollback`), then line ends to scroll them into the dashboard's history, then `state_formatted`; no new frame. Both keep 10 000 lines (`daemon::SCROLLBACK`). Wrapped lines come back as separate lines.
 - The wheel, on the main screen, when the program does not read the mouse: 3 lines. Shift-PgUp/PgDn: a page (the pane's height less one), from anywhere but a dialog, whatever the program; the program's on the alternate screen.
 - Any key, paste or mouse report for the program goes back to the bottom first; output keeps the view (vt100 anchors it). The title reads `· ↑ 120 of 4210`, the cursor is hidden, the hint bar says `any key: back to the bottom`. A selection works on the view and goes when it moves.
+- Resizing, fixed with it: the dashboard no longer resizes its own screen; it sends one resize once the pane's size has held 100 ms, and the daemon, having resized, sends every watcher its history and screen anew, in order with its output. A screen losing rows scrolls up first, keeping its cursor's line, the lines above going to its history (vt100 alone dropped the bottom ones). No reflow: narrowing clips lines already printed.
 
 **Done when**
 - Daemon end to end: 100 coloured lines in a 10-row terminal arrive whole on attach; none on the alternate screen.
-- `TestBackend` tests: wheel, Shift-PgUp/PgDn from the projects and never sent, the title and its start, a key back to the bottom and sent, output keeping the view, the alternate screen, a program reading the mouse, a selection in the scrolled view.
+- Daemon end to end: a resize keeps the cursor's line, the rest in the history, and redraws every watcher.
+- `TestBackend` tests: wheel, Shift-PgUp/PgDn from the projects and never sent, the title and its start, a key back to the bottom and sent, output keeping the view, the alternate screen, a program reading the mouse, a selection in the scrolled view; a resize sent once the size holds, the screen left to the daemon's.
 - Manual check documented in the PR: `seq 1 500` in a shell, browsed back to `1`, kept after switching away and back.
 
 ---

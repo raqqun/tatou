@@ -308,8 +308,10 @@ impl Daemon {
             }
             Request::Resize { rows, cols } => {
                 let mut state = self.lock();
-                if let Some(terminal) = attached.and_then(|id| state.terminals.get_mut(&id)) {
-                    resize(terminal, rows, cols);
+                if let Some(terminal) = attached.and_then(|id| state.terminals.get_mut(&id))
+                    && resize(terminal, rows, cols)
+                {
+                    redraw_watchers(terminal);
                 }
                 return None;
             }
@@ -490,9 +492,10 @@ impl Daemon {
         let Some(terminal) = state.terminals.get_mut(&id) else {
             return Reply::Error(format!("no terminal %{id}"));
         };
-        resize(terminal, rows, cols);
-        let mut screen = history(terminal.screen.screen_mut());
-        screen.extend(terminal.screen.screen().state_formatted());
+        if resize(terminal, rows, cols) {
+            redraw_watchers(terminal);
+        }
+        let screen = screen_now(terminal);
         terminal.watchers.push((client, replies.clone()));
         let session = terminal.session;
         if let Some(session) = state.sessions.iter_mut().find(|s| s.id == session) {
@@ -535,9 +538,22 @@ impl Daemon {
     }
 }
 
-fn resize(terminal: &mut Terminal, rows: u16, cols: u16) {
-    if (rows, cols) == terminal.screen.screen().size() || rows == 0 || cols == 0 {
-        return;
+/// Gives `terminal` a new size, its screen and its program's; false when it has
+/// it already. A screen losing rows keeps its cursor's line in sight, as a
+/// terminal does, the lines above going to its history: vt100 alone would drop
+/// the bottom ones, the latest output and the prompt.
+fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
+    let screen = terminal.screen.screen();
+    if (rows, cols) == screen.size() || rows == 0 || cols == 0 {
+        return false;
+    }
+    let (row, _) = screen.cursor_position();
+    if !screen.alternate_screen() && row >= rows {
+        // Scrolled up, the cursor with its line
+        let up = row - rows + 1;
+        terminal
+            .screen
+            .process(format!("\x1b[{up}S\x1b[{up}A").as_bytes());
     }
     terminal.screen.screen_mut().set_size(rows, cols);
     let size = PtySize {
@@ -549,6 +565,28 @@ fn resize(terminal: &mut Terminal, rows: u16, cols: u16) {
     if let Err(err) = terminal.master.resize(size) {
         tracing::warn!(%err, "cannot resize a terminal");
     }
+    true
+}
+
+/// What a dashboard draws `terminal` from: its history, then its screen.
+fn screen_now(terminal: &mut Terminal) -> Vec<u8> {
+    let mut screen = history(terminal.screen.screen_mut());
+    screen.extend(terminal.screen.screen().state_formatted());
+    screen
+}
+
+/// Sends `terminal`'s screen anew to the dashboards showing it, after a resize: a
+/// screen they resized themselves would differ from the daemon's, which output
+/// printed for the old size reaches after. In order with its output, sent under
+/// the same lock.
+fn redraw_watchers(terminal: &mut Terminal) {
+    if terminal.watchers.is_empty() {
+        return;
+    }
+    let screen = screen_now(terminal);
+    terminal
+        .watchers
+        .retain(|(_, watcher)| watcher.send(Reply::Screen(screen.clone())).is_ok());
 }
 
 /// `3` from `%3` (with `prefix` `%`).
