@@ -368,22 +368,7 @@ Depends on: 2.1, 2.2, 2.3
 
 ### 2.8 Popup mode (#25)
 
-**On hold** (label `on hold` on #25): not needed now, and to be studied in depth before it is built. Until then `tatou --popup` says it is not implemented, and the `popup` key in `[tmux]` binds nothing.
-
-Depends on: 1.16, 1.6
-
-- `tatou --popup`: same UI; jumping or launching an action exits, which closes the popup.
-- Generated `tmux.conf` binds the popup key: `bind-key -n <popup> display-popup -E -w 90% -h 80% '<exe> --popup'`.
-- Verify which client `switch-client` targets from inside a popup; if ambiguous, pass `#{client_name}` from the binding as an argument.
-- Verify how actions that open their own popup (custom actions such as `display-popup … lazygit`, 6.2) behave when started from a popup (tmux does not nest popups) and document the chosen approach.
-- Only the dashboard instance will send notifications (3.4); the popup must not.
-
-**Done when**
-- Unit test on the generated binding; manual check from a worktree session documented in the PR.
-
-### Post-milestone fixes
-
-Found while using M2; each is an issue on the M2 milestone.
+**Dropped** in 2.19 (#109): a tmux popup, and tatou has no tmux any more. Closed as not planned.
 
 ### 2.9 Sessions pane below Projects (#85)
 
@@ -499,21 +484,38 @@ Depends on: 2.6
 - Unit test on the editor task for a worktree and for a project; integration tests on a unique socket: the editor opens in the worktree's session, or in a new session without an agent pane.
 - Manual check documented in the PR: `e` on a worktree opens `$EDITOR`, quitting it lands on the dashboard.
 
+### 2.19 Native terminals in a daemon, without tmux (#109)
+
+Depends on: 2.6, 2.18
+
+- Decided: no tmux. Tried as a spike (#108) and kept. tatou runs the agents', shells' and editors' terminals itself and shows the selected one in a pane next to Projects and Sessions; DESIGN's "no terminal-in-terminal" and "tmux required" give way to "one terminal at a time, and no multiplexer" (DESIGN §1, §8.3).
+- `tatou daemon` (`daemon.rs`): pseudo-terminals through `portable-pty`, each with a `vt100` screen (10 000 lines of scrollback) kept from its output; sessions per worktree (`<repo>-<name>`, `-2` … when taken) with their terminals as windows; a Unix socket at `$XDG_STATE_HOME/tatou/tatou.sock`, one daemon per user. `tatou` starts it on demand, in a process group of its own and without the terminal; it ends 10 s after it has no terminal and no dashboard, or with `tatou stop`. Programs run as `/bin/sh -c <command>`, or `"$SHELL" -l`, with `TATOU=1`, `TERM=xterm-256color`, without `TMUX`.
+- `protocol.rs`: length-prefixed binary frames, by hand; list, spawn, kill, kill-session, attach, input, resize, stop; replies ok, error, sessions, spawned, screen, output, exited. `client.rs`: a connection per request, and a long-lived one for the shown terminal, which keeps the daemon from ending.
+- The dashboard runs where `tatou` is typed: Projects and Sessions on the left (40 %), the shown terminal on the right, drawn with `tui-term` from a `vt100` screen fed with the daemon's screen (`state_formatted`, input modes included) then its output; the pane's size is the terminal's. `Enter`, `n`, `s`, `t`, `e` and restarts show a terminal and give it the focus; there every key is encoded as an xterm sends it (`term.rs`) and sent to the program, but Alt-d (the focus back), Alt-l/Alt-h (next/previous session) and Alt-j/Alt-k (next/previous window of the shown session), which work from anywhere and give the focus to the terminal. `Tab` between Projects and Sessions only. When the shown program ends, a neighbour shows: another window of its session, else the next session, else the previous one. Bracketed paste; the kitty keyboard protocol's disambiguation where the terminal supports it, Shift-Enter sent as `ESC CR`; the mouse left to the terminal. `q` quits the dashboard only.
+- Status from output activity, which the daemon sees; hooks wait for 3.1.
+- Removed: `tmux.rs`, the generated `tmux.conf`, the launcher's version check, attach and nesting, `[tmux]` and `[keys.tmux]`, `tatou status`, `tatou hooks`, `--dashboard`, `--popup`, `ps` naming, tmux in CI. 2.8 (#25), 3.5 (#30) and 6.3 (#43) closed as not planned; 3.1, 3.2, 3.4 and 6.2 rewritten for the daemon; #107, the tmux central dashboard spike, closed.
+
+**Done when**
+- Protocol round trips; key encoding; the daemon end to end on a temporary socket (spawn, attach, input, a second attach gets the screen, an exit ends the terminal and its session); actions against an in-process daemon; the CLI (`tatou daemon` listens until `tatou stop`, a second refuses; the launcher needs git and stops on an invalid config); `TestBackend` tests (the terminal pane, Enter shows and focuses, Tab, the session and window keys, a neighbour after an exit).
+- Manual check documented in the PR: Claude Code in the pane; a shell kept across quitting and relaunching the dashboard; vi full screen; `tatou stop`.
+
 ---
 
 ## M3 — Status
 
-Hook-based agent status, `tatou hooks`, notifications, `tatou status` in the tmux status line.
+Hook-based agent status reported to the daemon, `tatou hooks`, notifications.
 
 ### 3.1 `tatou hooks` (#26)
 
 Depends on: 1.10
 
-- Prints, for the user to paste (tatou never edits agent configs): the Claude Code hooks JSON from DESIGN §8.4, and the generic one-liner `[ -n "$TATOU" ] && tmux set-option -q @tatou_status <state>; true` for other agents, with notes for Codex and Gemini CLI where their hook mechanism is known.
+- `tatou mark busy|input|idle`: tells the daemon, over its socket, that the terminal it runs in (`$TATOU_TERMINAL`, which the daemon sets for each program, with `$TATOU_SOCKET`) is in that state; a no-op, quiet, without them. The daemon keeps the state with the terminal and lists it; the model shows it before activity.
+- Prints, for the user to paste (tatou never edits agent configs): the Claude Code hooks JSON from DESIGN §8.4, and the generic one-liner `[ -n "$TATOU" ] && tatou mark <state>; true` for other agents, with notes for Codex and Gemini CLI where their hook mechanism is known.
 - Check whether `input` needs clearing after the user answers a permission prompt (e.g. a `PreToolUse`/`PostToolUse` hook setting `busy`), and include it if so.
 
 **Done when**
 - A test checks that the Claude section is valid JSON (`serde_json` as a dev-dependency; it becomes a normal one in 5.1). Snippets are POSIX `sh`.
+- Daemon test: a program running `tatou mark input` in its terminal shows as input in the list.
 
 ### 3.2 Verify hook-driven status end to end (#27)
 
@@ -539,22 +541,15 @@ Depends on: 1.4
 
 Depends on: 3.3, 1.13
 
-- The dashboard compares statuses between refreshes (in memory only) and, on a transition to `input`, notifies unless a client is currently viewing that session (`list-clients -F '#{client_session}'`).
-- Also `tmux display-message` with the worktree name.
-- Popup instances never notify.
+- The dashboard compares statuses between refreshes (in memory only) and, on a transition to `input`, notifies unless that terminal is the one it shows.
+- Also a message in the hint bar with the worktree's name.
 
 **Done when**
 - Unit test for transition detection (input from busy/idle/none, no repeat while staying in input, suppressed when viewed).
 
 ### 3.5 `tatou status` and the tmux status line (#30)
 
-Depends on: 1.8, 1.12
-
-- `tatou status` queries tmux once and prints a short summary such as `⚠2 ●3` (empty when nothing to report). It must be fast and must not run git or gh.
-- Generated `tmux.conf` sets `status-right` to `#(<exe> status)` and a short `status-interval`.
-
-**Done when**
-- Unit tests for the summary formatting; generated-conf test includes the status line.
+**Dropped** in 2.19 (#109): it fed tmux's status line, and tatou has no tmux any more; the dashboard shows the statuses. Closed as not planned.
 
 ---
 
@@ -603,7 +598,7 @@ Depends on: 5.2, 1.15
 
 ## M6 — Keys
 
-Configurable keymap, custom tmux-command actions, help overlay.
+Configurable keymap, custom shell-command actions, help overlay, mouse support.
 
 ### 6.1 Configurable keymap (#41)
 
@@ -619,20 +614,15 @@ Depends on: 1.14, 1.5
 
 Depends on: 6.1
 
-- Template substitution of `{path}`, `{session}`, `{pane}` with shell-quoted values, then `run_sh` of `tmux -L tatou -f <conf> <template>`.
-- An action needing a value that is not available (no session, no agent pane) is disabled with a message.
+- Template substitution of `{path}` with a shell-quoted value; the command runs in a new terminal of the worktree's session (a new session when it has none), shown, as `t` does.
+- On a project row, its main worktree.
 
 **Done when**
 - Unit tests for substitution and quoting, including values containing quotes and `{`.
 
 ### 6.3 Extra tmux bindings (`[keys.tmux]`) (#43)
 
-Depends on: 1.6, 6.1
-
-- Write each entry as `bind-key -n <key> <command>` into the generated `tmux.conf`, before the local-conf line.
-
-**Done when**
-- Generated-conf test; the example from DESIGN §9 produces a config tmux accepts.
+**Dropped** in 2.19 (#109): bindings for tmux, which tatou no longer runs. Closed as not planned.
 
 ### 6.4 Help overlay and hint bar from the keymap (#44)
 
@@ -672,9 +662,9 @@ Documentation, packaging channels and the first complete alpha. Binaries and Git
 
 ### 7.1 User documentation (#45)
 
-Depends on: 6.4, 5.3, 3.5
+Depends on: 6.4, 5.3, 3.4
 
-- README: what and why, requirements (git, tmux ≥ 3.2, optional gh), install, quick start, full config reference, hooks setup (`tatou hooks`), keys, popup mode, `tmux.local.conf`, uninstall (nothing to clean except `~/.config/tatou` and `~/.local/state/tatou`).
+- README: what and why, requirements (git, optional gh), install, quick start, full config reference, hooks setup (`tatou hooks`), keys (the dashboard's, and the terminal's Alt keys), the daemon and `tatou stop`, uninstall (nothing to clean except `~/.config/tatou` and `~/.local/state/tatou`).
 - A short screenshot or recording.
 
 **Done when**
@@ -703,7 +693,7 @@ Depends on: 1.2, 7.2
 
 Depends on: 7.3
 
-- `nfpms` in `.goreleaser.yaml`: `deb` and `rpm`, depending on `git` and `tmux`, recommending `gh`.
+- `nfpms` in `.goreleaser.yaml`: `deb` and `rpm`, depending on `git`, recommending `gh`.
 
 **Done when**
 - Packages from an alpha release install and run on a recent Debian/Ubuntu and Fedora container.
@@ -712,7 +702,7 @@ Depends on: 7.3
 
 Depends on: 7.3
 
-- A `raqqun/homebrew-tatou` tap repository, filled by GoReleaser (`homebrew_casks`, or `brews` if casks do not fit a CLI binary), with `tmux` and `git` as dependencies; a repository secret with a token that can push to the tap.
+- A `raqqun/homebrew-tatou` tap repository, filled by GoReleaser (`homebrew_casks`, or `brews` if casks do not fit a CLI binary), with `git` as a dependency; a repository secret with a token that can push to the tap.
 - **Decision to confirm:** GoReleaser skips publishing pre-releases to taps by default (`skip_upload: auto`); every build is an alpha until v1, so either publish alphas to the tap or leave the tap empty until v1.
 
 **Done when**
@@ -722,7 +712,7 @@ Depends on: 7.3
 
 Depends on: 7.3
 
-- `aurs` in `.goreleaser.yaml` publishing `tatou-bin` from the release archives, `depends=(git tmux)`, `optdepends=(github-cli)`; an AUR SSH key as a repository secret.
+- `aurs` in `.goreleaser.yaml` publishing `tatou-bin` from the release archives, `depends=(git)`, `optdepends=(github-cli)`; an AUR SSH key as a repository secret.
 - Same pre-release decision as 7.5.
 
 **Done when**
