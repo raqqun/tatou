@@ -1330,7 +1330,8 @@ impl App {
         let inner = block.inner(area);
         self.areas.terminal = area;
         self.areas.terminal_inner = inner;
-        let size = (inner.height.max(1), inner.width.max(1));
+        let (rows, cols) = crate::daemon::MIN_SIZE;
+        let size = (inner.height.max(rows), inner.width.max(cols));
         // The daemon resizes it once the size holds, then sends its screen anew
         if size != self.slot {
             self.slot = size;

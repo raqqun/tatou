@@ -406,6 +406,27 @@ mod tests {
     }
 
     #[test]
+    fn down_to_two_rows_and_back_loses_nothing() {
+        let text: String = (1..=25)
+            .map(|n| format!("line {n}: the quick brown fox jumps over the lazy dog\r\n"))
+            .collect();
+        let mut screen = printed(30, 140, &format!("$ for\r\n{text}$ "));
+        let before = all_lines(&mut screen);
+        for (rows, cols) in [
+            (12, 80),
+            (4, 40),
+            (2, 20),
+            (2, 10),
+            (2, 2),
+            (2, 140),
+            (30, 140),
+        ] {
+            screen = resized(&mut screen, rows, cols);
+        }
+        assert_eq!(all_lines(&mut screen), before);
+    }
+
+    #[test]
     fn a_cleared_screen_starts_at_its_top() {
         let mut screen = printed(6, 20, "old\r\n\x1b[2J\x1b[H$ ");
         let new = resized(&mut screen, 6, 10);

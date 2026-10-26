@@ -10,6 +10,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
@@ -29,6 +30,11 @@ use crate::reflow;
 /// the one it shows, which gets them all on attach.
 pub const SCROLLBACK: usize = 10_000;
 
+/// The smallest a terminal gets, (rows, columns): `vt100` panics wrapping text on
+/// a single row, and a wide character on a single column. A pane smaller than
+/// this shows the top left of a screen this size.
+pub const MIN_SIZE: (u16, u16) = (2, 2);
+
 /// How long a daemon with nothing to do waits before ending, in case a dashboard
 /// connects meanwhile: one just starting, between its first requests.
 const ALONE_FOR: Duration = Duration::from_secs(10);
@@ -40,6 +46,11 @@ pub fn socket_path() -> Result<PathBuf> {
 
 /// `tatou daemon`.
 pub fn run() -> ExitCode {
+    // Without a terminal, a panic's message would go nowhere
+    std::panic::set_hook(Box::new(|info| {
+        let thread = thread::current().name().map(String::from);
+        tracing::error!(thread = ?thread, %info, "the daemon panicked");
+    }));
     let served = socket_path()
         .map_err(|err| err.to_string())
         .and_then(|path| serve(&path, true).map_err(|err| format!("{}: {err}", path.display())));
@@ -442,7 +453,7 @@ impl Daemon {
             let Some(terminal) = state.terminals.get_mut(&id) else {
                 break;
             };
-            terminal.screen.process(&buffer[..n]);
+            feed(&mut terminal.screen, &buffer[..n], id);
             terminal.activity = unix_now();
             let output = &buffer[..n];
             terminal
@@ -543,10 +554,18 @@ impl Daemon {
 /// it already. Its screen is reflowed, as a terminal's, lines wrapping again at
 /// the new width with nothing lost, and its cursor's line kept in sight.
 fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
-    if (rows, cols) == terminal.screen.screen().size() || rows == 0 || cols == 0 {
+    let size = terminal.screen.screen().size();
+    if (rows, cols) == size || rows < MIN_SIZE.0 || cols < MIN_SIZE.1 {
         return false;
     }
-    terminal.screen = reflow::reflow(&mut terminal.screen, rows, cols, SCROLLBACK);
+    let screen = &mut terminal.screen;
+    let reflowed = panic::catch_unwind(AssertUnwindSafe(|| {
+        reflow::reflow(screen, rows, cols, SCROLLBACK)
+    }));
+    terminal.screen = reflowed.unwrap_or_else(|_| {
+        tracing::error!(rows, cols, "cannot reflow a screen; starting it afresh");
+        vt100::Parser::new(rows, cols, SCROLLBACK)
+    });
     let size = PtySize {
         rows,
         cols,
@@ -557,6 +576,20 @@ fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
         tracing::warn!(%err, "cannot resize a terminal");
     }
     true
+}
+
+/// Feeds `bytes`, terminal `id`'s output, to its screen. Should `vt100` panic on
+/// them, the screen starts afresh at its size, which the program draws again: its
+/// output still has to be read, or the program would block on it for good.
+fn feed(screen: &mut vt100::Parser, bytes: &[u8], id: u32) {
+    if panic::catch_unwind(AssertUnwindSafe(|| screen.process(bytes))).is_err() {
+        tracing::error!(
+            id,
+            "a terminal's screen failed on its output; starting it afresh"
+        );
+        let (rows, cols) = screen.screen().size();
+        *screen = vt100::Parser::new(rows, cols, SCROLLBACK);
+    }
 }
 
 /// What a dashboard draws `terminal` from: its main screen's history and
@@ -677,6 +710,31 @@ mod tests {
         assert_eq!(program_name(Some("claude --resume")), "claude");
         assert_eq!(program_name(Some("/usr/local/bin/codex")), "codex");
         assert_eq!(program_name(Some("sleep 1000")), "sleep");
+    }
+
+    #[test]
+    fn a_screen_that_panics_on_output_starts_afresh() {
+        // A single row: vt100 cannot wrap text there
+        let mut screen = vt100::Parser::new(1, 1, SCROLLBACK);
+        feed(&mut screen, b"abc", 1);
+        assert_eq!(screen.screen().size(), (1, 1));
+        feed(&mut screen, b"x", 1);
+        assert_eq!(screen.screen().contents(), "x", "and goes on");
+    }
+
+    #[test]
+    fn the_smallest_screen_takes_any_output_and_reflows() {
+        let mut screen = vt100::Parser::new(24, 80, SCROLLBACK);
+        screen.process("日本語 the quick brown fox\r\n".repeat(30).as_bytes());
+        let (rows, cols) = MIN_SIZE;
+        let mut small = reflow::reflow(&mut screen, rows, cols, SCROLLBACK);
+        small.process(
+            "日本 more output that wraps\r\n\x1b[2J\x1b[H"
+                .repeat(5)
+                .as_bytes(),
+        );
+        let back = reflow::reflow(&mut small, 24, 80, SCROLLBACK);
+        assert_eq!(back.screen().size(), (24, 80));
     }
 
     #[test]
