@@ -1,13 +1,13 @@
 # tatou
 
-A minimal terminal UI for running coding agents (Claude Code, Codex, Gemini CLI, …) in parallel across several repositories, one git worktree per task. tatou lists your projects and their worktrees with each agent's status, and jumps to an agent's tmux session with one key. It never shows agent output itself: the agents run in plain tmux sessions on tatou's own tmux server, and everything tatou creates works without it. See [DESIGN.md](DESIGN.md) for the full picture.
+A minimal terminal UI for running coding agents (Claude Code, Codex, Gemini CLI, …) in parallel across several repositories, one git worktree per task. tatou lists your projects and their worktrees with each agent's status, shows the agent you pick in a pane beside them, and keeps every agent running in a small daemon of its own when you quit. See [DESIGN.md](DESIGN.md) for the full picture.
 
-**Status: early alpha.** Today tatou lists projects, worktrees and sessions, and jumps between them. Creating worktrees and starting agents from tatou come next ([MILESTONE.md](MILESTONE.md)); until then, start them by hand as shown below.
+**Status: early alpha.** tatou lists projects, worktrees and sessions, creates and removes worktrees, starts agents, shells and your editor in them, and shows them in the dashboard. Agent hooks, notifications and PR badges come next ([MILESTONE.md](MILESTONE.md)).
 
 ## Requirements
 
 - Linux, or macOS on Apple silicon
-- [git](https://git-scm.com) and [tmux](https://github.com/tmux/tmux) 3.2 or later
+- [git](https://git-scm.com)
 - To build it: [Rust](https://rustup.rs) 1.98 or later
 
 ## Install
@@ -42,7 +42,7 @@ Open a terminal tab of its own and type:
 tatou
 ```
 
-This starts tatou's tmux server and attaches to its dashboard. Running `tatou` again from another terminal re-attaches. Started from inside your own tmux, it warns first: tatou's tmux would run nested inside yours.
+The dashboard opens in that terminal: Projects and Sessions on the left, the shown agent, shell or editor on the right. tatou starts its daemon the first time; it keeps every agent running when you quit the dashboard, and `tatou` shows them again, from this terminal or another.
 
 In the dashboard:
 
@@ -50,33 +50,35 @@ In the dashboard:
 |---|---|
 | `j` / `k`, `↓` / `↑` | move |
 | `h` / `l`, `←` / `→` | fold / unfold a project |
-| `Enter` | jump to the selected worktree's session (on a project: fold / unfold) |
-| `e` | open `$EDITOR` in the selected worktree (on a project: its repository), in a window of its session |
-| `q` | leave tatou: back to your terminal; agents and shells keep running, `tatou` comes back to them |
+| `Tab` | Projects ↔ Sessions |
+| `Enter` | show the selected worktree's agent, or session, or window, on the right (on a project: fold / unfold) |
+| `n` | new worktree, with an agent in it |
+| `s` | start the agent in the selected worktree, or restart it |
+| `t` | open a shell in the selected worktree |
+| `e` | open `$EDITOR` in the selected worktree (on a project: its repository) |
+| `d` | in Projects, remove the selected worktree (its branch stays); in Sessions, end the selected window, or session with all its windows |
+| `q` | quit the dashboard; agents, shells and editors keep running |
 
-Each worktree shows its agent's status: `●` busy, `⚠` needs input, `○` idle, `·` no session. Without the agent hooks from [DESIGN.md §8.4](DESIGN.md#84-agent-status), a dim `●` means output in the last 10 seconds and a dim `○` none.
+What you open shows on the right and takes the keys: everything you type goes to it, but these, which work from anywhere:
 
-**Back to the dashboard:** `Alt-d` from any session on tatou's server (it starts the dashboard again if it was closed), or leave a window's agent, shell or editor that tatou started: when it exits, you are back on the dashboard. On macOS, the terminal must send Option as Meta (Terminal: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*). The key can be changed with `back` under `[tmux]` in `config.toml`; run `tatou` again to apply it.
+| Key | Does |
+|---|---|
+| `Alt-d` | back to the dashboard |
+| `Alt-l` / `Alt-h` | next / previous session |
+| `Alt-j` / `Alt-k` | next / previous window of the shown session |
 
-## Start an agent by hand (for now)
+On macOS, the terminal must send Option as Meta for these (Terminal: *Settings → Profiles → Keyboard → Use Option as Meta key*; iTerm2: *Profiles → Keys → Left Option key → Esc+*). Shift-Enter reaches agents as a new line in terminals that support the kitty keyboard protocol (kitty, Ghostty, WezTerm, iTerm2); elsewhere, use Alt-Enter. When the shown program ends, the next window or session shows. Text is selected with the mouse as in any terminal.
 
-Until tatou starts agents itself, create a worktree and start a session in it on tatou's server, from any terminal while tatou runs, then jump to it with `Enter`:
-
-```sh
-git -C ~/code/my-app worktree add -b fix-login ../my-app.worktrees/fix-login
-tmux -L tatou new-session -d -s my-app-fix-login -c ~/code/my-app.worktrees/fix-login -e TATOU=1 claude
-```
-
-tatou matches sessions to worktrees by their directory, so the session's name is up to you. `TATOU=1` lets the agent hooks report its status; without it they do nothing.
+Each worktree shows its agent's status: a dim `●` means output in the last 10 seconds, a dim `○` none, `·` no session. Busy, needs-input and idle (`●`, `⚠`, `○`) come with the agent hooks ([DESIGN.md §8.4](DESIGN.md#84-agent-status)).
 
 ## Troubleshooting
 
-- tatou logs to `~/.local/state/tatou/tatou.log`; `TATOU_LOG=debug tatou` logs every command it runs.
-- `tmux -L tatou attach` reaches tatou's sessions without tatou; `tmux -L tatou kill-server` stops them all.
+- tatou and its daemon log to `~/.local/state/tatou/tatou.log`; `TATOU_LOG=debug tatou` logs every command it runs.
+- `tatou stop` ends every agent, shell and editor, and the daemon.
 
 ## Uninstall
 
-`cargo uninstall tatou`, then remove `~/.config/tatou` and `~/.local/state/tatou`. Your repositories and worktrees are left as they are.
+`tatou stop`, `cargo uninstall tatou`, then remove `~/.config/tatou` and `~/.local/state/tatou`. Your repositories and worktrees are left as they are.
 
 ## License
 

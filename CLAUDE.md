@@ -4,20 +4,21 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 
-**tatou**: a minimal terminal UI (ratatui) for running coding agents in parallel across several repositories, one git worktree per task. It lists projects and worktrees with agent status, opens agents, shells and `$EDITOR` in their tmux sessions, and delegates everything else to `tmux`, `git`, `gh` and `$EDITOR`. It never renders agent output, and it has no state of its own beyond its config files (`config.toml` and one small file per project).
+**tatou**: a minimal terminal UI (ratatui) for running coding agents in parallel across several repositories, one git worktree per task. It lists projects and worktrees with agent status, shows the selected agent's, shell's or editor's terminal in a pane beside them, and keeps every terminal running in a small daemon of its own, so that agents outlive the dashboard. It delegates everything else to `git`, `gh` and `$EDITOR`, and it has no state of its own beyond its config files (`config.toml` and one small file per project) and what its daemon holds in memory.
 
 Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
-Read `DESIGN.md` before starting any feature. Its philosophy section is the deciding rule for every design question: **reuse existing tools, keep no state, never get in the user's way, no terminal-in-terminal, stay small.** If a change conflicts with it, stop and ask.
+Read `DESIGN.md` before starting any feature. Its philosophy section is the deciding rule for every design question: **reuse existing tools, keep no state, never get in the user's way, one terminal at a time and no multiplexer, stay small.** If a change conflicts with it, stop and ask.
 
 ## Tech stack
 
 - Rust (stable), single crate
 - `ratatui` + `crossterm` for the UI
+- `portable-pty` for pseudo-terminals, `tui-term` (and its `vt100`) to keep and draw their screens
 - `serde` + `toml` for config; paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), macOS included, honouring `$XDG_*` when set
 - `thiserror` for errors, `tracing` + `tracing-subscriber` (`fmt` only) for logs (to `$XDG_STATE_HOME/tatou/tatou.log`, rotated at startup past 1 MiB, never to the terminal)
 - `std::thread` + `mpsc` for background work; no async runtime
-- External tools, called as commands: `git`, `tmux` ≥ 3.2 (required), `gh` (optional), `ps` (POSIX, to name what runs in each pane); notifications via `notify-send` (Linux) or `osascript` (macOS)
+- External tools, called as commands: `git` (required), `gh` (optional); notifications via `notify-send` (Linux) or `osascript` (macOS)
 - Releases: GoReleaser with the Rust builder (`.goreleaser.yaml`); GitHub Actions, one file per workflow in `.github/workflows/` (`test.yaml`, `release.yaml`)
 
 Keep the dependency list short. Before adding a crate, check whether the standard library or one of the external tools already does the job.
@@ -26,29 +27,32 @@ Keep the dependency list short. Before adding a crate, check whether the standar
 
 ```
 src/
-  main.rs     # arg parsing: dashboard, --popup, `add`, `status`, `hooks`
-  launcher.rs # `tatou`: check tools, regenerate tmux.conf, offer to add the repository, attach
+  main.rs     # arg parsing: dashboard, `add`, `daemon`, `stop`
+  launcher.rs # `tatou`: check git, offer to add the repository, start the daemon, run the dashboard
   error.rs    # crate-wide Error enum and Result alias
   logging.rs  # log file setup and rotation
   config.rs   # load config.toml and projects/*.toml, write project files; XDG directories
-  exec.rs     # the only place that runs external commands
+  exec.rs     # the only place that runs external commands, but the terminals' programs
   platform.rs # the only platform-specific code: notify(title, body)
   git.rs      # worktrees, branches, status; output parsing
-  tmux.rs     # generated tmux.conf; sessions, options, switch/popup/window/send-keys; output parsing
   gh.rs       # PR list; output parsing
-  model.rs    # merges config + git + tmux + gh into what the UI shows
+  daemon.rs   # `tatou daemon`: terminals (pseudo-terminal + vt100 screen), sessions, the socket
+  protocol.rs # the daemon's frames: requests and replies
+  client.rs   # the dashboard's side of the socket; starts the daemon
+  term.rs     # keys and pastes into the bytes a terminal program reads
+  model.rs    # merges config + git + the daemon's sessions + gh into what the UI shows
   refresh.rs  # background worker threads feeding the UI loop over a channel
-  actions.rs  # the commands behind each action, on threads of their own, reporting events
+  actions.rs  # the requests and commands behind each action, on threads of their own, reporting events
   keys.rs     # keymap: defaults, config overrides, action dispatch
-  ui/         # ratatui rendering and input handling only
-tests/fixtures/  # captured git/tmux/gh outputs used by parser tests
+  ui/         # ratatui rendering and input handling only, the shown terminal included
+tests/fixtures/  # captured git/gh outputs used by parser tests
 ```
 
 ## Commands
 
 ```bash
-cargo run                # dashboard (run it inside tmux)
-cargo run -- --popup
+cargo run                # dashboard (starts the daemon)
+cargo run -- stop        # ends every terminal and the daemon
 cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt
@@ -58,30 +62,30 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 
 ## Rules
 
-- **No terminal-in-terminal.** Never capture or render agent/pane output. To show something, switch the tmux client, or open a tmux window or popup.
-- **No persistent state** besides `config.toml`, the project files in `projects/` next to it (one per repository, written by `tatou add` and the launch offer, plain TOML the user may edit) and the generated `tmux.conf` (rebuilt from `config.toml` at every launch). No database, cache or other state file; derive everything from `git`, `tmux` and `gh`.
-- **tatou's own tmux server only.** Every tmux invocation goes through `tmux.rs` and uses `-u -L tatou -f <generated conf>`. Never talk to the user's default tmux server, never read or write the user's `~/.tmux.conf` or `~/.config/tmux/tmux.conf` (except sourcing them when `inherit_user_conf = true`), never create `tmux.local.conf`.
-- **Don't reimplement tools.** No built-in editor, pager, diff viewer, file operations, splits or session persistence; delegate to `$EDITOR`, `$PAGER`, `git diff`, tmux.
-- **Everything tatou creates must be usable without tatou:** plain worktrees, plain tmux sessions.
-- **Linux and macOS only, no platform sprawl.** All `cfg(target_os)` code lives in `platform.rs`. Shell snippets and command templates are POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
-- **Never modify files tatou doesn't own** (agent configs, `.tmux.conf`, shell rc files, git config). Print the snippet for the user instead.
-- **All external commands go through `exec.rs`**, using argument vectors, never shell strings built from paths or user input. Exceptions, each run deliberately with `sh -c`: the user's configured `on_create` command and custom tmux-command templates from config. When substituting `{path}` and the like into templates, shell-quote the values.
-- **The UI loop never blocks on a command.** Run commands on background threads; send results back over a channel; keep rendering responsive.
-- **Restore the terminal** (raw mode, alternate screen, mouse capture) on every exit path, including panics.
+- **One terminal at a time, no multiplexer.** The dashboard shows one terminal, beside the projects. No splits, layouts, tabs, copy mode or scripting; if a feature needs them, it does not belong in tatou.
+- **No persistent state** besides `config.toml` and the project files in `projects/` next to it (one per repository, written by `tatou add` and the launch offer, plain TOML the user may edit). The daemon keeps its terminals in memory only, and its socket is a runtime file. No database, cache or other state file; derive everything from `git`, `gh` and the daemon.
+- **The daemon owns the terminals.** Every terminal is started, written to, resized and ended through the daemon's protocol (`protocol.rs`, via `client.rs`); the dashboard never runs a program in a pseudo-terminal itself. One daemon per user, on `$XDG_STATE_HOME/tatou/tatou.sock`.
+- **Don't reimplement tools.** No built-in editor, pager, diff viewer or file operations; delegate to `$EDITOR`, a shell, or the agent.
+- **Everything tatou creates in a repository is a plain git worktree**, usable without tatou.
+- **Linux and macOS only, no platform sprawl.** All `cfg(target_os)` code lives in `platform.rs`; `portable-pty` hides the pseudo-terminals' differences. Shell snippets and command templates are POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
+- **Never modify files tatou doesn't own** (agent configs, shell rc files, git config). Print the snippet for the user instead.
+- **All external commands go through `exec.rs`**, using argument vectors, never shell strings built from paths or user input. Exceptions, each run deliberately with `sh -c`: the user's configured `on_create` command, custom-action templates from config, and the programs the daemon runs in terminals (agents' commands from config, through `portable-pty`). When substituting `{path}` and the like into templates, shell-quote the values.
+- **The UI loop never blocks on a command or the socket.** Run commands and requests on background threads, and write to the shown terminal's connection through its writer thread; send results back over a channel; keep rendering responsive.
+- **Restore the terminal** (raw mode, alternate screen, bracketed paste, keyboard enhancement) on every exit path, including panics.
 - **Never force destructive git operations silently.** If `git worktree remove` fails, show git's message and require explicit confirmation to force.
-- **Match tmux sessions to worktrees by path** (`@tatou_path`, then `#{session_path}`), never by parsing session names.
+- **Match sessions to worktrees by the path they were started in**, never by parsing session names.
 - No `unwrap()`/`expect()` outside tests unless the invariant is impossible to break; comment why.
 - Code written before anything calls it gets `#[allow(dead_code)]` on the item, with a comment naming the issue that will use it; that issue removes the attribute. Never allow dead code crate-wide.
 - Prefer plain, obvious code over abstractions. No traits or generics until there are two real uses.
 
 ## Testing
 
-- Parsers for git, tmux and gh output are pure functions tested against fixtures in `tests/fixtures/`; one-line outputs (like `tmux -V`) are inline strings in the test.
+- Parsers for git and gh output are pure functions tested against fixtures in `tests/fixtures/`; one-line outputs are inline strings in the test.
 - Git tests use throwaway repos in a `tempfile::TempDir`, and run git with the user's config disabled (`GIT_CONFIG_GLOBAL=/dev/null`), so their hooks or commit signing never interfere.
-- tmux tests use a unique `-L` socket per test and kill that server afterwards; skip if `tmux` is missing.
-- Keymap parsing and model merging are unit-tested.
+- The protocol is tested by round trips. The daemon is tested end to end in-process on a temporary socket that never ends the test process (`client::testing::daemon`); terminals end a moment after their program, so wait for it (`sessions_become`) rather than assert at once.
+- Keymap parsing, key encoding and model merging are unit-tested.
 - UI rendering can be checked with ratatui's `TestBackend` for key screens; don't over-test layout.
-- No test touches the network, the user's real repositories or their tmux server. Tests that run the tatou binary use the sandbox in `tests/common/` (`$HOME`, `$XDG_*` and `$TMUX_TMPDIR` in a temporary directory).
+- No test touches the network, the user's real repositories or their daemon. Tests that run the tatou binary use the sandbox in `tests/common/` (`$HOME` and `$XDG_*` in a temporary directory).
 - CI runs fmt, clippy and tests on both Linux and macOS, plus a GoReleaser snapshot build, on every pull request.
 
 ## Versioning

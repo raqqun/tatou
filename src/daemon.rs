@@ -1,0 +1,600 @@
+//! `tatou daemon`: owns the terminals the agents, shells and editors run in, so
+//! that they outlive the dashboard. Each terminal is a pseudo-terminal with a
+//! program in it and a `vt100` screen kept from its output, so that a dashboard
+//! attaching gets the screen as it is. Dashboards talk to it over a Unix socket
+//! (`protocol`). It ends once its last terminal has ended and no dashboard is
+//! connected, or when asked to stop.
+
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::{Duration, SystemTime};
+
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use tui_term::vt100;
+
+use crate::config;
+use crate::error::Result;
+use crate::protocol::{Reply, Request, Session, Window};
+
+/// Lines of scrollback kept per terminal.
+const SCROLLBACK: usize = 10_000;
+
+/// How long a daemon with nothing to do waits before ending, in case a dashboard
+/// connects meanwhile: one just starting, between its first requests.
+const ALONE_FOR: Duration = Duration::from_secs(10);
+
+/// The daemon's socket: `$XDG_STATE_HOME/tatou/tatou.sock`.
+pub fn socket_path() -> Result<PathBuf> {
+    Ok(config::state_dir()?.join("tatou.sock"))
+}
+
+/// `tatou daemon`.
+pub fn run() -> ExitCode {
+    let served = socket_path()
+        .map_err(|err| err.to_string())
+        .and_then(|path| serve(&path, true).map_err(|err| format!("{}: {err}", path.display())));
+    match served {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            tracing::error!(err, "daemon failed");
+            eprintln!("tatou: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Listens on `path` until the daemon ends; another daemon already listening
+/// there is an error. With `ends`, the process ends when the daemon has nothing
+/// left to do, or is asked to stop; tests serve without.
+pub fn serve(path: &Path, ends: bool) -> io::Result<()> {
+    if UnixStream::connect(path).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "a daemon is already running",
+        ));
+    }
+    // A socket left by a daemon that did not end cleanly
+    let _ = fs::remove_file(path);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let listener = UnixListener::bind(path)?;
+    tracing::info!(?path, "daemon listening");
+    let daemon = Daemon::new(path, ends);
+    daemon.end_if_idle_later();
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let daemon = daemon.clone();
+                thread::spawn(move || daemon.serve_client(stream));
+            }
+            Err(err) => tracing::warn!(%err, "cannot accept a connection"),
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct Daemon {
+    state: Arc<Mutex<State>>,
+    socket: PathBuf,
+    /// Whether the process ends with the daemon.
+    ends: bool,
+}
+
+#[derive(Default)]
+struct State {
+    sessions: Vec<SessionState>,
+    terminals: HashMap<u32, Terminal>,
+    /// The last id given to a session, a terminal or a connection.
+    last_id: u32,
+    clients: usize,
+}
+
+struct SessionState {
+    id: u32,
+    name: String,
+    path: PathBuf,
+    agent: Option<u32>,
+    /// In the order they were opened.
+    terminals: Vec<u32>,
+    /// The one spawned or attached to last.
+    current: Option<u32>,
+}
+
+struct Terminal {
+    session: u32,
+    /// What it runs, by name.
+    command: String,
+    screen: vt100::Parser,
+    master: Box<dyn MasterPty + Send>,
+    /// Shared so that input is written without holding the state's lock, which a
+    /// program not reading its input would otherwise block.
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    child: Box<dyn Child + Send + Sync>,
+    /// When it last printed, in seconds since the Unix epoch.
+    activity: u64,
+    /// The connections attached to it, by id.
+    watchers: Vec<(u32, Sender<Reply>)>,
+}
+
+impl State {
+    fn next_id(&mut self) -> u32 {
+        self.last_id += 1;
+        self.last_id
+    }
+
+    fn list(&self) -> Vec<Session> {
+        let mut sessions: Vec<Session> = self
+            .sessions
+            .iter()
+            .map(|session| {
+                let windows: Vec<Window> = session
+                    .terminals
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, id)| {
+                        let terminal = self.terminals.get(id)?;
+                        Some(Window {
+                            id: format!("%{id}"),
+                            index: index as u32,
+                            current: session.current == Some(*id),
+                            command: terminal.command.clone(),
+                        })
+                    })
+                    .collect();
+                let activity = match session.agent.and_then(|id| self.terminals.get(&id)) {
+                    Some(agent) => agent.activity,
+                    None => (session.terminals.iter())
+                        .filter_map(|id| self.terminals.get(id))
+                        .map(|terminal| terminal.activity)
+                        .max()
+                        .unwrap_or(0),
+                };
+                Session {
+                    id: format!("${}", session.id),
+                    name: session.name.clone(),
+                    path: session.path.clone(),
+                    agent: session.agent.map(|id| format!("%{id}")),
+                    activity,
+                    windows,
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| a.name.cmp(&b.name));
+        sessions
+    }
+
+    /// `name`, or `name-2`, `name-3`, … when a session has it.
+    fn free_name(&self, name: &str) -> String {
+        let taken = |candidate: &str| self.sessions.iter().any(|s| s.name == candidate);
+        let mut candidate = name.to_string();
+        let mut n = 1;
+        while taken(&candidate) {
+            n += 1;
+            candidate = format!("{name}-{n}");
+        }
+        candidate
+    }
+}
+
+impl Daemon {
+    fn new(socket: &Path, ends: bool) -> Daemon {
+        Daemon {
+            state: Arc::new(Mutex::new(State::default())),
+            socket: socket.to_path_buf(),
+            ends,
+        }
+    }
+
+    // A poisoned lock is a thread that panicked holding it; the state is still
+    // usable, and the daemon would rather keep its terminals than end
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// One connection: its requests, its replies, and while attached, a terminal's
+    /// output, written by a thread of its own so that a slow dashboard never
+    /// holds up a terminal.
+    fn serve_client(&self, stream: UnixStream) {
+        let (replies, outgoing) = mpsc::channel::<Reply>();
+        let Ok(mut out) = stream.try_clone() else {
+            return;
+        };
+        thread::spawn(move || {
+            for reply in outgoing {
+                if reply.write(&mut out).is_err() {
+                    break;
+                }
+            }
+        });
+        let client = {
+            let mut state = self.lock();
+            state.clients += 1;
+            state.next_id()
+        };
+        let mut attached: Option<u32> = None;
+        let mut input = stream;
+        loop {
+            let request = match Request::read(&mut input) {
+                Ok(Some(request)) => request,
+                Ok(None) => break,
+                Err(err) => {
+                    tracing::warn!(%err, "a dashboard sent something unreadable");
+                    break;
+                }
+            };
+            if let Some(reply) = self.handle(request, client, &mut attached, &replies) {
+                let _ = replies.send(reply);
+            }
+        }
+        let mut state = self.lock();
+        state.clients -= 1;
+        if let Some(terminal) = attached.and_then(|id| state.terminals.get_mut(&id)) {
+            terminal.watchers.retain(|(id, _)| *id != client);
+        }
+        drop(state);
+        self.end_if_idle_later();
+    }
+
+    /// The reply to `request`; none for input and resizes, which only an attached
+    /// connection sends, and whose output answers.
+    fn handle(
+        &self,
+        request: Request,
+        client: u32,
+        attached: &mut Option<u32>,
+        replies: &Sender<Reply>,
+    ) -> Option<Reply> {
+        let reply = match request {
+            Request::List => Reply::Sessions(self.lock().list()),
+            Request::Spawn {
+                session,
+                name,
+                path,
+                command,
+                agent,
+            } => match self.spawn(session.as_deref(), &name, &path, command.as_deref(), agent) {
+                Ok((session, terminal)) => Reply::Spawned {
+                    session: format!("${session}"),
+                    terminal: format!("%{terminal}"),
+                },
+                Err(err) => Reply::Error(err),
+            },
+            Request::Kill { terminal } => match parse_id(&terminal, '%') {
+                Some(id) => self.kill(&[id]),
+                None => Reply::Error(format!("no terminal {terminal}")),
+            },
+            Request::KillSession { session } => {
+                let state = self.lock();
+                let terminals = parse_id(&session, '$')
+                    .and_then(|id| state.sessions.iter().find(|s| s.id == id))
+                    .map(|s| s.terminals.clone());
+                drop(state);
+                match terminals {
+                    Some(terminals) => self.kill(&terminals),
+                    None => Reply::Error(format!("no session {session}")),
+                }
+            }
+            Request::Attach {
+                terminal,
+                rows,
+                cols,
+            } => match parse_id(&terminal, '%') {
+                Some(id) => self.attach(id, rows, cols, client, attached, replies),
+                None => Reply::Error(format!("no terminal {terminal}")),
+            },
+            Request::Input(bytes) => {
+                let writer = attached.and_then(|id| {
+                    let state = self.lock();
+                    state.terminals.get(&id).map(|t| t.writer.clone())
+                });
+                if let Some(writer) = writer {
+                    let mut writer = writer.lock().unwrap_or_else(|p| p.into_inner());
+                    let _ = writer.write_all(&bytes).and_then(|()| writer.flush());
+                }
+                return None;
+            }
+            Request::Resize { rows, cols } => {
+                let mut state = self.lock();
+                if let Some(terminal) = attached.and_then(|id| state.terminals.get_mut(&id)) {
+                    resize(terminal, rows, cols);
+                }
+                return None;
+            }
+            Request::Stop => {
+                tracing::info!("asked to stop");
+                let all: Vec<u32> = self.lock().terminals.keys().copied().collect();
+                self.kill(&all);
+                let socket = self.socket.clone();
+                // Once the reply is on its way
+                let ends = self.ends;
+                thread::spawn(move || {
+                    if !ends {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                    let _ = fs::remove_file(&socket);
+                    std::process::exit(0);
+                });
+                Reply::Ok
+            }
+        };
+        Some(reply)
+    }
+
+    /// Starts `command` in a new terminal of `session`, or of a new session.
+    /// Returns the session's id and the terminal's.
+    fn spawn(
+        &self,
+        session: Option<&str>,
+        name: &str,
+        path: &Path,
+        command: Option<&str>,
+        agent: bool,
+    ) -> std::result::Result<(u32, u32), String> {
+        let size = PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        let pair = native_pty_system()
+            .openpty(size)
+            .map_err(|err| format!("cannot open a terminal: {err}"))?;
+        let mut builder = match command {
+            Some(command) => {
+                let mut builder = CommandBuilder::new("/bin/sh");
+                builder.args(["-c", command]);
+                builder
+            }
+            None => {
+                let mut builder = CommandBuilder::new(user_shell());
+                builder.arg("-l");
+                builder
+            }
+        };
+        builder.cwd(path);
+        builder.env("TATOU", "1");
+        builder.env("TERM", "xterm-256color");
+        // Started from inside tmux, the daemon must not hand that on
+        builder.env_remove("TMUX");
+        builder.env_remove("TMUX_PANE");
+        let child = pair
+            .slave
+            .spawn_command(builder)
+            .map_err(|err| format!("cannot start {}: {err}", command.unwrap_or("a shell")))?;
+        drop(pair.slave);
+        let reader = (pair.master.try_clone_reader())
+            .map_err(|err| format!("cannot read the terminal: {err}"))?;
+        let writer = (pair.master.take_writer())
+            .map_err(|err| format!("cannot write to the terminal: {err}"))?;
+
+        let mut state = self.lock();
+        let session_id = match session.and_then(|s| parse_id(s, '$')) {
+            Some(id) if state.sessions.iter().any(|s| s.id == id) => id,
+            _ => {
+                let id = state.next_id();
+                let name = state.free_name(name);
+                state.sessions.push(SessionState {
+                    id,
+                    name,
+                    path: path.to_path_buf(),
+                    agent: None,
+                    terminals: Vec::new(),
+                    current: None,
+                });
+                id
+            }
+        };
+        let id = state.next_id();
+        state.terminals.insert(
+            id,
+            Terminal {
+                session: session_id,
+                command: program_name(command),
+                screen: vt100::Parser::new(size.rows, size.cols, SCROLLBACK),
+                master: pair.master,
+                writer: Arc::new(Mutex::new(writer)),
+                child,
+                activity: unix_now(),
+                watchers: Vec::new(),
+            },
+        );
+        if let Some(session) = state.sessions.iter_mut().find(|s| s.id == session_id) {
+            session.terminals.push(id);
+            session.current = Some(id);
+            if agent {
+                session.agent = Some(id);
+            }
+        }
+        drop(state);
+        tracing::info!(id, ?path, command, "terminal started");
+        let daemon = self.clone();
+        thread::spawn(move || daemon.pump(id, reader));
+        Ok((session_id, id))
+    }
+
+    /// Feeds terminal `id`'s output to its screen and its watchers until its
+    /// program ends; then the terminal goes, and its session with its last one.
+    fn pump(&self, id: u32, mut reader: Box<dyn Read + Send>) {
+        let mut buffer = [0; 16 * 1024];
+        loop {
+            let n = match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            let mut state = self.lock();
+            let Some(terminal) = state.terminals.get_mut(&id) else {
+                break;
+            };
+            terminal.screen.process(&buffer[..n]);
+            terminal.activity = unix_now();
+            let output = &buffer[..n];
+            terminal
+                .watchers
+                .retain(|(_, watcher)| watcher.send(Reply::Output(output.to_vec())).is_ok());
+        }
+        let mut state = self.lock();
+        let Some(mut terminal) = state.terminals.remove(&id) else {
+            return;
+        };
+        let status = terminal.child.wait();
+        tracing::info!(id, ?status, "terminal ended");
+        for (_, watcher) in &terminal.watchers {
+            let _ = watcher.send(Reply::Exited);
+        }
+        if let Some(session) = state.sessions.iter_mut().find(|s| s.id == terminal.session) {
+            session.terminals.retain(|t| *t != id);
+            if session.agent == Some(id) {
+                session.agent = None;
+            }
+            if session.current == Some(id) {
+                session.current = session.terminals.last().copied();
+            }
+        }
+        state.sessions.retain(|s| !s.terminals.is_empty());
+        drop(state);
+        self.end_if_idle_later();
+    }
+
+    /// Attaches the connection to terminal `id` at this size: the screen now, its
+    /// output from then on.
+    fn attach(
+        &self,
+        id: u32,
+        rows: u16,
+        cols: u16,
+        client: u32,
+        attached: &mut Option<u32>,
+        replies: &Sender<Reply>,
+    ) -> Reply {
+        let mut state = self.lock();
+        if !state.terminals.contains_key(&id) {
+            return Reply::Error(format!("no terminal %{id}"));
+        }
+        if let Some(previous) = attached.and_then(|p| state.terminals.get_mut(&p)) {
+            previous.watchers.retain(|(c, _)| *c != client);
+        }
+        let Some(terminal) = state.terminals.get_mut(&id) else {
+            return Reply::Error(format!("no terminal %{id}"));
+        };
+        resize(terminal, rows, cols);
+        let screen = terminal.screen.screen().state_formatted();
+        terminal.watchers.push((client, replies.clone()));
+        let session = terminal.session;
+        if let Some(session) = state.sessions.iter_mut().find(|s| s.id == session) {
+            session.current = Some(id);
+        }
+        *attached = Some(id);
+        Reply::Screen(screen)
+    }
+
+    /// Ends the programs of `terminals`; each terminal goes once its output ends.
+    fn kill(&self, terminals: &[u32]) -> Reply {
+        let mut state = self.lock();
+        for id in terminals {
+            if let Some(terminal) = state.terminals.get_mut(id)
+                && let Err(err) = terminal.child.kill()
+            {
+                tracing::warn!(id, %err, "cannot end a terminal's program");
+            }
+        }
+        Reply::Ok
+    }
+
+    /// Ends the daemon in `ALONE_FOR` if it still has nothing to do then.
+    fn end_if_idle_later(&self) {
+        let daemon = self.clone();
+        thread::spawn(move || {
+            thread::sleep(ALONE_FOR);
+            daemon.end_if_idle();
+        });
+    }
+
+    /// Ends the daemon when it has nothing left to do: no terminal, nobody connected.
+    fn end_if_idle(&self) {
+        let state = self.lock();
+        if self.ends && state.terminals.is_empty() && state.clients == 0 {
+            tracing::info!("no terminal and no dashboard left: the daemon ends");
+            let _ = fs::remove_file(&self.socket);
+            std::process::exit(0);
+        }
+    }
+}
+
+fn resize(terminal: &mut Terminal, rows: u16, cols: u16) {
+    if (rows, cols) == terminal.screen.screen().size() || rows == 0 || cols == 0 {
+        return;
+    }
+    terminal.screen.screen_mut().set_size(rows, cols);
+    let size = PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+    if let Err(err) = terminal.master.resize(size) {
+        tracing::warn!(%err, "cannot resize a terminal");
+    }
+}
+
+/// `3` from `%3` (with `prefix` `%`).
+fn parse_id(id: &str, prefix: char) -> Option<u32> {
+    id.strip_prefix(prefix)?.parse().ok()
+}
+
+/// The user's login shell, from `$SHELL`.
+fn user_shell() -> String {
+    env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+/// What a terminal runs, by name: `command`'s first word without its folder, the
+/// editor for `${EDITOR:-vi} .`, the user's shell without a command.
+fn program_name(command: Option<&str>) -> String {
+    let first = match command {
+        Some(command) if command.starts_with("${EDITOR") => {
+            env::var("EDITOR").unwrap_or_else(|_| "vi".to_string())
+        }
+        Some(command) => command.to_string(),
+        None => user_shell(),
+    };
+    let word = first.split_whitespace().next().unwrap_or_default();
+    word.rsplit('/').next().unwrap_or(word).to_string()
+}
+
+/// Seconds since the Unix epoch.
+fn unix_now() -> u64 {
+    let since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
+    since_epoch.map_or(0, |elapsed| elapsed.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn programs_go_by_their_first_word() {
+        assert_eq!(program_name(Some("claude --resume")), "claude");
+        assert_eq!(program_name(Some("/usr/local/bin/codex")), "codex");
+        assert_eq!(program_name(Some("sleep 1000")), "sleep");
+    }
+
+    #[test]
+    fn ids_have_their_prefix() {
+        assert_eq!(parse_id("%3", '%'), Some(3));
+        assert_eq!(parse_id("$12", '$'), Some(12));
+        assert_eq!(parse_id("3", '%'), None);
+        assert_eq!(parse_id("%x", '%'), None);
+    }
+}

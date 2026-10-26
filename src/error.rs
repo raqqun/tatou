@@ -16,9 +16,6 @@ pub enum Error {
     #[error("{}: {message}", path.display())]
     Config { path: PathBuf, message: String },
 
-    #[error("tatou needs tmux 3.2 or later, found `{found}`")]
-    TmuxVersion { found: String },
-
     /// A program tatou requires is not installed, or not in `$PATH`.
     #[error("tatou needs {needs}, but `{program}` was not found; install it and try again")]
     Missing {
@@ -46,9 +43,9 @@ pub enum Error {
     #[error("{}: git lists no worktree", path.display())]
     NoWorktree { path: PathBuf },
 
-    /// tmux succeeded but printed something tatou cannot read.
-    #[error("unexpected output from tmux: `{output}`")]
-    TmuxOutput { output: String },
+    /// The daemon said no, or cannot be reached; its own message.
+    #[error("{0}")]
+    Daemon(String),
 
     /// The command ran and failed; `stderr` is its own message, shown to the user as is.
     #[error("`{command}` failed ({status}): {stderr}")]

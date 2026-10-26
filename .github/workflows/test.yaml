@@ -31,15 +31,6 @@ jobs:
         rustup toolchain install stable --profile minimal --component clippy,rustfmt
         rustup default stable
 
-    # tmux tests are skipped where tmux is missing, CI runs them
-    - name: Install tmux
-      run: |
-        if [ "$RUNNER_OS" = macOS ]; then
-          brew install tmux
-        else
-          sudo apt-get update && sudo apt-get install -y tmux
-        fi
-
     - name: Cache cargo
       uses: actions/cache@v6
       with:

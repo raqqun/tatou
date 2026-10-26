@@ -1,6 +1,6 @@
 //! Runs the tatou binary in a sandbox, so that no test reaches the user's config,
-//! state or tmux server: `$HOME`, the XDG directories and tmux's socket directory
-//! all point into a temporary directory.
+//! state or daemon: `$HOME` and the XDG directories, the daemon's socket with
+//! them, all point into a temporary directory.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -46,8 +46,6 @@ impl Sandbox {
             .env("HOME", dir)
             .env("XDG_CONFIG_HOME", self.config())
             .env("XDG_STATE_HOME", self.state())
-            .env("TMUX_TMPDIR", dir)
-            .env_remove("TMUX")
             .env_remove("TATOU_LOG");
         command
     }

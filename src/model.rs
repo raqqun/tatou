@@ -1,4 +1,4 @@
-//! Merges config, git and tmux into what the UI shows.
+//! Merges config, git and the daemon's sessions into what the UI shows.
 
 use std::collections::HashMap;
 use std::fs;
@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{self, Config};
 use crate::git::Worktree;
+use crate::protocol::{Session, Window};
 use crate::refresh::Update;
-use crate::tmux::{self, AgentStatus, Session, Window};
 
 /// How long after its last output an agent without hooks still counts as active, in seconds.
 const ACTIVE_FOR: u64 = 10;
@@ -41,10 +41,13 @@ pub struct WorktreeView {
 
 #[derive(Debug, PartialEq)]
 pub struct SessionView {
-    /// The target for tmux commands.
+    /// The target for the daemon's requests.
     pub id: String,
     pub name: String,
+    /// Its agent's terminal.
     pub agent_pane: Option<String>,
+    /// The terminal Enter shows: the one opened or shown last.
+    pub current: Option<String>,
 }
 
 impl WorktreeView {
@@ -57,7 +60,7 @@ impl WorktreeView {
 /// A session on tatou's server, for the Sessions pane.
 #[derive(Debug, PartialEq)]
 pub struct SessionRow {
-    /// The target for tmux commands.
+    /// The target for the daemon's requests.
     pub id: String,
     pub name: String,
     pub status: Status,
@@ -72,6 +75,8 @@ pub struct SessionRow {
 
 /// A worktree's agent: reported by its hooks, else guessed from its window's activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Busy, Input and Idle come from agents' hooks, not wired to the daemon yet
+#[allow(dead_code)]
 pub enum Status {
     Busy,
     Input,
@@ -87,7 +92,7 @@ pub enum Status {
 #[derive(Debug, Default)]
 pub struct Sources {
     sessions: Vec<Session>,
-    /// Why tmux could not be read; the last sessions read are kept meanwhile.
+    /// Why the daemon could not be read; the last sessions read are kept meanwhile.
     sessions_error: Option<String>,
     worktrees: HashMap<PathBuf, Result<Vec<Worktree>, String>>,
     remote_defaults: HashMap<PathBuf, Option<String>>,
@@ -126,7 +131,7 @@ impl Sources {
         self.sessions_error.as_deref()
     }
 
-    /// Every session but the dashboard's, in tmux's order (by name), with the
+    /// Every session, in the daemon's order (by name), with the
     /// worktree each belongs to in `projects`, the view built from these sources.
     pub fn session_rows(
         &self,
@@ -143,20 +148,27 @@ impl Sources {
                 }
             }
         }
-        let mine = self.sessions.iter().filter(|s| s.name != tmux::DASHBOARD);
-        mine.map(|session| SessionRow {
-            id: session.id.clone(),
-            name: session.name.clone(),
-            status: status(session, now),
-            command: session.command.clone(),
-            windows: session.windows.clone(),
-            place: match places.get(session.id.as_str()) {
-                Some(place) => place.clone(),
-                None => config::tilde(&session.path, home),
-            },
-        })
-        .collect()
+        let current = |session: &Session| session.windows.iter().find(|w| w.current).cloned();
+        (self.sessions.iter())
+            .map(|session| SessionRow {
+                id: session.id.clone(),
+                name: session.name.clone(),
+                status: status(session, now),
+                command: current(session).map(|w| w.command),
+                windows: session.windows.clone(),
+                place: match places.get(session.id.as_str()) {
+                    Some(place) => place.clone(),
+                    None => config::tilde(&session.path, home),
+                },
+            })
+            .collect()
     }
+}
+
+/// The session name for worktree `name` of the repository named `repo`:
+/// `<repo>-<name>`.
+pub fn session_name(repo: &str, name: &str) -> String {
+    format!("{repo}-{name}")
 }
 
 /// Builds the view. `worktrees` holds each project's `git worktree list`, or git's
@@ -194,7 +206,8 @@ pub fn merge(
                         session: session.map(|s| SessionView {
                             id: s.id.clone(),
                             name: s.name.clone(),
-                            agent_pane: s.agent_pane.clone(),
+                            agent_pane: s.agent.clone(),
+                            current: s.windows.iter().find(|w| w.current).map(|w| w.id.clone()),
                         }),
                     });
                 }
@@ -207,28 +220,22 @@ pub fn merge(
     projects
 }
 
-/// Sessions by the worktree they belong to: `@tatou_path` when set, else the
-/// session's start directory, never its name. When two sessions claim one worktree,
-/// one matched by `@tatou_path` wins, then the first in tmux's order (by name).
-/// The dashboard's own session belongs to no worktree.
+/// Sessions by the worktree they were started in, never by their name. When two
+/// sessions claim one worktree, the first in the daemon's order (by name) wins.
 fn sessions_by_path(sessions: &[Session]) -> HashMap<PathBuf, &Session> {
     let mut by_path = HashMap::new();
-    let mine = sessions.iter().filter(|s| s.name != tmux::DASHBOARD);
-    let (tagged, untagged): (Vec<_>, Vec<_>) = mine.partition(|s| s.tatou_path.is_some());
-    for session in tagged.into_iter().chain(untagged) {
-        let path = session.tatou_path.as_ref().unwrap_or(&session.path);
-        by_path.entry(canonical(path)).or_insert(session);
+    for session in sessions {
+        by_path.entry(canonical(&session.path)).or_insert(session);
     }
     by_path
 }
 
+/// From its output: the daemon sees every byte a program prints.
 fn status(session: &Session, now: u64) -> Status {
-    match session.status {
-        Some(AgentStatus::Busy) => Status::Busy,
-        Some(AgentStatus::Input) => Status::Input,
-        Some(AgentStatus::Idle) => Status::Idle,
-        None if now.saturating_sub(session.activity) <= ACTIVE_FOR => Status::Active,
-        None => Status::Quiet,
+    if now.saturating_sub(session.activity) <= ACTIVE_FOR {
+        Status::Active
+    } else {
+        Status::Quiet
     }
 }
 
@@ -250,7 +257,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::config::{Keys, Project, Tmux};
+    use crate::config::{Keys, Project};
 
     const NOW: u64 = 1_000_000;
 
@@ -258,7 +265,6 @@ mod tests {
         Config {
             path: "/c/config.toml".into(),
             default_agent: "claude".into(),
-            tmux: Tmux::default(),
             agents: BTreeMap::new(),
             keys: Keys::default(),
             projects: projects
@@ -287,27 +293,29 @@ mod tests {
         }
     }
 
-    /// A session tatou did not create: no options, matched by its start directory.
+    /// A session started in `path`, without an agent.
     fn session(id: &str, name: &str, path: &str) -> Session {
         Session {
             id: id.into(),
             name: name.into(),
-            tatou_path: None,
-            status: None,
-            agent_pane: None,
             path: path.into(),
+            agent: None,
             activity: NOW,
-            command: None,
             windows: Vec::new(),
         }
     }
 
-    /// A session tatou created for `path`, started elsewhere.
-    fn tatou_session(id: &str, name: &str, path: &str) -> Session {
+    /// A session with its agent in terminal `%1`, the current one.
+    fn agent_session(id: &str, name: &str, path: &str) -> Session {
         Session {
-            tatou_path: Some(path.into()),
-            agent_pane: Some("%1".into()),
-            ..session(id, name, "/somewhere/else")
+            agent: Some("%1".into()),
+            windows: vec![Window {
+                id: "%1".into(),
+                index: 0,
+                current: true,
+                command: "claude".into(),
+            }],
+            ..session(id, name, path)
         }
     }
 
@@ -331,7 +339,7 @@ mod tests {
 
     #[test]
     fn lists_projects_and_their_worktrees() {
-        let sessions = [tatou_session("$1", "app-fix", "/code/app.worktrees/fix")];
+        let sessions = [agent_session("$1", "app-fix", "/code/app.worktrees/fix")];
         let view = merge(&config(&["/code/app"]), &app_worktrees(), &sessions, NOW);
         let expected = ProjectView {
             path: "/code/app".into(),
@@ -356,6 +364,7 @@ mod tests {
                         id: "$1".into(),
                         name: "app-fix".into(),
                         agent_pane: Some("%1".into()),
+                        current: Some("%1".into()),
                     }),
                     status: Status::Active,
                 },
@@ -365,12 +374,11 @@ mod tests {
     }
 
     #[test]
-    fn matches_by_option_then_by_session_path() {
-        // The option wins over the start directory, wherever the session started
-        let by_option = tatou_session("$1", "anything", "/code/app.worktrees/fix");
-        assert_eq!(matched(&[by_option]), [None, Some("$1".into())]);
-        let by_path = session("$2", "anything", "/code/app");
-        assert_eq!(matched(&[by_path]), [Some("$2".into()), None]);
+    fn matches_by_the_path_a_session_started_in() {
+        let fix = session("$1", "anything", "/code/app.worktrees/fix");
+        assert_eq!(matched(&[fix]), [None, Some("$1".into())]);
+        let main = session("$2", "anything", "/code/app");
+        assert_eq!(matched(&[main]), [Some("$2".into()), None]);
     }
 
     #[test]
@@ -380,20 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn two_sessions_on_one_worktree_pick_the_option_then_the_first() {
+    fn two_sessions_on_one_worktree_pick_the_first() {
         let first = || session("$1", "a", "/code/app.worktrees/fix");
         let second = || session("$2", "b", "/code/app.worktrees/fix");
-        let tagged = tatou_session("$3", "c", "/code/app.worktrees/fix");
         let fix = |sessions: &[Session]| matched(sessions)[1].clone();
         assert_eq!(fix(&[first(), second()]), Some("$1".into()));
         assert_eq!(fix(&[second(), first()]), Some("$2".into()));
-        assert_eq!(fix(&[second(), first(), tagged]), Some("$3".into()));
-    }
-
-    #[test]
-    fn the_dashboard_session_is_no_worktrees() {
-        let dashboard = session("$0", tmux::DASHBOARD, "/code/app");
-        assert_eq!(matched(&[dashboard]), [None, None]);
     }
 
     #[test]
@@ -419,20 +419,16 @@ mod tests {
     }
 
     #[test]
-    fn status_comes_from_hooks_then_activity() {
-        let with = |status, activity| Session {
-            status,
+    fn status_comes_from_activity() {
+        let with = |activity| Session {
             activity,
             ..session("$1", "s", "/code/app")
         };
         let cases = [
-            (with(Some(AgentStatus::Busy), 0), Status::Busy),
-            (with(Some(AgentStatus::Input), 0), Status::Input),
-            (with(Some(AgentStatus::Idle), NOW), Status::Idle),
-            (with(None, NOW - ACTIVE_FOR), Status::Active),
-            (with(None, NOW - ACTIVE_FOR - 1), Status::Quiet),
+            (with(NOW - ACTIVE_FOR), Status::Active),
+            (with(NOW - ACTIVE_FOR - 1), Status::Quiet),
             // A clock that went backwards is still recent
-            (with(None, NOW + 5), Status::Active),
+            (with(NOW + 5), Status::Active),
         ];
         for (session, expected) in cases {
             assert_eq!(status(&session, NOW), expected, "{session:?}");
@@ -504,9 +500,9 @@ mod tests {
         let status = |sources: &Sources| sources.view(&config, NOW)[0].worktrees[0].status;
         assert_eq!(status(&sources), Status::Active);
 
-        // A tmux error is reported, and the sessions read before are kept
-        sources.apply(Update::Sessions(Err("tmux: boom".into())));
-        assert_eq!(sources.sessions_error(), Some("tmux: boom"));
+        // A daemon error is reported, and the sessions read before are kept
+        sources.apply(Update::Sessions(Err("daemon: boom".into())));
+        assert_eq!(sources.sessions_error(), Some("daemon: boom"));
         assert_eq!(status(&sources), Status::Active);
         sources.apply(Update::Sessions(Ok(vec![])));
         assert_eq!(sources.sessions_error(), None);

@@ -9,7 +9,7 @@ use common::Sandbox;
 #[test]
 fn startup_writes_to_the_log_file() {
     let sandbox = Sandbox::new();
-    let output = sandbox.tatou(&["hooks"]).output().unwrap();
+    let output = sandbox.tatou(&["stop"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("logging disabled"), "{stderr}");
 
@@ -24,9 +24,9 @@ fn an_unusable_state_dir_only_disables_logging() {
     // A file where the tatou directory should be makes creating it fail
     fs::create_dir_all(sandbox.state()).unwrap();
     fs::write(sandbox.state().join("tatou"), "").unwrap();
-    let output = sandbox.tatou(&["hooks"]).output().unwrap();
+    let output = sandbox.tatou(&["stop"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("logging disabled"), "{stderr}");
     // The command still runs
-    assert!(stderr.contains("hooks is not implemented"), "{stderr}");
+    assert!(output.status.success(), "{stderr}");
 }

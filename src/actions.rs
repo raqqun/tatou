@@ -5,32 +5,36 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::thread;
 
+use crate::client::Client;
 use crate::error::Error;
 use crate::exec;
 use crate::git;
-use crate::tmux::Server;
 
 /// An action the UI asks for.
 #[derive(Debug, PartialEq)]
 pub enum Task {
-    /// Shows the session with this id in the dashboard's client.
-    Switch(String),
-    /// Shows a window: makes it its session's current one, then shows the session.
-    Window {
-        session: String,
-        window: String,
-    },
     NewWorktree(NewWorktree),
     /// An agent in a new session, for a worktree that has none.
     StartAgent(StartAgent),
     /// The agent of a session, started again.
     RestartAgent(RestartAgent),
-    /// A shell, or the editor, in a worktree, shown in the dashboard's client.
+    /// A shell, or the editor, in a worktree, shown in the dashboard.
     Program(Program),
     RemoveWorktree(RemoveWorktree),
+    /// Ends a window, or a session with all its windows; the worktree stays.
+    End(End),
 }
 
-/// A linked worktree to remove, and its session to kill once it is gone.
+/// What `d` ends in the sessions' pane.
+#[derive(Debug, Clone, PartialEq)]
+pub enum End {
+    /// A terminal: `%3`.
+    Window(String),
+    /// A session: `$2`.
+    Session(String),
+}
+
+/// A linked worktree to remove, and its session to end once it is gone.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoveWorktree {
     pub name: String,
@@ -46,7 +50,7 @@ pub struct RemoveWorktree {
 /// `$EDITOR` is left unquoted so that its arguments (`code -w`) stay arguments.
 pub const EDITOR: &str = "${EDITOR:-vi} .";
 
-/// A program to open in a new window of a worktree's session: a shell, or the editor.
+/// A program to open in a new terminal of a worktree's session: a shell, or the editor.
 #[derive(Debug, PartialEq)]
 pub struct Program {
     pub name: String,
@@ -55,7 +59,7 @@ pub struct Program {
     pub session: Option<String>,
     /// The name for a new session.
     pub session_name: String,
-    /// Run by tmux's default shell; `None`: the user's shell.
+    /// Run by `sh -c`; `None`: the user's shell.
     pub command: Option<String>,
 }
 
@@ -74,7 +78,7 @@ pub struct RestartAgent {
     pub path: PathBuf,
     /// The session's id.
     pub session: String,
-    /// `@tatou_agent_pane`, unless the session was started by hand.
+    /// The agent's terminal, ended first, if it has one.
     pub pane: Option<String>,
     pub command: String,
 }
@@ -90,7 +94,7 @@ pub struct NewWorktree {
     pub path: PathBuf,
     pub on_create: Option<String>,
     pub session: String,
-    /// The agent's command, run by tmux's default shell.
+    /// The agent's command, run by `sh -c`.
     pub command: String,
 }
 
@@ -107,75 +111,87 @@ pub enum Event {
     Added { project: PathBuf, path: PathBuf },
     /// `on_create` failed; the worktree stays and the agent still starts.
     OnCreateFailed(String),
-    /// A session was started or changed: the agent's, or a shell's.
-    Started,
+    /// A terminal was started, to show: the agent's, a shell's, the editor's.
+    Started(String),
     /// git refused to remove the worktree, saying why; nothing was changed. The
     /// removal to run, with `force`, if the user confirms.
     RemoveRefused { remove: RemoveWorktree, why: String },
     /// The worktree is gone, and its session.
     Removed { project: PathBuf, name: String },
+    /// A window or a session is ending: its programs were told to.
+    Ended,
     /// A command's whole output, to read: e.g. git refusing even a forced removal.
     Error { title: String, output: String },
 }
 
 /// Runs `task` on a thread of its own, sending what happens to `events`.
-pub fn start(task: Task, server: &Server, events: &Sender<Event>) {
-    let server = server.clone();
+pub fn start(task: Task, client: &Client, events: &Sender<Event>) {
+    let client = client.clone();
     let sender = events.clone();
     let started = thread::Builder::new()
         .name("task".to_string())
-        .spawn(move || run(task, &server, &sender));
+        .spawn(move || run(task, &client, &sender));
     if let Err(err) = started {
         tracing::error!(%err, "cannot start a task thread");
         let _ = events.send(Event::Failed(format!("cannot start a thread: {err}")));
     }
 }
 
-fn run(task: Task, server: &Server, events: &Sender<Event>) {
+fn run(task: Task, client: &Client, events: &Sender<Event>) {
     // A send fails only when the dashboard has ended: nobody to tell
     let send = |event| {
         let _ = events.send(event);
     };
     match task {
-        Task::Switch(session) => {
-            if let Err(err) = server.switch_client(&session) {
-                tracing::warn!(session, %err, "switch failed");
-                send(Event::Failed(err.to_string()));
-            }
-        }
-        Task::Window { session, window } => {
-            let shown = server
-                .select_window(&window)
-                .and_then(|()| server.switch_client(&session));
-            if let Err(err) = shown {
-                tracing::warn!(session, window, %err, "switch failed");
-                send(Event::Failed(err.to_string()));
-            }
-        }
-        Task::NewWorktree(new) => new_worktree(&new, server, &send),
+        Task::NewWorktree(new) => new_worktree(&new, client, &send),
         Task::StartAgent(start) => {
             send(Event::Progress(format!(
                 "{}: starting the agent",
                 start.name
             )));
-            let started = server.new_session(&start.session, &start.path, Some(&start.command));
+            let started = client.spawn(
+                None,
+                &start.session,
+                &start.path,
+                Some(&start.command),
+                true,
+            );
             send(match started {
-                Ok(_) => Event::Started,
+                Ok(terminal) => Event::Started(terminal),
                 Err(err) => Event::Failed(format!("{}: {err}", start.name)),
             });
         }
-        Task::Program(program) => send(match open_program(&program, server) {
-            Ok(()) => Event::Started,
-            Err(err) => Event::Failed(format!("{}: {err}", program.name)),
-        }),
-        Task::RemoveWorktree(remove) => send(remove_worktree(remove, server)),
+        Task::Program(program) => {
+            let started = client.spawn(
+                program.session.as_deref(),
+                &program.session_name,
+                &program.path,
+                program.command.as_deref(),
+                false,
+            );
+            send(match started {
+                Ok(terminal) => Event::Started(terminal),
+                Err(err) => Event::Failed(format!("{}: {err}", program.name)),
+            });
+        }
+        Task::RemoveWorktree(remove) => send(remove_worktree(remove, client)),
+        Task::End(end) => {
+            let ended = match &end {
+                End::Window(terminal) => client.kill(terminal),
+                End::Session(session) => client.kill_session(session),
+            };
+            send(match ended {
+                Ok(()) => Event::Ended,
+                Err(err) => Event::Failed(err.to_string()),
+            });
+        }
         Task::RestartAgent(restart) => {
             send(Event::Progress(format!(
                 "{}: restarting the agent",
                 restart.name
             )));
-            send(match restart_agent(&restart, server) {
-                Ok(()) => Event::Started,
+            send(match restart_agent(&restart, client) {
+                Ok(terminal) => Event::Started(terminal),
                 Err(err) => Event::Failed(format!("{}: {err}", restart.name)),
             });
         }
@@ -184,7 +200,7 @@ fn run(task: Task, server: &Server, events: &Sender<Event>) {
 
 /// `git worktree remove`, then, only once it is gone, the session: a refusal
 /// leaves both as they were.
-fn remove_worktree(remove: RemoveWorktree, server: &Server) -> Event {
+fn remove_worktree(remove: RemoveWorktree, client: &Client) -> Event {
     let name = remove.name.clone();
     match git::remove(&remove.project, &remove.path, remove.force) {
         Ok(()) => {}
@@ -204,9 +220,9 @@ fn remove_worktree(remove: RemoveWorktree, server: &Server) -> Event {
     }
     tracing::info!(name, path = ?remove.path, force = remove.force, "worktree removed");
     if let Some(session) = &remove.session
-        && let Err(err) = server.kill_session(session)
+        && let Err(err) = client.kill_session(session)
     {
-        tracing::warn!(name, %err, "session not killed");
+        tracing::warn!(name, %err, "session not ended");
         return Event::Failed(format!("{name} removed, but not its session: {err}"));
     }
     Event::Removed {
@@ -215,41 +231,24 @@ fn remove_worktree(remove: RemoveWorktree, server: &Server) -> Event {
     }
 }
 
-/// A new window with the program in the worktree's session, or a new session
-/// with it, without an agent pane, then shows it.
-fn open_program(program: &Program, server: &Server) -> crate::error::Result<()> {
-    let (name, path) = (&program.session_name, &program.path);
-    let session = match (&program.session, &program.command) {
-        (Some(session), command) => {
-            server.new_window(session, path, command.as_deref())?;
-            session.clone()
-        }
-        (None, Some(command)) => server.new_plain_session(name, path, command)?.id,
-        (None, None) => server.new_session(name, path, None)?.id,
-    };
-    server.switch_client(&session)
-}
-
-/// Respawns the agent's pane; without one, or when it is gone, starts the agent
-/// in a new window of the session and makes that the agent's pane, so that
-/// nothing the user started is killed.
-fn restart_agent(restart: &RestartAgent, server: &Server) -> crate::error::Result<()> {
+/// Ends the agent's terminal, if it has one, then starts the agent in a new
+/// terminal of the session; the session's other terminals keep running.
+fn restart_agent(restart: &RestartAgent, client: &Client) -> crate::error::Result<String> {
     if let Some(pane) = &restart.pane {
-        match server.respawn_agent(pane, &restart.command) {
-            Ok(()) => return Ok(()),
-            Err(Error::Command { stderr, .. }) if stderr.starts_with("can't find pane") => {
-                tracing::info!(pane, "agent pane gone: starting the agent in a new window");
-            }
-            Err(err) => return Err(err),
-        }
+        client.kill(pane)?;
     }
-    let pane = server.new_window(&restart.session, &restart.path, Some(&restart.command))?;
-    server.set_agent_pane(&restart.session, &pane)
+    client.spawn(
+        Some(&restart.session),
+        &restart.name,
+        &restart.path,
+        Some(&restart.command),
+        true,
+    )
 }
 
 /// `git worktree add`, then `on_create` in the new worktree, then the agent's
 /// session. A failure of `on_create` is reported and the session still starts.
-fn new_worktree(new: &NewWorktree, server: &Server, send: &dyn Fn(Event)) {
+fn new_worktree(new: &NewWorktree, client: &Client, send: &dyn Fn(Event)) {
     let name = &new.name;
     send(Event::Progress(format!("{name}: creating the worktree")));
     if let Err(err) = git::add(&new.project, name, new.base.as_deref(), &new.path) {
@@ -273,10 +272,10 @@ fn new_worktree(new: &NewWorktree, server: &Server, send: &dyn Fn(Event)) {
     }
 
     send(Event::Progress(format!("{name}: starting the agent")));
-    match server.new_session(&new.session, &path, Some(&new.command)) {
-        Ok(session) => {
-            tracing::info!(name, session = session.name, "agent started");
-            send(Event::Started);
+    match client.spawn(None, &new.session, &path, Some(&new.command), true) {
+        Ok(terminal) => {
+            tracing::info!(name, terminal, "agent started");
+            send(Event::Started(terminal));
         }
         Err(err) => {
             tracing::warn!(name, %err, "agent not started");
@@ -299,9 +298,10 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::tmux::testing::TestServer;
+    use crate::client::testing::{daemon, sessions_become};
 
     /// A repository at `<dir>/app` with one commit, `dir` canonical.
     fn repository() -> (tempfile::TempDir, PathBuf) {
@@ -328,13 +328,6 @@ mod tests {
         (tmp, repo)
     }
 
-    /// A test server whose default shell is `/bin/sh`.
-    fn sh_server(dir: &Path) -> Option<TestServer> {
-        let conf = dir.join("tmux.conf");
-        fs::write(&conf, "set-option -g default-shell /bin/sh\n").unwrap();
-        TestServer::with_conf(&conf)
-    }
-
     fn request(repo: &Path, name: &str, on_create: Option<&str>) -> NewWorktree {
         NewWorktree {
             project: repo.to_path_buf(),
@@ -348,24 +341,31 @@ mod tests {
     }
 
     /// Runs `task` to its end and returns what it reported.
-    fn events(task: Task, server: &Server) -> Vec<Event> {
+    fn events(task: Task, client: &Client) -> Vec<Event> {
         let (sender, received) = mpsc::channel();
-        run(task, server, &sender);
+        run(task, client, &sender);
         drop(sender);
         received.iter().collect()
     }
 
+    /// The terminal the last event says was started.
+    fn started(events: &[Event]) -> String {
+        match events.last() {
+            Some(Event::Started(terminal)) => terminal.clone(),
+            other => panic!("not started: {other:?} in {events:?}"),
+        }
+    }
+
     #[test]
     fn creates_the_worktree_runs_on_create_and_starts_the_agent() {
-        let (tmp, repo) = repository();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
+        let (_daemon, client) = daemon();
+        let (_tmp, repo) = repository();
         let new = request(&repo, "fix", Some("touch created"));
         let path = new.path.clone();
-        let events = events(Task::NewWorktree(new), &server);
+        let events = events(Task::NewWorktree(new), &client);
+        let terminal = started(&events);
         assert_eq!(
-            events,
+            events[..4],
             [
                 Event::Progress("fix: creating the worktree".into()),
                 Event::Added {
@@ -374,43 +374,39 @@ mod tests {
                 },
                 Event::Progress("fix: running on_create".into()),
                 Event::Progress("fix: starting the agent".into()),
-                Event::Started,
             ]
         );
         assert!(
             path.join("created").exists(),
             "on_create ran in the worktree"
         );
-        let sessions = server.sessions().unwrap();
+        let sessions = client.sessions().unwrap();
         assert_eq!(sessions[0].name, "app-fix");
-        assert_eq!(sessions[0].tatou_path.as_deref(), Some(path.as_path()));
+        assert_eq!(sessions[0].path, path);
+        assert_eq!(sessions[0].agent, Some(terminal));
     }
 
     #[test]
     fn a_refused_worktree_starts_nothing() {
-        let (tmp, repo) = repository();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
+        let (_daemon, client) = daemon();
+        let (_tmp, repo) = repository();
         // The branch exists already
-        let events = events(Task::NewWorktree(request(&repo, "main", None)), &server);
+        let events = events(Task::NewWorktree(request(&repo, "main", None)), &client);
         let [Event::Progress(_), Event::Refused(error)] = &events[..] else {
             panic!("{events:?}");
         };
         assert!(error.contains("already exists"), "{error}");
         assert!(!error.contains("git -C"), "git's message only: {error}");
-        assert_eq!(server.sessions().unwrap(), []);
+        assert_eq!(client.sessions().unwrap(), []);
     }
 
     #[test]
     fn a_failed_on_create_keeps_the_worktree_and_starts_the_agent() {
-        let (tmp, repo) = repository();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
+        let (_daemon, client) = daemon();
+        let (_tmp, repo) = repository();
         let new = request(&repo, "fix", Some("echo oops >&2; exit 3"));
         let path = new.path.clone();
-        let events = events(Task::NewWorktree(new), &server);
+        let events = events(Task::NewWorktree(new), &client);
         let failed = events.iter().find_map(|event| match event {
             Event::OnCreateFailed(output) => Some(output.clone()),
             _ => None,
@@ -419,127 +415,48 @@ mod tests {
             failed.is_some_and(|output| output.contains("oops")),
             "{events:?}"
         );
-        assert_eq!(events.last(), Some(&Event::Started));
+        started(&events);
         assert!(path.exists());
-        assert_eq!(server.sessions().unwrap().len(), 1);
     }
 
-    /// `format` for `target`, from tmux.
-    fn show(server: &Server, target: &str, format: &str) -> String {
-        let output = server.run(&["display-message", "-p", "-t", target, format]);
-        output.unwrap().stdout.trim_end().to_string()
-    }
-
-    fn restart(path: &Path, session: &str, pane: Option<&str>) -> Task {
-        Task::RestartAgent(RestartAgent {
+    #[test]
+    fn restarting_ends_the_agent_and_starts_it_again_beside_the_rest() {
+        let (dir, client) = daemon();
+        let agent = client
+            .spawn(None, "app-fix", dir.path(), Some("sleep 1000"), true)
+            .unwrap();
+        let session = client.sessions().unwrap()[0].id.clone();
+        let shell = client
+            .spawn(
+                Some(&session),
+                "app-fix",
+                dir.path(),
+                Some("sleep 1001"),
+                false,
+            )
+            .unwrap();
+        let task = Task::RestartAgent(RestartAgent {
             name: "fix".into(),
-            path: path.to_path_buf(),
-            session: session.into(),
-            pane: pane.map(String::from),
+            path: dir.path().to_path_buf(),
+            session: session.clone(),
+            pane: Some(agent),
             command: "sleep 2000".into(),
-        })
-    }
-
-    #[test]
-    fn starts_an_agent_in_a_new_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let start = Task::StartAgent(StartAgent {
-            name: "fix".into(),
-            path: tmp.path().to_path_buf(),
-            session: "app-fix".into(),
-            command: "sleep 1000".into(),
         });
-        let events = events(start, &server);
-        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
-        let sessions = server.sessions().unwrap();
-        assert_eq!(sessions[0].name, "app-fix");
-        assert!(sessions[0].agent_pane.is_some());
+        let again = started(&events(task, &client));
+        // The old agent's terminal goes a moment after its program
+        let since = Instant::now();
+        loop {
+            let sessions = client.sessions().unwrap();
+            let ids: Vec<_> = sessions[0].windows.iter().map(|w| w.id.clone()).collect();
+            if ids == [shell.clone(), again.clone()] {
+                assert_eq!(sessions[0].agent, Some(again));
+                break;
+            }
+            assert!(since.elapsed() < Duration::from_secs(5), "{ids:?}");
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
-    #[test]
-    fn restarts_the_agent_in_its_pane() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let session = server
-            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
-            .unwrap();
-        let events = events(
-            restart(tmp.path(), &session.id, Some(&session.pane)),
-            &server,
-        );
-        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
-        let command = show(&server, &session.pane, "#{pane_start_command}");
-        assert!(
-            command.contains("sleep 2000") && command.contains("switch-client"),
-            "{command}"
-        );
-        assert_eq!(show(&server, &session.id, "#{session_windows}"), "1");
-    }
-
-    #[test]
-    fn a_gone_agent_pane_gets_a_new_window() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let session = server
-            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
-            .unwrap();
-        // A shell keeps the session alive once the agent's pane is closed
-        server.new_window(&session.id, tmp.path(), None).unwrap();
-        server.run(&["kill-pane", "-t", &session.pane]).unwrap();
-
-        let events = events(
-            restart(tmp.path(), &session.id, Some(&session.pane)),
-            &server,
-        );
-        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
-        let agent = server.sessions().unwrap()[0].agent_pane.clone().unwrap();
-        assert_ne!(agent, session.pane, "the new window's pane");
-        let command = show(&server, &agent, "#{pane_start_command}");
-        assert!(
-            command.contains("sleep 2000") && command.contains("switch-client"),
-            "{command}"
-        );
-        assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
-    }
-
-    #[test]
-    fn a_session_started_by_hand_keeps_its_panes() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let dir = tmp.path().to_str().unwrap();
-        let args = [
-            "new-session",
-            "-d",
-            "-c",
-            dir,
-            "-P",
-            "-F",
-            "#{session_id} #{pane_id}",
-        ];
-        let output = server.run(&args).unwrap().stdout;
-        let (id, shell) = output.trim_end().split_once(' ').unwrap();
-
-        let events = events(restart(tmp.path(), id, None), &server);
-        assert_eq!(events.last(), Some(&Event::Started), "{events:?}");
-        assert_eq!(
-            show(&server, id, "#{session_windows}"),
-            "2",
-            "the shell is still there"
-        );
-        let agent = server.sessions().unwrap()[0].agent_pane.clone().unwrap();
-        assert_ne!(agent, shell);
-    }
-
-    /// `command` in worktree `fix` at `path`; `None`: a shell.
     fn program(path: &Path, session: Option<&str>, command: Option<&str>) -> Task {
         Task::Program(Program {
             name: "fix".into(),
@@ -550,117 +467,69 @@ mod tests {
         })
     }
 
-    fn shell(path: &Path, session: Option<&str>) -> Task {
-        program(path, session, None)
-    }
-
-    fn editor(path: &Path, session: Option<&str>) -> Task {
-        program(path, session, Some(EDITOR))
-    }
-
-    /// No client is attached in a test: the shell is ready, and showing it fails.
-    fn not_shown(events: &[Event]) -> bool {
-        matches!(events, [Event::Failed(err)] if err.starts_with("fix: ") && err.contains("switch-client"))
-    }
-
     #[test]
-    fn a_window_is_selected_then_shown() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let session = server
-            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
+    fn ends_a_window_or_a_whole_session_and_never_the_worktree() {
+        let (dir, client) = daemon();
+        let agent = client
+            .spawn(None, "app-fix", dir.path(), Some("sleep 1000"), true)
             .unwrap();
-        server.new_window(&session.id, tmp.path(), None).unwrap();
-        let first = server.sessions().unwrap()[0].windows[0].id.clone();
-        let task = Task::Window {
-            session: session.id.clone(),
-            window: first.clone(),
-        };
-        let events = events(task, &server);
-        // No client is attached in a test: selected, and showing it fails
-        assert!(matches!(&events[..], [Event::Failed(_)]), "{events:?}");
-        assert!(server.sessions().unwrap()[0].windows[0].current);
-    }
+        let session = client.sessions().unwrap()[0].id.clone();
+        let shell = client
+            .spawn(
+                Some(&session),
+                "app-fix",
+                dir.path(),
+                Some("sleep 1001"),
+                false,
+            )
+            .unwrap();
+        client
+            .spawn(None, "notes", dir.path(), Some("sleep 1002"), false)
+            .unwrap();
 
-    #[test]
-    fn a_shell_opens_in_the_worktrees_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let session = server
-            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
-            .unwrap();
-        let events = events(shell(tmp.path(), Some(&session.id)), &server);
-        assert!(not_shown(&events), "{events:?}");
-        assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
-        // The shell is the session's current window; the agent's pane is still the agent
-        let current = show(&server, &session.id, "#{pane_id}");
-        assert_ne!(current, session.pane);
-        // The user's shell, as a login shell, then the way back; tmux versions
-        // escape the command they print differently, so only its parts are checked
-        let command = show(&server, &current, "#{pane_start_command}");
-        for part in ["SHELL:-/bin/sh}", " -l", "switch-client"] {
-            assert!(command.contains(part), "{part} in {command}");
+        let ended = events(Task::End(End::Window(agent)), &client);
+        assert_eq!(ended, [Event::Ended]);
+        let since = Instant::now();
+        loop {
+            let sessions = client.sessions().unwrap();
+            let windows: Vec<_> = sessions[0].windows.iter().map(|w| w.id.clone()).collect();
+            if windows == [shell.clone()] {
+                break;
+            }
+            assert!(since.elapsed() < Duration::from_secs(5), "{windows:?}");
+            thread::sleep(Duration::from_millis(20));
         }
-        let agent = server.sessions().unwrap()[0].agent_pane.clone();
-        assert_eq!(agent, Some(session.pane));
+
+        let ended = events(Task::End(End::Session(session)), &client);
+        assert_eq!(ended, [Event::Ended]);
+        sessions_become(&client, 1);
+        assert!(dir.path().exists());
+        let gone = events_of_end(&client, "$99");
+        assert!(
+            matches!(&gone[..], [Event::Failed(m)] if m == "no session $99"),
+            "{gone:?}"
+        );
+    }
+
+    fn events_of_end(client: &Client, session: &str) -> Vec<Event> {
+        events(Task::End(End::Session(session.into())), client)
     }
 
     #[test]
-    fn a_shell_without_a_session_gets_one_without_an_agent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let events = events(shell(tmp.path(), None), &server);
-        assert!(not_shown(&events), "{events:?}");
-        let sessions = server.sessions().unwrap();
+    fn a_shell_or_the_editor_opens_in_the_worktrees_session_or_a_new_one() {
+        let (dir, client) = daemon();
+        let shell = started(&events(program(dir.path(), None, None), &client));
+        let sessions = client.sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "app-fix");
-        assert_eq!(sessions[0].tatou_path.as_deref(), Some(tmp.path()));
-        assert_eq!(sessions[0].agent_pane, None, "a shell is no agent");
-        let env = server.run(&["show-environment", "-t", &sessions[0].id, "TATOU"]);
-        assert_eq!(env.unwrap().stdout, "TATOU=1\n");
-    }
+        assert_eq!(sessions[0].agent, None, "a shell is no agent");
 
-    #[test]
-    fn the_editor_opens_in_the_worktrees_session() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let session = server
-            .new_session("app-fix", tmp.path(), Some("sleep 1000"))
-            .unwrap();
-        let events = events(editor(tmp.path(), Some(&session.id)), &server);
-        assert!(not_shown(&events), "{events:?}");
-        assert_eq!(show(&server, &session.id, "#{session_windows}"), "2");
-        let current = show(&server, &session.id, "#{pane_id}");
-        let command = show(&server, &current, "#{pane_start_command}");
-        for part in ["EDITOR:-vi} .", "switch-client"] {
-            assert!(command.contains(part), "{part} in {command}");
-        }
-        let agent = server.sessions().unwrap()[0].agent_pane.clone();
-        assert_eq!(agent, Some(session.pane));
-    }
-
-    #[test]
-    fn the_editor_without_a_session_gets_one_without_an_agent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let events = events(editor(tmp.path(), None), &server);
-        assert!(not_shown(&events), "{events:?}");
-        let sessions = server.sessions().unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].name, "app-fix");
-        assert_eq!(sessions[0].agent_pane, None, "the editor is no agent");
-        let command = show(&server, &sessions[0].id, "#{pane_start_command}");
-        assert!(command.contains("EDITOR:-vi} ."), "{command}");
+        let session = sessions[0].id.clone();
+        let task = program(dir.path(), Some(&session), Some(EDITOR));
+        let editor = started(&events(task, &client));
+        let sessions = client.sessions().unwrap();
+        let windows: Vec<_> = sessions[0].windows.iter().map(|w| w.id.clone()).collect();
+        assert_eq!(windows, [shell, editor]);
     }
 
     /// git in `repo`, without the user's config; its output.
@@ -677,13 +546,14 @@ mod tests {
     }
 
     /// The linked worktree `fix` of `repo`, with an agent's session in it.
-    fn linked(repo: &Path, server: &Server) -> (PathBuf, String) {
+    fn linked(repo: &Path, client: &Client) -> (PathBuf, String) {
         let path = git::worktree_path(repo, "fix", None);
         git::add(repo, "fix", None, &path).unwrap();
-        let session = server
-            .new_session("app-fix", &path, Some("sleep 1000"))
+        client
+            .spawn(None, "app-fix", &path, Some("sleep 1000"), true)
             .unwrap();
-        (path, session.id)
+        let session = client.sessions().unwrap()[0].id.clone();
+        (path, session)
     }
 
     fn remove(repo: &Path, path: &Path, session: &str, force: bool) -> RemoveWorktree {
@@ -698,14 +568,12 @@ mod tests {
 
     #[test]
     fn removes_the_worktree_then_its_session_and_keeps_the_branch() {
-        let (tmp, repo) = repository();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let (path, session) = linked(&repo, &server);
+        let (_daemon, client) = daemon();
+        let (_tmp, repo) = repository();
+        let (path, session) = linked(&repo, &client);
         let events = events(
             Task::RemoveWorktree(remove(&repo, &path, &session, false)),
-            &server,
+            &client,
         );
         let removed = Event::Removed {
             project: repo.clone(),
@@ -713,21 +581,19 @@ mod tests {
         };
         assert_eq!(events, [removed]);
         assert!(!path.exists());
-        assert_eq!(server.sessions().unwrap(), []);
+        sessions_become(&client, 0);
         assert_eq!(git_out(&repo, &["branch", "--list", "fix"]).trim(), "fix");
     }
 
     #[test]
     fn a_dirty_worktree_is_refused_until_forced() {
-        let (tmp, repo) = repository();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let (path, session) = linked(&repo, &server);
+        let (_daemon, client) = daemon();
+        let (_tmp, repo) = repository();
+        let (path, session) = linked(&repo, &client);
         fs::write(path.join("notes.md"), "draft").unwrap();
 
         let asked = remove(&repo, &path, &session, false);
-        let refused = events(Task::RemoveWorktree(asked.clone()), &server);
+        let refused = events(Task::RemoveWorktree(asked.clone()), &client);
         let [Event::RemoveRefused { remove: again, why }] = &refused[..] else {
             panic!("{refused:?}");
         };
@@ -737,30 +603,28 @@ mod tests {
             "{why}"
         );
         assert!(path.join("notes.md").exists(), "nothing changed");
-        assert_eq!(server.sessions().unwrap().len(), 1, "the agent still runs");
+        assert_eq!(client.sessions().unwrap().len(), 1, "the agent still runs");
 
         let forced = RemoveWorktree {
             force: true,
             ..asked
         };
-        let events = events(Task::RemoveWorktree(forced), &server);
+        let events = events(Task::RemoveWorktree(forced), &client);
         assert!(matches!(events[..], [Event::Removed { .. }]), "{events:?}");
         assert!(!path.exists());
-        assert_eq!(server.sessions().unwrap(), []);
+        sessions_become(&client, 0);
         assert_eq!(git_out(&repo, &["branch", "--list", "fix"]).trim(), "fix");
     }
 
     #[test]
     fn a_forced_removal_git_still_refuses_shows_why() {
-        let (tmp, repo) = repository();
-        let Some(server) = sh_server(tmp.path()) else {
-            return;
-        };
-        let (path, session) = linked(&repo, &server);
+        let (_daemon, client) = daemon();
+        let (_tmp, repo) = repository();
+        let (path, session) = linked(&repo, &client);
         git_out(&repo, &["worktree", "lock", path.to_str().unwrap()]);
         let events = events(
             Task::RemoveWorktree(remove(&repo, &path, &session, true)),
-            &server,
+            &client,
         );
         let [Event::Error { title, output }] = &events[..] else {
             panic!("{events:?}");
@@ -768,6 +632,6 @@ mod tests {
         assert_eq!(title, "fix not removed");
         assert!(output.contains("locked"), "{output}");
         assert!(path.exists());
-        assert_eq!(server.sessions().unwrap().len(), 1);
+        assert_eq!(client.sessions().unwrap().len(), 1);
     }
 }

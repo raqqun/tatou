@@ -5,7 +5,6 @@
 //! stdin is closed and git/gh prompts are disabled, so a command run in the
 //! background never waits for input.
 
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -53,23 +52,6 @@ pub fn run(program: &str, args: &[&str], cwd: Option<&Path>) -> Result<Output> {
 /// any substituted values passed through `shell_quote`.
 pub fn run_sh(script: &str, cwd: Option<&Path>) -> Result<Output> {
     run("sh", &["-c", script], cwd)
-}
-
-/// Replaces the current process with `program`, which inherits the terminal and
-/// the environment without the variables in `remove`. Only returns if the program
-/// could not be started. With variables to remove, std swaps the process's whole
-/// environment while it starts `program`, so call it only while no other thread runs.
-pub fn exec_replace(program: &str, args: &[&str], remove: &[&str]) -> Error {
-    tracing::debug!(command = %command_line(program, args), ?remove, "exec");
-    let mut command = command(program, args);
-    for name in remove {
-        command.env_remove(name);
-    }
-    let source = command.exec();
-    Error::Spawn {
-        program: program.to_string(),
-        source,
-    }
 }
 
 /// Quotes `value` for POSIX `sh` so that it is always read as one literal word.
@@ -165,13 +147,6 @@ mod tests {
         assert!(
             matches!(err, Error::Spawn { ref program, .. } if program == "tatou-no-such-program")
         );
-    }
-
-    #[test]
-    fn exec_replace_returns_when_the_program_cannot_start() {
-        // Nothing to remove: that would swap the environment under the other tests' threads
-        let err = exec_replace("tatou-no-such-program", &[], &[]);
-        assert!(matches!(err, Error::Spawn { .. }));
     }
 
     #[test]

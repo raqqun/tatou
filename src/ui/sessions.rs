@@ -1,5 +1,5 @@
-//! The sessions' pane, below the projects: every session on tatou's server, and
-//! under each, its windows.
+//! The sessions' pane, below the projects: every session the daemon has, and
+//! under each, its terminals, which it calls windows.
 
 use std::collections::HashSet;
 
@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 
 use super::projects::status_icon;
+use crate::actions::End;
 use crate::model::SessionRow;
 
 /// A row of the pane, by ids, so the selection follows it across refreshes.
@@ -44,6 +45,158 @@ impl Sessions {
 
     pub fn selected(&self) -> Option<&Row> {
         self.selected.as_ref()
+    }
+
+    /// What `d` would end, and how to ask about it: the selected window, or the
+    /// selected session with all its windows.
+    pub fn selected_end(&self) -> Option<(End, String)> {
+        let (session, window) = match self.selected.as_ref()? {
+            Row::Session(id) => (id, None),
+            Row::Window { session, window } => (session, Some(window)),
+        };
+        let session = self.sessions.iter().find(|s| &s.id == session)?;
+        match window {
+            Some(id) => {
+                let window = session.windows.iter().find(|w| &w.id == id)?;
+                let what = format!("{} in {}:{}", window.command, session.name, window.index);
+                Some((End::Window(window.id.clone()), what))
+            }
+            None => {
+                let programs: Vec<&str> =
+                    session.windows.iter().map(|w| w.command.as_str()).collect();
+                let what = match programs.len() {
+                    1 => format!("{} and its window ({})", session.name, programs[0]),
+                    n => format!(
+                        "{} and its {n} windows ({})",
+                        session.name,
+                        programs.join(", ")
+                    ),
+                };
+                Some((End::Session(session.id.clone()), what))
+            }
+        }
+    }
+
+    /// The terminal Enter shows: the selected window, or on a session, its
+    /// current one.
+    pub fn selected_terminal(&self) -> Option<String> {
+        let (session, window) = match self.selected.as_ref()? {
+            Row::Session(id) => (id, None),
+            Row::Window { session, window } => (session, Some(window)),
+        };
+        let session = self.sessions.iter().find(|s| &s.id == session)?;
+        let window = match window {
+            Some(id) => session.windows.iter().find(|w| &w.id == id),
+            None => session.windows.iter().find(|w| w.current),
+        };
+        window.map(|w| w.id.clone())
+    }
+
+    /// The current terminal of the session `step` away from `terminal`'s, wrapping
+    /// around: from none, the first session forward, the last backward. That
+    /// session becomes the selected row.
+    pub fn step(&mut self, terminal: Option<&str>, step: isize) -> Option<String> {
+        let count = self.sessions.len() as isize;
+        if count == 0 {
+            return None;
+        }
+        let from = terminal.and_then(|terminal| {
+            (self.sessions.iter()).position(|s| s.windows.iter().any(|w| w.id == terminal))
+        });
+        let index = match from {
+            Some(from) => (from as isize + step).rem_euclid(count),
+            None if step > 0 => 0,
+            None => count - 1,
+        } as usize;
+        let session = &self.sessions[index];
+        let window = session
+            .windows
+            .iter()
+            .find(|w| w.current)
+            .or(session.windows.first())?;
+        let shown = window.id.clone();
+        self.selected = Some(Row::Session(session.id.clone()));
+        self.reselect();
+        Some(shown)
+    }
+
+    /// The window `step` away from `terminal` in its session, wrapping around:
+    /// from none, the first session's first window forward, its last backward.
+    /// That window becomes the selected row.
+    pub fn step_window(&mut self, terminal: Option<&str>, step: isize) -> Option<String> {
+        let (session, from) = match terminal.and_then(|t| self.locate(t)) {
+            Some((session, window)) => (session, Some(window)),
+            None => (0, None),
+        };
+        let session = self.sessions.get(session)?;
+        let count = session.windows.len() as isize;
+        if count == 0 {
+            return None;
+        }
+        let index = match from {
+            Some(from) => (from as isize + step).rem_euclid(count),
+            None if step > 0 => 0,
+            None => count - 1,
+        } as usize;
+        let window = session.windows[index].id.clone();
+        self.collapsed.remove(&session.id);
+        self.selected = Some(Row::Window {
+            session: session.id.clone(),
+            window: window.clone(),
+        });
+        self.reselect();
+        Some(window)
+    }
+
+    /// `terminal`'s session and window, by index.
+    fn locate(&self, terminal: &str) -> Option<(usize, usize)> {
+        self.sessions.iter().enumerate().find_map(|(i, session)| {
+            let window = session.windows.iter().position(|w| w.id == terminal)?;
+            Some((i, window))
+        })
+    }
+
+    /// Forgets `terminal`, whose program ended, until the next refresh says so, and
+    /// its session with its last terminal. Returns what to show instead: another
+    /// terminal of its session, the one after it or else before; else the current
+    /// one of the next session, or else of the previous one.
+    pub fn ended(&mut self, terminal: &str) -> Option<String> {
+        let index =
+            (self.sessions.iter()).position(|s| s.windows.iter().any(|w| w.id == terminal))?;
+        let session = &mut self.sessions[index];
+        let i = session.windows.iter().position(|w| w.id == terminal)?;
+        session.windows.remove(i);
+        // The one after it took its place
+        let sibling = session.windows.get(i).or_else(|| session.windows.last());
+        if let Some(window) = sibling {
+            return Some(window.id.clone());
+        }
+        self.sessions.remove(index);
+        let current = |s: &SessionRow| {
+            let window = s.windows.iter().find(|w| w.current).or(s.windows.first());
+            window.map(|w| w.id.clone())
+        };
+        let next = self.sessions.get(index).and_then(current);
+        let previous = || {
+            index
+                .checked_sub(1)
+                .and_then(|i| self.sessions.get(i))
+                .and_then(current)
+        };
+        let shown = next.or_else(previous);
+        self.reselect();
+        shown
+    }
+
+    /// What the shown terminal's pane is titled: its session, the window's index
+    /// and what runs in it, `app-fix:1 zsh`.
+    pub fn title(&self, terminal: &str) -> String {
+        for session in &self.sessions {
+            if let Some(window) = session.windows.iter().find(|w| w.id == terminal) {
+                return format!("{}:{} {}", session.name, window.index, window.command);
+            }
+        }
+        terminal.to_string()
     }
 
     pub fn up(&mut self) {
@@ -143,7 +296,7 @@ impl Sessions {
                 continue;
             }
             for window in &session.windows {
-                let command = window.command.as_deref().unwrap_or("");
+                let command = &window.command;
                 let current = if window.current { " *" } else { "" };
                 let line = format!("    {} {command}{current}", window.index);
                 items.push(ListItem::new(line));
