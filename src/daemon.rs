@@ -543,18 +543,18 @@ impl Daemon {
 /// terminal does, the lines above going to its history: vt100 alone would drop
 /// the bottom ones, the latest output and the prompt.
 fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
-    let screen = terminal.screen.screen();
-    if (rows, cols) == screen.size() || rows == 0 || cols == 0 {
+    if (rows, cols) == terminal.screen.screen().size() || rows == 0 || cols == 0 {
         return false;
     }
-    let (row, _) = screen.cursor_position();
-    if !screen.alternate_screen() && row >= rows {
-        // Scrolled up, the cursor with its line
-        let up = row - rows + 1;
-        terminal
-            .screen
-            .process(format!("\x1b[{up}S\x1b[{up}A").as_bytes());
-    }
+    // The main screen's, also behind a full-screen program, which redraws its own
+    on_main_screen(&mut terminal.screen, |screen| {
+        let (row, _) = screen.screen().cursor_position();
+        if row >= rows {
+            // Scrolled up, the cursor with its line
+            let up = row - rows + 1;
+            screen.process(format!("\x1b[{up}S\x1b[{up}A").as_bytes());
+        }
+    });
     terminal.screen.screen_mut().set_size(rows, cols);
     let size = PtySize {
         rows,
@@ -568,11 +568,36 @@ fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
     true
 }
 
-/// What a dashboard draws `terminal` from: its history, then its screen.
+/// What a dashboard draws `terminal` from: its main screen's history and
+/// contents, then, when a full-screen program runs, the alternate screen's,
+/// switched to as the program did, which `state_formatted` alone does not say;
+/// then the input modes.
 fn screen_now(terminal: &mut Terminal) -> Vec<u8> {
-    let mut screen = history(terminal.screen.screen_mut());
-    screen.extend(terminal.screen.screen().state_formatted());
-    screen
+    let alternate = terminal.screen.screen().alternate_screen();
+    let mut bytes = Vec::new();
+    on_main_screen(&mut terminal.screen, |screen| {
+        bytes = history(screen.screen_mut());
+        bytes.extend(screen.screen().contents_formatted());
+    });
+    if alternate {
+        bytes.extend(b"\x1b[?1049h");
+        bytes.extend(terminal.screen.screen().contents_formatted());
+    }
+    bytes.extend(terminal.screen.screen().input_mode_formatted());
+    bytes
+}
+
+/// Runs `with` on `screen`'s main screen, and back to the alternate one after,
+/// when a full-screen program runs; mode 47 switches without clearing either.
+fn on_main_screen(screen: &mut vt100::Parser, with: impl FnOnce(&mut vt100::Parser)) {
+    let alternate = screen.screen().alternate_screen();
+    if alternate {
+        screen.process(b"\x1b[?47l");
+    }
+    with(screen);
+    if alternate {
+        screen.process(b"\x1b[?47h");
+    }
 }
 
 /// Sends `terminal`'s screen anew to the dashboards showing it, after a resize: a

@@ -404,15 +404,20 @@ mod tests {
     }
 
     #[test]
-    fn the_alternate_screen_comes_without_history() {
+    fn a_full_screen_program_comes_on_the_alternate_screen_the_main_one_behind() {
         let (dir, client) = daemon();
         let lines = "i=1; while [ $i -le 30 ]; do echo line $i; i=$((i + 1)); done; \
                      printf '\\033[?1049hfull screen\\n'";
         let (_stream, terminal) = printing(&client, dir.path(), lines, "full screen");
         let mut parser = screen_on_attach(&client, &terminal);
+        assert!(parser.screen().alternate_screen(), "where the program is");
         assert_eq!(parser.screen().contents_between(0, 0, 0, 40), "full screen");
-        parser.screen_mut().set_scrollback(usize::MAX);
-        assert_eq!(parser.screen().scrollback(), 0);
+        // As when the program ends: the shell's screen and history, as they were
+        parser.process(b"\x1b[?1049l");
+        let screen = parser.screen_mut();
+        assert_eq!(screen.contents_between(8, 0, 8, 40), "line 30");
+        screen.set_scrollback(usize::MAX);
+        assert_eq!(screen.contents_between(1, 0, 1, 40), "line 1");
     }
 
     #[test]
