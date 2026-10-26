@@ -6,6 +6,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 
 use crate::client::Client;
+use crate::config;
 use crate::error::Error;
 use crate::exec;
 use crate::git;
@@ -23,6 +24,11 @@ pub enum Task {
     RemoveWorktree(RemoveWorktree),
     /// Ends a window, or a session with all its windows; the worktree stays.
     End(End),
+    /// Sets the theme in the config at `config`.
+    SaveTheme {
+        config: PathBuf,
+        name: String,
+    },
 }
 
 /// What `d` ends in the sessions' pane.
@@ -122,6 +128,10 @@ pub enum Event {
     Ended,
     /// A command's whole output, to read: e.g. git refusing even a forced removal.
     Error { title: String, output: String },
+    /// The theme is in `config.toml`.
+    ThemeSaved(String),
+    /// The theme could not be written there; why.
+    ThemeNotSaved(String),
 }
 
 /// Runs `task` on a thread of its own, sending what happens to `events`.
@@ -183,6 +193,12 @@ fn run(task: Task, client: &Client, events: &Sender<Event>) {
             send(match ended {
                 Ok(()) => Event::Ended,
                 Err(err) => Event::Failed(err.to_string()),
+            });
+        }
+        Task::SaveTheme { config, name } => {
+            send(match config::save_theme(&config, &name) {
+                Ok(()) => Event::ThemeSaved(name),
+                Err(err) => Event::ThemeNotSaved(err.to_string()),
             });
         }
         Task::RestartAgent(restart) => {

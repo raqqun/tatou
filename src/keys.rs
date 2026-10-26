@@ -31,6 +31,8 @@ pub enum Action {
     OpenPr,
     RemoveWorktree,
     Edit,
+    /// Choose the dashboard's theme.
+    Theme,
     Help,
     Quit,
 }
@@ -38,7 +40,7 @@ pub enum Action {
 impl Action {
     // Not read yet: checking `[keys]` names and the help overlay list them (#41, #44)
     #[allow(dead_code)]
-    pub const ALL: [Action; 14] = [
+    pub const ALL: [Action; 15] = [
         Action::Up,
         Action::Down,
         Action::Collapse,
@@ -51,6 +53,7 @@ impl Action {
         Action::Edit,
         Action::OpenPr,
         Action::RemoveWorktree,
+        Action::Theme,
         Action::Help,
         Action::Quit,
     ];
@@ -72,6 +75,7 @@ impl Action {
             Action::OpenPr => "open_pr",
             Action::RemoveWorktree => "remove_worktree",
             Action::Edit => "edit",
+            Action::Theme => "theme",
             Action::Help => "help",
             Action::Quit => "quit",
         }
@@ -92,6 +96,7 @@ impl Action {
             Action::OpenPr => "PR",
             Action::RemoveWorktree => "remove",
             Action::Edit => "edit",
+            Action::Theme => "theme",
             Action::Help => "help",
             Action::Quit => "quit",
         }
@@ -111,6 +116,7 @@ impl Action {
             | Action::Collapse
             | Action::Expand
             | Action::SwitchPane
+            | Action::Theme
             | Action::Help
             | Action::Quit => Pane::Any,
         }
@@ -230,6 +236,7 @@ impl Keymap {
             (Key::char('e'), Action::Edit),
             (Key::char('p'), Action::OpenPr),
             (Key::char('d'), Action::RemoveWorktree),
+            (Key::char('T'), Action::Theme),
             (Key::char('?'), Action::Help),
             (Key::char('q'), Action::Quit),
             (Key::ctrl('c'), Action::Quit),
@@ -344,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn hints_show_the_focused_pane_then_help_and_quit() {
+    fn hints_show_the_focused_pane_then_theme_help_and_quit() {
         let keymap = Keymap::defaults();
         let worktrees: Vec<_> = keymap.hints(Pane::Worktrees, &[]);
         let labels: Vec<_> = worktrees.iter().map(|(k, a)| format!("{k} {a}")).collect();
@@ -358,6 +365,7 @@ mod tests {
                 "e edit",
                 "p PR",
                 "d remove",
+                "T theme",
                 "? help",
                 "q quit"
             ]
@@ -367,13 +375,13 @@ mod tests {
             .into_iter()
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(without_jump, ["n", "s", "t", "e", "p", "d", "q"]);
+        assert_eq!(without_jump, ["n", "s", "t", "e", "p", "d", "T", "q"]);
         let sessions: Vec<_> = keymap
             .hints(Pane::Sessions, &[])
             .into_iter()
             .map(|(k, a)| format!("{k} {a}"))
             .collect();
-        assert_eq!(sessions, ["⏎ jump", "d end", "? help", "q quit"]);
+        assert_eq!(sessions, ["⏎ jump", "d end", "T theme", "? help", "q quit"]);
     }
 
     #[test]

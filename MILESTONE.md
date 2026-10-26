@@ -668,6 +668,18 @@ Depends on: 2.19
 - `TestBackend` tests: `terminal` keeps today's styles; Monokai Pro colours the accent, the selection and the shown terminal's default cells, keeping its program's colours.
 - Manual check documented in the PR: `theme = "monokai-pro"` restyles a running dashboard.
 
+### 6.8 Choose the theme from the dashboard (`T`) (#112)
+
+Depends on: 6.7, 2.3
+
+- `T`, a `theme` action in `[keys]`, from any pane but the terminal: a choice list of every theme, the one in use selected. Each shows on the whole dashboard as it is selected; one in error shows why in the hint bar instead and cannot be chosen. A config reload while choosing keeps the theme shown.
+- Enter writes `theme = "…"` in `config.toml` on a background thread, changing only that line: the top-level `theme` line, else the template's `# theme = …`, else a new first line; lines from the first table on are left alone. The reload applies it in every running dashboard. Esc puts the theme back; a failed write too, with why in the hint bar.
+
+**Done when**
+- Unit tests of the line rewrite: replace, un-comment, insert, a `theme` in a table and `themes` left alone, the other lines kept; saving writes the file.
+- `TestBackend` tests: `T` on the theme in use, the preview, Esc, Enter's save, a theme in error, a reload while choosing.
+- Manual check documented in the PR: choosing `monokai-pro` writes it in `config.toml`, and a second dashboard follows.
+
 ---
 
 ## M7 — Ship
