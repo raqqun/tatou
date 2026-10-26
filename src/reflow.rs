@@ -25,12 +25,16 @@ struct Row {
 /// cursor at the same place of its line, and its input modes and attributes. The
 /// history grows to hold what narrowing makes of it, up to ten times as much. With
 /// a full-screen program running, its screen is put back over the main one, at
-/// the old size: the program draws it again for the new one.
+/// the old size: the program draws it again for the new one. A shell `at_prompt`
+/// draws its input line again too, prompt included, from its first column: that
+/// line is left empty, with the cursor at its start, as Ghostty and kitty do, or
+/// what it spanned at the old width would stay beside the new one.
 pub fn reflow(
     screen: &mut vt100::Parser,
     rows: u16,
     cols: u16,
     scrollback: usize,
+    at_prompt: bool,
 ) -> vt100::Parser {
     let alternate = screen.screen().alternate_screen();
     if alternate {
@@ -41,7 +45,13 @@ pub fn reflow(
     if alternate {
         screen.process(b"\x1b[?47h");
     }
-    let (lines, cursor) = lines(&old, cursor);
+    let width = screen.screen().size().1;
+    let (mut lines, mut cursor) = lines(&old, cursor, width);
+    if at_prompt && !alternate {
+        lines.truncate(cursor.0 + 1);
+        lines[cursor.0].clear();
+        cursor.1 = 0;
+    }
     let needed: usize = lines
         .iter()
         .map(|cells| columns(cells).div_ceil(usize::from(cols)).max(1))
@@ -142,8 +152,8 @@ fn blank(cell: &Cell, default: &[u8]) -> bool {
 /// The lines of `rows`: rows joined where they wrapped, without the blanks that
 /// end them, up to the cursor's line or the last with text, if further down; and
 /// the cursor's line, and how many columns into it it is. `cursor` is its (row,
-/// column) among `rows`.
-fn lines(rows: &[Row], cursor: (usize, u16)) -> (Vec<Vec<Cell>>, (usize, usize)) {
+/// column) among `rows`, `width` theirs.
+fn lines(rows: &[Row], cursor: (usize, u16), width: u16) -> (Vec<Vec<Cell>>, (usize, usize)) {
     let default = b"\x1b[0m".to_vec();
     let mut lines: Vec<Vec<Cell>> = Vec::new();
     let mut cursor_at = (0, 0);
@@ -157,7 +167,20 @@ fn lines(rows: &[Row], cursor: (usize, u16)) -> (Vec<Vec<Cell>>, (usize, usize))
             cursor_at = (line, columns(&lines[line]) + usize::from(cursor.1));
         }
         let mut cells = row.cells.clone();
-        if row.wrapped {
+        // A wide character one column short of the end goes on the next row, and
+        // vt100 does not say the row wrapped, as tmux: a row ending with a column
+        // never written, before one starting with a wide character, did
+        let wide_next = rows.get(index + 1).and_then(|next| next.cells.first());
+        let wrapped = row.wrapped
+            || (wide_next.is_some_and(|cell| cell.wide)
+                && columns(&cells) == usize::from(width)
+                && cells.last().is_some_and(|cell| cell.text.is_empty())
+                && cells
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .is_some_and(|cell| !cell.text.is_empty()));
+        if wrapped {
             // What was never written at its end is a wide character's gap
             while cells.last().is_some_and(|cell| cell.text.is_empty()) {
                 cells.pop();
@@ -174,7 +197,7 @@ fn lines(rows: &[Row], cursor: (usize, u16)) -> (Vec<Vec<Cell>>, (usize, usize))
             }
         }
         lines[line].extend(cells);
-        joining = row.wrapped;
+        joining = wrapped;
     }
     let last = lines
         .iter()
@@ -287,7 +310,7 @@ mod tests {
     }
 
     fn resized(parser: &mut vt100::Parser, rows: u16, cols: u16) -> vt100::Parser {
-        reflow(parser, rows, cols, HISTORY)
+        reflow(parser, rows, cols, HISTORY, false)
     }
 
     #[test]
@@ -361,10 +384,18 @@ mod tests {
         assert_eq!(all_lines(&mut narrow), ["日本", "語日", "本 o", "k"]);
         let mut back = resized(&mut narrow, 4, 14);
         assert_eq!(all_lines(&mut back), ["日本語日本 ok"]);
-        // One column short of a wide character, vt100 ends the line there, as
-        // tmux does: narrowing keeps it all, widening leaves it in two
+        // One column short of a wide character, which vt100 does not call a wrap
         let mut odd = resized(&mut back, 4, 3);
         assert_eq!(all_lines(&mut odd), ["日", "本", "語", "日", "本 ", "ok"]);
+        let mut back = resized(&mut odd, 4, 14);
+        assert_eq!(all_lines(&mut back), ["日本語日本 ok"]);
+        // A prompt's ⌚, one column short at 15 columns
+        let text = "100% 17:14:07 ⌚ raqqun0101-mac in /private/tmp";
+        let mut status = printed(4, 30, text);
+        for cols in [15, 30] {
+            status = resized(&mut status, 4, cols);
+        }
+        assert_eq!(all_lines(&mut status), all_lines(&mut printed(4, 30, text)));
     }
 
     #[test]
@@ -424,6 +455,31 @@ mod tests {
             screen = resized(&mut screen, rows, cols);
         }
         assert_eq!(all_lines(&mut screen), before);
+    }
+
+    #[test]
+    fn at_its_prompt_a_shells_input_line_is_left_for_it_to_draw_again() {
+        let mut wide = printed(6, 30, "output line\r\nstatus of the prompt\r\n> ls -la");
+        let mut narrow = reflow(&mut wide, 6, 4, HISTORY, true);
+        assert_eq!(
+            all_lines(&mut narrow),
+            [
+                "outp", "ut l", "ine", "stat", "us o", "f th", "e pr", "ompt"
+            ]
+        );
+        assert_eq!(
+            narrow.screen().cursor_position(),
+            (5, 0),
+            "at its start, below"
+        );
+        // What bash prints: back to the first column, the line cleared, drawn again
+        narrow.process(b"\r\x1b[K> ls -la");
+        let mut back = reflow(&mut narrow, 6, 30, HISTORY, true);
+        back.process(b"\r\x1b[K> ls -la");
+        assert_eq!(
+            all_lines(&mut back),
+            ["output line", "status of the prompt", "> ls -la"]
+        );
     }
 
     #[test]

@@ -30,10 +30,11 @@ use crate::reflow;
 /// the one it shows, which gets them all on attach.
 pub const SCROLLBACK: usize = 10_000;
 
-/// The smallest a terminal gets, (rows, columns): `vt100` panics wrapping text on
-/// a single row, and a wide character on a single column. A pane smaller than
-/// this shows the top left of a screen this size.
-pub const MIN_SIZE: (u16, u16) = (2, 2);
+/// The smallest a terminal gets, (rows, columns), as a terminal window's: a pane
+/// smaller than this shows the top left of a screen this size. Smaller, `vt100`
+/// panics wrapping text on a single row, and shells misbehave: bash clears its
+/// screen at 2 rows and moves over the lines above its prompt after.
+pub const MIN_SIZE: (u16, u16) = (4, 20);
 
 /// How long a daemon with nothing to do waits before ending, in case a dashboard
 /// connects meanwhile: one just starting, between its first requests.
@@ -135,6 +136,8 @@ struct Terminal {
     child: Box<dyn Child + Send + Sync>,
     /// When it last printed, in seconds since the Unix epoch.
     activity: u64,
+    /// Whether its shell waits at its prompt, which it draws again on a resize.
+    at_prompt: bool,
     /// The connections attached to it, by id.
     watchers: Vec<(u32, Sender<Reply>)>,
 }
@@ -423,6 +426,7 @@ impl Daemon {
                 writer: Arc::new(Mutex::new(writer)),
                 child,
                 activity: unix_now(),
+                at_prompt: false,
                 watchers: Vec::new(),
             },
         );
@@ -454,6 +458,7 @@ impl Daemon {
                 break;
             };
             feed(&mut terminal.screen, &buffer[..n], id);
+            terminal.at_prompt = at_prompt(terminal.at_prompt, &buffer[..n]);
             terminal.activity = unix_now();
             let output = &buffer[..n];
             terminal
@@ -559,8 +564,9 @@ fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
         return false;
     }
     let screen = &mut terminal.screen;
+    let at_prompt = terminal.at_prompt;
     let reflowed = panic::catch_unwind(AssertUnwindSafe(|| {
-        reflow::reflow(screen, rows, cols, SCROLLBACK)
+        reflow::reflow(screen, rows, cols, SCROLLBACK, at_prompt)
     }));
     terminal.screen = reflowed.unwrap_or_else(|_| {
         tracing::error!(rows, cols, "cannot reflow a screen; starting it afresh");
@@ -576,6 +582,18 @@ fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
         tracing::warn!(%err, "cannot resize a terminal");
     }
     true
+}
+
+/// Whether a shell is at its prompt after printing `output`, from `before`: a
+/// shell with shell integration marks where its input starts with OSC 133;B, and
+/// leaves the prompt with a new line, the Enter that runs a command. A mark cut in
+/// two between reads is missed, until the next prompt's.
+fn at_prompt(before: bool, output: &[u8]) -> bool {
+    const INPUT: &[u8] = b"\x1b]133;B";
+    let marked = output.windows(INPUT.len()).rposition(|w| w == INPUT);
+    let after = marked.map_or(0, |at| at + INPUT.len());
+    let left = output[after..].contains(&b'\n');
+    (before || marked.is_some()) && !left
 }
 
 /// Feeds `bytes`, terminal `id`'s output, to its screen. Should `vt100` panic on
@@ -727,14 +745,28 @@ mod tests {
         let mut screen = vt100::Parser::new(24, 80, SCROLLBACK);
         screen.process("日本語 the quick brown fox\r\n".repeat(30).as_bytes());
         let (rows, cols) = MIN_SIZE;
-        let mut small = reflow::reflow(&mut screen, rows, cols, SCROLLBACK);
+        let mut small = reflow::reflow(&mut screen, rows, cols, SCROLLBACK, false);
         small.process(
             "日本 more output that wraps\r\n\x1b[2J\x1b[H"
                 .repeat(5)
                 .as_bytes(),
         );
-        let back = reflow::reflow(&mut small, 24, 80, SCROLLBACK);
+        let back = reflow::reflow(&mut small, 24, 80, SCROLLBACK, false);
         assert_eq!(back.screen().size(), (24, 80));
+    }
+
+    #[test]
+    fn a_shell_is_at_its_prompt_from_its_input_mark_to_a_new_line() {
+        let prompt = b"\x1b]133;A\x07\r\nstatus\r\n> \x1b]133;B\x07";
+        assert!(at_prompt(false, prompt));
+        assert!(at_prompt(true, b"ls -l"), "typing");
+        assert!(!at_prompt(true, b"\r\n"), "Enter");
+        assert!(!at_prompt(false, b"output\r\nmore"), "a command's output");
+        let redrawn = b"\r\x1b[K> \x1b]133;B\x07";
+        assert!(at_prompt(false, redrawn));
+        let after = b"\r\nfile\r\n> \x1b]133;B\x07";
+        assert!(at_prompt(false, after), "the prompt again after a listing");
+        assert!(!at_prompt(false, b"no marks, no prompt"));
     }
 
     #[test]
