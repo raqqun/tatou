@@ -149,6 +149,12 @@ enum Purpose {
     Remove(RemoveWorktree),
     /// The window or session to end once confirmed.
     End(End),
+    /// The theme to save in the config at `config`; every theme, loaded, to show
+    /// each as it is selected.
+    Theme {
+        config: PathBuf,
+        themes: Vec<(String, std::result::Result<Theme, String>)>,
+    },
     /// Only to read, e.g. a command's output.
     Notice,
 }
@@ -169,7 +175,7 @@ struct App {
     config: std::result::Result<Config, String>,
     /// Why the config could not be loaded again; the last valid one stays meanwhile.
     reload_error: Option<String>,
-    /// The config's, else the default one.
+    /// The config's, else the default one; while choosing, the one selected.
     theme: Theme,
     /// `None` in tests.
     refresh: Option<Refresh>,
@@ -269,9 +275,9 @@ impl App {
         }
         self.message = None;
         if let Some(open) = &mut self.dialog {
-            let outcome = open.dialog.key(key);
-            if outcome != Outcome::Open {
-                self.answered(outcome);
+            match open.dialog.key(key) {
+                Outcome::Open => self.preview_theme(),
+                outcome => self.answered(outcome),
             }
             return;
         }
@@ -378,6 +384,14 @@ impl App {
                 let message = Dialog::Message(Message::new(&title, &output));
                 self.open_over(message, Purpose::Notice, &output);
             }
+            // Shown already; the config's reload applies it to every dashboard
+            Event::ThemeSaved(name) => {
+                self.message = Some(format!("Theme {name}, saved in config.toml"));
+            }
+            Event::ThemeNotSaved(err) => {
+                self.theme = self.configured_theme();
+                self.message = Some(format!("The theme is not saved: {err}"));
+            }
         }
     }
 
@@ -412,7 +426,9 @@ impl App {
         if let Some(refresh) = &mut self.refresh {
             refresh.set_projects(&project_paths(&config));
         }
-        self.theme = config.theme.clone();
+        if !self.choosing_theme() {
+            self.theme = config.theme.clone();
+        }
         self.config = Ok(config);
         self.reload_error = None;
     }
@@ -445,6 +461,7 @@ impl App {
         let sessions = self.focus == Pane::Sessions;
         match action {
             Action::Quit => self.quit = true,
+            Action::Theme => self.choose_theme(),
             Action::Up if sessions => self.sessions.up(),
             Action::Down if sessions => self.sessions.down(),
             Action::Collapse if sessions => self.sessions.collapse(),
@@ -485,6 +502,9 @@ impl App {
         let Some(open) = self.dialog.take() else {
             return;
         };
+        if let Purpose::Theme { .. } = open.purpose {
+            return self.theme_answered(outcome, open);
+        }
         if outcome != Outcome::Submit {
             return;
         }
@@ -505,6 +525,97 @@ impl App {
             }
             (Purpose::End(end), Dialog::Confirm(_)) => self.tasks.push(Task::End(end)),
             _ => {}
+        }
+    }
+
+    /// `T`: the themes, the one in use selected.
+    fn choose_theme(&mut self) {
+        let Ok(config) = &self.config else {
+            return self.message = Some("Fix config.toml to choose a theme".to_string());
+        };
+        let dir = config::themes_dir(&config.path);
+        let themes: Vec<_> = theme::names(&dir)
+            .into_iter()
+            .map(|name| {
+                let file = dir.join(format!("{name}.toml"));
+                let loaded = theme::load(&dir, &name)
+                    .map_err(|err| format!("{name}: {}", one_line(&err, &file)));
+                (name, loaded)
+            })
+            .collect();
+        let names = themes.iter().map(|(name, _)| name.clone()).collect();
+        let choice = Choice::new("Theme", names, &self.theme.name);
+        let purpose = Purpose::Theme {
+            config: config.path.clone(),
+            themes,
+        };
+        self.dialog = Some(Open {
+            dialog: Dialog::Choice(choice),
+            purpose,
+        });
+    }
+
+    /// The theme dialog's selection, and the theme it shows: `Err` when it is in error.
+    fn selected_theme(&self) -> Option<(&Path, std::result::Result<&Theme, &str>)> {
+        let Some(Open {
+            dialog: Dialog::Choice(choice),
+            purpose: Purpose::Theme { config, themes },
+        }) = &self.dialog
+        else {
+            return None;
+        };
+        let name = choice.selected()?;
+        let (_, loaded) = themes.iter().find(|(n, _)| n == name)?;
+        Some((config, loaded.as_ref().map_err(String::as_str)))
+    }
+
+    fn choosing_theme(&self) -> bool {
+        matches!(
+            self.dialog,
+            Some(Open {
+                purpose: Purpose::Theme { .. },
+                ..
+            })
+        )
+    }
+
+    /// Shows the theme selected in the theme dialog, or why it cannot be.
+    fn preview_theme(&mut self) {
+        match self.selected_theme() {
+            Some((_, Ok(theme))) => self.theme = theme.clone(),
+            Some((_, Err(err))) => self.message = Some(err.to_string()),
+            None => {}
+        }
+    }
+
+    /// Enter saves the theme selected, unless it is in error; Esc puts the theme back.
+    fn theme_answered(&mut self, outcome: Outcome, open: Open) {
+        self.dialog = Some(open);
+        if outcome != Outcome::Submit {
+            self.dialog = None;
+            self.theme = self.configured_theme();
+            return;
+        }
+        let save = match self.selected_theme() {
+            Some((_, Err(err))) => return self.message = Some(err.to_string()),
+            Some((config, Ok(theme))) => (config.to_path_buf(), theme.clone()),
+            None => return self.dialog = None,
+        };
+        self.dialog = None;
+        let (config, theme) = save;
+        let unchanged = theme.name == self.configured_theme().name;
+        self.theme = theme;
+        if !unchanged {
+            let name = self.theme.name.clone();
+            self.tasks.push(Task::SaveTheme { config, name });
+        }
+    }
+
+    /// The theme the config names, else the default one.
+    fn configured_theme(&self) -> Theme {
+        match &self.config {
+            Ok(config) => config.theme.clone(),
+            Err(_) => theme::terminal(),
         }
     }
 
@@ -1151,7 +1262,7 @@ mod tests {
             "│▾ web                                 ││                                                │",
             "│  · main  repo                        ││                                                │",
             "└──────────────────────────────────────┘└────────────────────────────────────────────────┘",
-            "n new  e edit  ? help  q quit",
+            "n new  e edit  T theme  ? help  q quit",
         ];
         assert_eq!(screen(&mut app, 90, 8), expected);
     }
@@ -1272,7 +1383,10 @@ mod tests {
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Sessions);
         let lines = screen(&mut app, 80, 12);
-        assert_eq!(lines[11], "? help  q quit", "no session to jump to");
+        assert_eq!(
+            lines[11], "T theme  ? help  q quit",
+            "no session to jump to"
+        );
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Worktrees, "no third pane");
 
@@ -1372,13 +1486,13 @@ mod tests {
         let mut app = with_a_session();
         assert_eq!(
             hint_line(&mut app),
-            "n new  e edit  ? help  q quit",
+            "n new  e edit  T theme  ? help  q quit",
             "project"
         );
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(
             hint_line(&mut app),
-            "n new  s start agent  t shell  e edit  p PR  ? help  q quit",
+            "n new  s start agent  t shell  e edit  p PR  T theme  ? help  q quit",
             "no session, and the main worktree: no remove"
         );
         press(&mut app, KeyCode::Char('j'));
@@ -2379,7 +2493,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         ]);
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Sessions);
-        assert!(hint_line(&mut app).starts_with("⏎ jump  d end  ? help"));
+        assert!(hint_line(&mut app).starts_with("⏎ jump  d end  T theme  ? help"));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
         assert_eq!(shown(&app), Some("%2"));
@@ -2554,6 +2668,101 @@ unknown field `popop`, expected one of `popup`, `back`";
         let buffer = styles(&mut app, 100, 20);
         let plain = &buffer[(41, 1)];
         assert_eq!((plain.fg, plain.bg), (Color::Reset, Color::Reset));
+    }
+
+    /// With a config whose `themes/` has an invalid theme, `broken`; the themes
+    /// are listed as broken, monokai-pro, terminal.
+    fn with_themes(config: &str) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, config).unwrap();
+        std::fs::create_dir(dir.path().join("themes")).unwrap();
+        std::fs::write(dir.path().join("themes/broken.toml"), "border = \"red\"\n").unwrap();
+        let app = App::new(config::load_from(&path, None).map_err(|err| err.to_string()));
+        (dir, app)
+    }
+
+    fn choice(app: &App) -> Option<&str> {
+        match &app.dialog {
+            Some(Open {
+                dialog: Dialog::Choice(choice),
+                purpose: Purpose::Theme { .. },
+            }) => choice.selected(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn t_previews_each_theme_and_esc_puts_it_back() {
+        let (_dir, mut app) = with_themes("");
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(choice(&app), Some("terminal"), "the one in use");
+        assert!(hint_line(&mut app).contains("choose"), "the dialog's keys");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(choice(&app), Some("monokai-pro"));
+        assert_eq!(app.theme.name, "monokai-pro", "shown as selected");
+        assert_eq!(app.tasks, [], "not saved yet");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.theme.name, "terminal", "put back");
+        assert_eq!(app.tasks, []);
+    }
+
+    #[test]
+    fn enter_saves_the_theme_chosen() {
+        let (dir, mut app) = with_themes("");
+        press(&mut app, KeyCode::Char('T'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.tasks, [], "the theme in use: nothing to save");
+
+        press(&mut app, KeyCode::Char('T'));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.theme.name, "monokai-pro");
+        let config = dir.path().join("config.toml");
+        let name = "monokai-pro".to_string();
+        assert_eq!(app.tasks, [Task::SaveTheme { config, name }]);
+
+        event(&mut app, actions::Event::ThemeSaved("monokai-pro".into()));
+        assert_eq!(app.theme.name, "monokai-pro");
+        event(&mut app, actions::Event::ThemeNotSaved("read-only".into()));
+        assert_eq!(app.theme.name, "terminal", "back to the config's");
+        assert!(app.message.as_deref().unwrap().contains("read-only"));
+    }
+
+    #[test]
+    fn a_theme_in_error_shows_why_and_cannot_be_chosen() {
+        let (_dir, mut app) = with_themes("theme = \"monokai-pro\"\n");
+        press(&mut app, KeyCode::Char('T'));
+        assert_eq!(choice(&app), Some("monokai-pro"));
+        press(&mut app, KeyCode::Up);
+        assert_eq!(choice(&app), Some("broken"));
+        assert_eq!(app.theme.name, "monokai-pro", "the last good one stays");
+        let hints = hint_line(&mut app);
+        assert!(
+            hints.starts_with("broken: unknown field `border`"),
+            "{hints}"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(choice(&app), Some("broken"), "still open");
+        assert!(app.message.is_some());
+        assert_eq!(app.tasks, []);
+    }
+
+    #[test]
+    fn a_reload_while_choosing_keeps_the_theme_shown() {
+        let (_dir, mut app) = with_themes("");
+        press(&mut app, KeyCode::Char('T'));
+        press(&mut app, KeyCode::Up);
+        reload(&mut app, Ok(test_config()));
+        assert_eq!(app.theme.name, "monokai-pro");
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.theme.name, "terminal");
+        let (_dir, other) = with_themes("theme = \"monokai-pro\"\n");
+        reload(&mut app, other.config);
+        assert_eq!(app.theme.name, "monokai-pro", "not choosing: the config's");
     }
 
     fn test_config() -> Config {

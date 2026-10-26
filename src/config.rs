@@ -22,7 +22,8 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # default_agent = "claude"
 
 # Colours of the dashboard: a built-in theme, terminal (the terminal's own
-# palette) or monokai-pro, or one of yours, a file in themes/ next to this one
+# palette) or monokai-pro, or one of yours, a file in themes/ next to this one.
+# `T` in the dashboard chooses one and writes it on this line
 # theme = "terminal"
 
 # Commands that start an agent; added to the built-in claude and codex, or
@@ -347,6 +348,53 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     result.map_err(io_error)
+}
+
+/// Sets `theme = "<name>"` in the config at `path`, changing that line only, so
+/// that every other setting and comment stays as written; see `with_theme`.
+pub fn save_theme(path: &Path, name: &str) -> Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => TEMPLATE.to_string(),
+        Err(source) => {
+            return Err(Error::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    write_atomic(path, &with_theme(&text, name))
+}
+
+/// `text` with its `theme` line set to `name`: the setting's line, else the
+/// template's commented one, else a new first line. Only lines before the first
+/// table are settings of `config.toml` itself; a `theme` under `[agents]` is an agent.
+fn with_theme(text: &str, name: &str) -> String {
+    let line = format!("theme = {}\n", toml::Value::String(name.to_string()));
+    let mut lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let top = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let is_theme = |line: &str, commented: bool| {
+        let mut line = line.trim_start();
+        if commented {
+            match line.strip_prefix('#') {
+                Some(rest) => line = rest.trim_start(),
+                None => return false,
+            }
+        }
+        line.strip_prefix("theme")
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    };
+    let at = (0..top)
+        .find(|&i| is_theme(lines[i], false))
+        .or_else(|| (0..top).find(|&i| is_theme(lines[i], true)));
+    match at {
+        Some(i) => lines[i] = &line,
+        None => lines.insert(0, &line),
+    }
+    lines.concat()
 }
 
 /// Creates the template at `path`, unless a file is already there.
@@ -928,6 +976,51 @@ mod tests {
         assert_eq!(tilde(home, Some(home)), "~");
         assert_eq!(tilde(Path::new("/home/meow"), Some(home)), "/home/meow");
         assert_eq!(tilde(Path::new("/srv/app"), None), "/srv/app");
+    }
+
+    #[test]
+    fn the_theme_line_is_replaced_and_nothing_else() {
+        let text = "# mine\ndefault_agent = \"codex\"\ntheme = \"terminal\"  # old\n\n[agents]\n";
+        assert_eq!(
+            with_theme(text, "monokai-pro"),
+            "# mine\ndefault_agent = \"codex\"\ntheme = \"monokai-pro\"\n\n[agents]\n"
+        );
+    }
+
+    #[test]
+    fn the_templates_theme_line_is_uncommented() {
+        let text = with_theme(TEMPLATE, "monokai-pro");
+        assert!(text.contains("\ntheme = \"monokai-pro\"\n"), "{text}");
+        assert!(!text.contains("# theme ="), "{text}");
+        assert_eq!(text.lines().count(), TEMPLATE.lines().count());
+        assert_eq!(parse_ok(&text).theme.name, "monokai-pro");
+    }
+
+    #[test]
+    fn without_a_theme_line_one_is_added_first() {
+        let text = "themes = 1\n# theme: mine\n[agents]\ntheme = \"theme\"\n# theme = \"x\"\n";
+        assert_eq!(
+            with_theme(text, "mine"),
+            format!("theme = \"mine\"\n{text}"),
+            "`themes`, prose and the lines of a table stay"
+        );
+        assert_eq!(with_theme("", "mine"), "theme = \"mine\"\n");
+        assert_eq!(
+            with_theme("default_agent = \"claude\"", "a\"b"),
+            "theme = 'a\"b'\ndefault_agent = \"claude\""
+        );
+    }
+
+    #[test]
+    fn saving_the_theme_writes_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "default_agent = \"codex\"\n").unwrap();
+        save_theme(&path, "monokai-pro").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "theme = \"monokai-pro\"\ndefault_agent = \"codex\"\n");
+        let config = load_from(&path, None).unwrap();
+        assert_eq!(config.theme.name, "monokai-pro");
     }
 
     #[test]
