@@ -19,7 +19,7 @@ use tui_term::vt100;
 use tui_term::widget::PseudoTerminal;
 
 use crate::actions::{
-    self, EDITOR, NewWorktree, Program, RemoveWorktree, RestartAgent, StartAgent, Task,
+    self, EDITOR, End, NewWorktree, Program, RemoveWorktree, RestartAgent, StartAgent, Task,
 };
 use crate::client::{Client, Stream};
 use crate::config::{self, Config};
@@ -149,6 +149,8 @@ enum Purpose {
     Restart(RestartAgent),
     /// The removal to run once confirmed, forced or not.
     Remove(RemoveWorktree),
+    /// The window or session to end once confirmed.
+    End(End),
     /// Only to read, e.g. a command's output.
     Notice,
 }
@@ -361,6 +363,11 @@ impl App {
                     refresh.sessions_now();
                 }
             }
+            Event::Ended => {
+                if let Some(refresh) = &self.refresh {
+                    refresh.sessions_now();
+                }
+            }
             Event::Error { title, output } => {
                 self.progress = None;
                 let message = Dialog::Message(Message::new(&title, &output));
@@ -452,6 +459,7 @@ impl App {
             Action::Shell if worktrees => self.open(None, false),
             Action::Edit if worktrees => self.open(Some(EDITOR), true),
             Action::RemoveWorktree if worktrees => self.confirm_remove(),
+            Action::RemoveWorktree if sessions => self.confirm_end(),
             // Between Projects and Sessions only: Enter goes into the terminal, and
             // in it Tab is the program's
             Action::SwitchPane => {
@@ -489,8 +497,25 @@ impl App {
             (Purpose::Remove(remove), Dialog::Confirm(_)) => {
                 self.tasks.push(Task::RemoveWorktree(remove));
             }
+            (Purpose::End(end), Dialog::Confirm(_)) => self.tasks.push(Task::End(end)),
             _ => {}
         }
+    }
+
+    /// `d` in the sessions' pane: asks before ending the selected window, or session.
+    fn confirm_end(&mut self) {
+        let Some((end, what)) = self.sessions.selected_end() else {
+            return;
+        };
+        let (title, programs) = match end {
+            End::Window(_) => ("End the window", "Its program stops"),
+            End::Session(_) => ("End the session", "Its programs stop"),
+        };
+        let question = format!("End {what}? {programs}; the worktree stays.");
+        self.dialog = Some(Open {
+            dialog: Dialog::Confirm(Confirm::new(title, &question, false)),
+            purpose: Purpose::End(end),
+        });
     }
 
     /// `d` on a linked worktree: asks before removing it and closing its session.
@@ -722,7 +747,7 @@ impl App {
     /// The actions that do not apply to the selected row.
     fn hidden(&self) -> &'static [Action] {
         if self.focus == Pane::Sessions && self.sessions.selected().is_none() {
-            return &[Action::Jump];
+            return &[Action::Jump, Action::RemoveWorktree];
         }
         if self.focus != Pane::Worktrees {
             return &[];
@@ -2240,6 +2265,42 @@ unknown field `popop`, expected one of `popup`, `back`";
     }
 
     #[test]
+    fn d_ends_the_selected_window_or_session_once_confirmed() {
+        let mut app = with_sessions(vec![with_windows(
+            "$1",
+            "app-fix",
+            "/code/app.worktrees/fix",
+        )]);
+        app.focus = Pane::Sessions;
+        assert!(
+            hint_line(&mut app).contains("d end"),
+            "{}",
+            hint_line(&mut app)
+        );
+        // The session: all its windows, after a yes
+        press(&mut app, KeyCode::Char('d'));
+        let lines = screen(&mut app, 100, 14).join("\n");
+        assert!(lines.contains("End the session"), "{lines}");
+        assert!(
+            lines.contains("app-fix and its 2 windows (claude, zsh)"),
+            "{lines}"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.tasks, [], "no by default");
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.tasks, [Task::End(End::Session("$1".into()))]);
+        // A window
+        app.tasks.clear();
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('d'));
+        let lines = screen(&mut app, 100, 14).join("\n");
+        assert!(lines.contains("claude in app-fix:0"), "{lines}");
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.tasks, [Task::End(End::Window("%10".into()))]);
+    }
+
+    #[test]
     fn without_sessions_the_pane_says_so() {
         let mut app = with_sessions(vec![]);
         assert_eq!(sessions_pane(&mut app, 20), ["No sessions"]);
@@ -2280,7 +2341,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         ]);
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Pane::Sessions);
-        assert!(hint_line(&mut app).starts_with("⏎ jump  ? help"));
+        assert!(hint_line(&mut app).starts_with("⏎ jump  d end  ? help"));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
         assert_eq!(shown(&app), Some("%2"));

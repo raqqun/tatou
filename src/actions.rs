@@ -21,6 +21,17 @@ pub enum Task {
     /// A shell, or the editor, in a worktree, shown in the dashboard.
     Program(Program),
     RemoveWorktree(RemoveWorktree),
+    /// Ends a window, or a session with all its windows; the worktree stays.
+    End(End),
+}
+
+/// What `d` ends in the sessions' pane.
+#[derive(Debug, Clone, PartialEq)]
+pub enum End {
+    /// A terminal: `%3`.
+    Window(String),
+    /// A session: `$2`.
+    Session(String),
 }
 
 /// A linked worktree to remove, and its session to end once it is gone.
@@ -107,6 +118,8 @@ pub enum Event {
     RemoveRefused { remove: RemoveWorktree, why: String },
     /// The worktree is gone, and its session.
     Removed { project: PathBuf, name: String },
+    /// A window or a session is ending: its programs were told to.
+    Ended,
     /// A command's whole output, to read: e.g. git refusing even a forced removal.
     Error { title: String, output: String },
 }
@@ -162,6 +175,16 @@ fn run(task: Task, client: &Client, events: &Sender<Event>) {
             });
         }
         Task::RemoveWorktree(remove) => send(remove_worktree(remove, client)),
+        Task::End(end) => {
+            let ended = match &end {
+                End::Window(terminal) => client.kill(terminal),
+                End::Session(session) => client.kill_session(session),
+            };
+            send(match ended {
+                Ok(()) => Event::Ended,
+                Err(err) => Event::Failed(err.to_string()),
+            });
+        }
         Task::RestartAgent(restart) => {
             send(Event::Progress(format!(
                 "{}: restarting the agent",
@@ -442,6 +465,54 @@ mod tests {
             session_name: "app-fix".into(),
             command: command.map(String::from),
         })
+    }
+
+    #[test]
+    fn ends_a_window_or_a_whole_session_and_never_the_worktree() {
+        let (dir, client) = daemon();
+        let agent = client
+            .spawn(None, "app-fix", dir.path(), Some("sleep 1000"), true)
+            .unwrap();
+        let session = client.sessions().unwrap()[0].id.clone();
+        let shell = client
+            .spawn(
+                Some(&session),
+                "app-fix",
+                dir.path(),
+                Some("sleep 1001"),
+                false,
+            )
+            .unwrap();
+        client
+            .spawn(None, "notes", dir.path(), Some("sleep 1002"), false)
+            .unwrap();
+
+        let ended = events(Task::End(End::Window(agent)), &client);
+        assert_eq!(ended, [Event::Ended]);
+        let since = Instant::now();
+        loop {
+            let sessions = client.sessions().unwrap();
+            let windows: Vec<_> = sessions[0].windows.iter().map(|w| w.id.clone()).collect();
+            if windows == [shell.clone()] {
+                break;
+            }
+            assert!(since.elapsed() < Duration::from_secs(5), "{windows:?}");
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        let ended = events(Task::End(End::Session(session)), &client);
+        assert_eq!(ended, [Event::Ended]);
+        sessions_become(&client, 1);
+        assert!(dir.path().exists());
+        let gone = events_of_end(&client, "$99");
+        assert!(
+            matches!(&gone[..], [Event::Failed(m)] if m == "no session $99"),
+            "{gone:?}"
+        );
+    }
+
+    fn events_of_end(client: &Client, session: &str) -> Vec<Event> {
+        events(Task::End(End::Session(session.into())), client)
     }
 
     #[test]

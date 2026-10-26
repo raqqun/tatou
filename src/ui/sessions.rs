@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 
 use super::projects::status_icon;
+use crate::actions::End;
 use crate::model::SessionRow;
 
 /// A row of the pane, by ids, so the selection follows it across refreshes.
@@ -44,6 +45,36 @@ impl Sessions {
 
     pub fn selected(&self) -> Option<&Row> {
         self.selected.as_ref()
+    }
+
+    /// What `d` would end, and how to ask about it: the selected window, or the
+    /// selected session with all its windows.
+    pub fn selected_end(&self) -> Option<(End, String)> {
+        let (session, window) = match self.selected.as_ref()? {
+            Row::Session(id) => (id, None),
+            Row::Window { session, window } => (session, Some(window)),
+        };
+        let session = self.sessions.iter().find(|s| &s.id == session)?;
+        match window {
+            Some(id) => {
+                let window = session.windows.iter().find(|w| &w.id == id)?;
+                let what = format!("{} in {}:{}", window.command, session.name, window.index);
+                Some((End::Window(window.id.clone()), what))
+            }
+            None => {
+                let programs: Vec<&str> =
+                    session.windows.iter().map(|w| w.command.as_str()).collect();
+                let what = match programs.len() {
+                    1 => format!("{} and its window ({})", session.name, programs[0]),
+                    n => format!(
+                        "{} and its {n} windows ({})",
+                        session.name,
+                        programs.join(", ")
+                    ),
+                };
+                Some((End::Session(session.id.clone()), what))
+            }
+        }
     }
 
     /// The terminal Enter shows: the selected window, or on a session, its

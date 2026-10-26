@@ -116,11 +116,20 @@ impl Action {
         }
     }
 
-    /// Whether the action does something in `pane`: its own, and jumping in the
-    /// sessions' pane too.
+    /// Whether the action does something in `pane`: its own, and jumping and
+    /// removing (ending a window or a session) in the sessions' pane too.
     pub fn applies(self, pane: Pane) -> bool {
         let own = self.pane();
-        own == pane || own == Pane::Any || (self == Action::Jump && pane == Pane::Sessions)
+        let sessions = matches!(self, Action::Jump | Action::RemoveWorktree);
+        own == pane || own == Pane::Any || (sessions && pane == Pane::Sessions)
+    }
+
+    /// What the hint bar calls it in `pane`: in the sessions' pane, `d` ends.
+    pub fn label_in(self, pane: Pane) -> &'static str {
+        match (self, pane) {
+            (Action::RemoveWorktree, Pane::Sessions) => "end",
+            _ => self.label(),
+        }
     }
 
     /// Moving around is not worth space in the hint bar.
@@ -244,7 +253,7 @@ impl Keymap {
         for (key, action) in &self.bindings {
             if wanted(*action) && !action.is_navigation() && !shown.contains(action) {
                 shown.push(*action);
-                hints.push((key.label(), action.label()));
+                hints.push((key.label(), action.label_in(pane)));
             }
         }
         hints
@@ -364,7 +373,7 @@ mod tests {
             .into_iter()
             .map(|(k, a)| format!("{k} {a}"))
             .collect();
-        assert_eq!(sessions, ["⏎ jump", "? help", "q quit"]);
+        assert_eq!(sessions, ["⏎ jump", "d end", "? help", "q quit"]);
     }
 
     #[test]

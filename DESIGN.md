@@ -101,6 +101,12 @@ One binary:
 | `d` | Remove worktree | `git worktree remove`, then end its session (confirm; force only if explicitly confirmed; never the main worktree; the branch stays) |
 | `a` | Add project | path dialog → write a project file in `projects/` (as `tatou add`) |
 
+### On a session or a window (Sessions pane)
+| Default key | Action | Implemented as |
+|---|---|---|
+| `Enter` | Show it | attach to the window, or the session's current one |
+| `d` | End it | confirm (`[y/N]`) → end the window's program, or every program of the session; the worktree and its branch stay |
+
 All keys are configurable (§9). Custom actions run a shell command in a new terminal of the worktree's session (6.2).
 
 ## 8. How it works

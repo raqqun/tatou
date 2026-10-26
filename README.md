@@ -56,7 +56,7 @@ In the dashboard:
 | `s` | start the agent in the selected worktree, or restart it |
 | `t` | open a shell in the selected worktree |
 | `e` | open `$EDITOR` in the selected worktree (on a project: its repository) |
-| `d` | remove the selected worktree (its branch stays) |
+| `d` | in Projects, remove the selected worktree (its branch stays); in Sessions, end the selected window, or session with all its windows |
 | `q` | quit the dashboard; agents, shells and editors keep running |
 
 What you open shows on the right and takes the keys: everything you type goes to it, but these, which work from anywhere:
