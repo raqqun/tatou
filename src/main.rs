@@ -12,6 +12,7 @@ mod logging;
 mod model;
 mod platform;
 mod protocol;
+mod reflow;
 mod refresh;
 mod term;
 mod theme;

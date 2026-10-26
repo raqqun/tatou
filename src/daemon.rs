@@ -23,6 +23,7 @@ use tui_term::vt100;
 use crate::config;
 use crate::error::Result;
 use crate::protocol::{Reply, Request, Session, Window};
+use crate::reflow;
 
 /// Lines of scrollback kept per terminal, by the daemon and by the dashboard for
 /// the one it shows, which gets them all on attach.
@@ -539,23 +540,13 @@ impl Daemon {
 }
 
 /// Gives `terminal` a new size, its screen and its program's; false when it has
-/// it already. A screen losing rows keeps its cursor's line in sight, as a
-/// terminal does, the lines above going to its history: vt100 alone would drop
-/// the bottom ones, the latest output and the prompt.
+/// it already. Its screen is reflowed, as a terminal's, lines wrapping again at
+/// the new width with nothing lost, and its cursor's line kept in sight.
 fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
     if (rows, cols) == terminal.screen.screen().size() || rows == 0 || cols == 0 {
         return false;
     }
-    // The main screen's, also behind a full-screen program, which redraws its own
-    on_main_screen(&mut terminal.screen, |screen| {
-        let (row, _) = screen.screen().cursor_position();
-        if row >= rows {
-            // Scrolled up, the cursor with its line
-            let up = row - rows + 1;
-            screen.process(format!("\x1b[{up}S\x1b[{up}A").as_bytes());
-        }
-    });
-    terminal.screen.screen_mut().set_size(rows, cols);
+    terminal.screen = reflow::reflow(&mut terminal.screen, rows, cols, SCROLLBACK);
     let size = PtySize {
         rows,
         cols,
