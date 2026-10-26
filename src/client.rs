@@ -175,6 +175,15 @@ impl Stream {
     }
 }
 
+#[cfg(test)]
+impl Stream {
+    /// A stream whose requests the test reads, in place of the daemon.
+    pub fn testing() -> (Stream, std::sync::mpsc::Receiver<Request>) {
+        let (requests, received) = std::sync::mpsc::channel();
+        (Stream { requests }, received)
+    }
+}
+
 fn unexpected(reply: Reply) -> Error {
     Error::Daemon(format!("unexpected reply from the daemon: {reply:?}"))
 }

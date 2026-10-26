@@ -7,11 +7,14 @@ mod terminal;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
@@ -53,6 +56,9 @@ const PREVIOUS_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifie
 /// The width of the Projects and Sessions column; the terminal takes the rest.
 const LEFT_WIDTH: u16 = 40;
 
+/// Two clicks on one cell within this are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 /// Lines of scrollback kept for the shown terminal.
 const SCROLLBACK: usize = 1_000;
 
@@ -90,7 +96,12 @@ pub fn run(client: Client) -> Result<()> {
     // Debug builds only: checks that a panic leaves the terminal usable
     let panic_after_first_frame =
         cfg!(debug_assertions) && std::env::var_os("TATOU_PANIC").is_some();
+    let mut mouse = false;
     loop {
+        if app.wants_mouse() != mouse {
+            mouse = !mouse;
+            terminal::capture_mouse(mouse).map_err(Error::Terminal)?;
+        }
         terminal
             .draw(|frame| app.render(frame))
             .map_err(Error::Terminal)?;
@@ -129,6 +140,16 @@ struct Shown {
     /// `%3`.
     terminal: String,
     screen: vt100::Parser,
+}
+
+/// Where the panes were last drawn, to find what a click is on; empty when not drawn.
+#[derive(Default)]
+struct Areas {
+    projects: Rect,
+    sessions: Rect,
+    /// The shown terminal's pane, borders included, and inside them.
+    terminal: Rect,
+    terminal_inner: Rect,
 }
 
 /// An open dialog, and what its answer is for.
@@ -188,6 +209,10 @@ struct App {
     focus: Pane,
     /// Takes the keys while open; drawn over the panes.
     dialog: Option<Open>,
+    areas: Areas,
+    /// The last left click, unless it was the second of a double one: when, and
+    /// on which cell.
+    last_click: Option<(Instant, u16, u16)>,
     /// Shown in place of the hints until the next key press.
     message: Option<String>,
     /// What a background action is doing, shown in place of the hints until it ends.
@@ -222,6 +247,8 @@ impl App {
             keymap: Keymap::defaults(),
             focus: Pane::Worktrees,
             dialog: None,
+            areas: Areas::default(),
+            last_click: None,
             message: None,
             progress: None,
             select_when_listed: None,
@@ -239,6 +266,9 @@ impl App {
         {
             let bytes = term::paste_bytes(text, self.modes());
             return self.send(Request::Input(bytes));
+        }
+        if let Event::Mouse(mouse) = event {
+            return self.mouse(mouse, Instant::now());
         }
         let Event::Key(key) = event else {
             return;
@@ -283,6 +313,97 @@ impl App {
         }
         if let Some(action) = self.keymap.action(Key::from_event(key)) {
             self.handle(action);
+        }
+    }
+
+    /// Whether the dashboard takes the mouse from its terminal: unless the focus is
+    /// in the shown terminal, whose program then has it only when it asked for it.
+    /// Otherwise the terminal keeps it, and a drag selects the program's text.
+    fn wants_mouse(&self) -> bool {
+        let reading = self.modes().mouse != vt100::MouseProtocolMode::None;
+        self.focus != Pane::Terminal || self.dialog.is_some() || reading
+    }
+
+    /// A click selects in a pane and moves the focus there, a double one acts as
+    /// Enter; the wheel moves the selection of the pane under it. In the shown
+    /// terminal, a click gives it the focus, and the mouse goes to its program when
+    /// it asked. An open dialog takes the mouse; `now` times double clicks.
+    fn mouse(&mut self, mouse: MouseEvent, now: Instant) {
+        let (x, y) = (mouse.column, mouse.row);
+        let position = Position::new(x, y);
+        let click = mouse.kind == MouseEventKind::Down(MouseButton::Left);
+        let mut double = false;
+        if click {
+            self.message = None;
+            double = self.last_click.is_some_and(|(at, cx, cy)| {
+                (cx, cy) == (x, y) && now.saturating_duration_since(at) <= DOUBLE_CLICK
+            });
+            self.last_click = if double { None } else { Some((now, x, y)) };
+        }
+        let wheel = match mouse.kind {
+            MouseEventKind::ScrollUp => Some(KeyCode::Up),
+            MouseEventKind::ScrollDown => Some(KeyCode::Down),
+            _ => None,
+        };
+        if let Some(open) = &mut self.dialog {
+            let outcome = match (click, wheel) {
+                (true, _) => open.dialog.click(position, double),
+                // Not in a form, where ↑↓ move between its fields
+                (_, Some(code)) if !matches!(open.dialog, Dialog::Form(_)) => {
+                    open.dialog.key(KeyEvent::new(code, KeyModifiers::NONE))
+                }
+                _ => return,
+            };
+            match outcome {
+                Outcome::Open => self.preview_theme(),
+                outcome => self.answered(outcome),
+            }
+            return;
+        }
+        if self.areas.terminal.contains(position) {
+            if self.shown.is_none() {
+                return;
+            }
+            if click {
+                self.focus = Pane::Terminal;
+            }
+            let inner = self.areas.terminal_inner;
+            if inner.contains(position) {
+                let bytes = term::mouse_bytes(mouse, x - inner.x, y - inner.y, self.modes());
+                if !bytes.is_empty() {
+                    self.send(Request::Input(bytes));
+                }
+            }
+            return;
+        }
+        let pane = if self.areas.projects.contains(position) {
+            Pane::Worktrees
+        } else if self.areas.sessions.contains(position) {
+            Pane::Sessions
+        } else {
+            return;
+        };
+        match (pane, wheel) {
+            (Pane::Worktrees, Some(KeyCode::Up)) => return self.tree.up(),
+            (Pane::Worktrees, Some(_)) => return self.tree.down(),
+            (_, Some(KeyCode::Up)) => return self.sessions.up(),
+            (_, Some(_)) => return self.sessions.down(),
+            (_, None) if !click => return,
+            _ => {}
+        }
+        let hit = match pane {
+            Pane::Worktrees => self.tree.click(x, y),
+            _ => self.sessions.click(x, y),
+        };
+        let Some(arrow) = hit else {
+            return;
+        };
+        self.focus = pane;
+        match (arrow, pane) {
+            (true, Pane::Worktrees) => self.tree.toggle(),
+            (true, _) => self.sessions.toggle(),
+            (false, _) if double => self.handle(Action::Jump),
+            _ => {}
         }
     }
 
@@ -955,6 +1076,8 @@ impl App {
             Some(shown) => Modes {
                 application_cursor: shown.screen.screen().application_cursor(),
                 bracketed_paste: shown.screen.screen().bracketed_paste(),
+                mouse: shown.screen.screen().mouse_protocol_mode(),
+                mouse_encoding: shown.screen.screen().mouse_protocol_encoding(),
             },
             None => Modes::default(),
         }
@@ -983,6 +1106,12 @@ impl App {
         if height > 0 {
             self.render_sessions(frame, sessions);
         }
+        self.areas.projects = projects;
+        self.areas.sessions = if height > 0 {
+            sessions
+        } else {
+            Rect::default()
+        };
         frame.render_widget(self.hint_bar(), hints);
         if let Some(open) = &mut self.dialog {
             open.dialog.render(frame, main, &self.theme);
@@ -998,6 +1127,8 @@ impl App {
         };
         let block = self.pane_block_titled(title, Pane::Terminal);
         let inner = block.inner(area);
+        self.areas.terminal = area;
+        self.areas.terminal_inner = inner;
         let size = (inner.height.max(1), inner.width.max(1));
         if size != self.slot {
             self.slot = size;
@@ -1155,6 +1286,22 @@ fn project_paths(config: &Config) -> Vec<PathBuf> {
     config.projects.iter().map(|p| p.path.clone()).collect()
 }
 
+/// The index of the list item drawn on line `y`, in a list drawn in `area` from
+/// item `offset` on, its items `heights` lines tall; `None` past the last one.
+fn row_at(heights: &[u16], offset: usize, area: Rect, y: u16) -> Option<usize> {
+    if y < area.y || y >= area.bottom() {
+        return None;
+    }
+    let mut top = area.y;
+    for (index, &height) in heights.iter().enumerate().skip(offset) {
+        if y < top + height {
+            return Some(index);
+        }
+        top += height;
+    }
+    None
+}
+
 /// A config error in one line, for a border, where it may be cut: without the
 /// file's path, and from a TOML error, why and then where, leaving out the excerpt.
 /// toml's errors start with `TOML parse error at <position>` and end with the reason.
@@ -1195,6 +1342,7 @@ mod tests {
 
     use super::projects::tests::{project, worktree};
     use super::*;
+    use crate::client::Stream;
     use crate::model::{ProjectView, Status};
     use crate::protocol;
 
@@ -2668,6 +2816,211 @@ unknown field `popop`, expected one of `popup`, `back`";
         let buffer = styles(&mut app, 100, 20);
         let plain = &buffer[(41, 1)];
         assert_eq!((plain.fg, plain.bg), (Color::Reset, Color::Reset));
+    }
+
+    fn mouse_at(app: &mut App, kind: MouseEventKind, x: u16, y: u16, now: Instant) {
+        let event = MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.mouse(event, now);
+    }
+
+    const CLICK: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+
+    /// A click, long after any other one.
+    fn click(app: &mut App, x: u16, y: u16) {
+        app.last_click = None;
+        mouse_at(app, CLICK, x, y, Instant::now());
+    }
+
+    #[test]
+    fn row_at_counts_each_items_lines_from_the_scroll_offset() {
+        let area = Rect::new(1, 5, 30, 4);
+        let heights = [1, 3, 1, 1, 1];
+        let rows: Vec<_> = (4..10).map(|y| row_at(&heights, 1, area, y)).collect();
+        assert_eq!(rows, [None, Some(1), Some(1), Some(1), Some(2), None]);
+        assert_eq!(row_at(&[1, 1], 0, area, 7), None, "past the last item");
+    }
+
+    #[test]
+    fn a_click_selects_a_row_and_moves_the_focus_to_its_pane() {
+        let mut app = with_sessions(vec![daemon_session(
+            "$1",
+            "app-fix",
+            "/code/app.worktrees/fix",
+        )]);
+        press(&mut app, KeyCode::Tab);
+        let lines = screen(&mut app, 100, 20);
+        // "▾ app", "· main  repo", "· fix" from (1, 1) down
+        click(&mut app, 8, 3);
+        assert_eq!(app.focus, Pane::Worktrees);
+        let selected = app.tree.selected_worktree().map(|w| w.path.clone());
+        assert_eq!(selected, Some("/code/app.worktrees/fix".into()));
+
+        let top = lines
+            .iter()
+            .position(|l| l.starts_with("┌ Sessions"))
+            .unwrap();
+        click(&mut app, 8, top as u16 + 1);
+        assert_eq!(app.focus, Pane::Sessions);
+        assert_eq!(
+            app.sessions.selected(),
+            Some(&sessions::Row::Session("$1".into()))
+        );
+        click(&mut app, 8, 8);
+        assert_eq!(app.focus, Pane::Sessions, "below the rows: nothing");
+    }
+
+    #[test]
+    fn a_project_with_an_error_takes_its_lines_and_a_scrolled_list_its_offset() {
+        let mut broken = project("/code/broken", &[]);
+        broken.worktrees.clear();
+        broken.error = Some("fatal: not a git repository\nhint: check the path".into());
+        let mut app = showing(vec![broken, project("/code/web", &["a", "b", "c"])]);
+        screen(&mut app, 100, 20);
+        click(&mut app, 8, 2);
+        assert_eq!(
+            app.tree.selected(),
+            Some(&projects::Row::Project("/code/broken".into()))
+        );
+        click(&mut app, 8, 5);
+        let main = app.tree.selected_worktree().map(|w| w.path.clone());
+        assert_eq!(main, Some("/code/web".into()), "under ▾ web");
+
+        // Scrolled to the last worktree: the project with its error is out of sight
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Down);
+        }
+        let rows = projects_pane(&mut app, 6);
+        assert_eq!(rows[0], "▾ web", "{rows:?}");
+        click(&mut app, 8, 1);
+        assert_eq!(
+            app.tree.selected(),
+            Some(&projects::Row::Project("/code/web".into()))
+        );
+    }
+
+    #[test]
+    fn a_double_click_does_what_enter_does() {
+        let mut app = with_a_session();
+        screen(&mut app, 100, 20);
+        let start = Instant::now();
+        let later = |ms| start + Duration::from_millis(ms);
+        mouse_at(&mut app, CLICK, 8, 3, start);
+        mouse_at(&mut app, CLICK, 8, 3, later(500));
+        assert_eq!(shown(&app), None, "too slow");
+        mouse_at(&mut app, CLICK, 9, 3, later(600));
+        assert_eq!(shown(&app), None, "another cell");
+        mouse_at(&mut app, CLICK, 9, 3, later(700));
+        assert_eq!(shown(&app), Some("%7"));
+        assert_eq!(app.focus, Pane::Terminal);
+    }
+
+    #[test]
+    fn a_click_on_a_projects_arrow_folds_it() {
+        let mut app = with_a_session();
+        screen(&mut app, 100, 20);
+        click(&mut app, 1, 1);
+        assert_eq!(projects_pane(&mut app, 6)[..2], ["▸ app", ""]);
+        click(&mut app, 1, 1);
+        assert_eq!(projects_pane(&mut app, 6)[1], "  · main  repo");
+        assert_eq!(shown(&app), None);
+    }
+
+    #[test]
+    fn the_wheel_moves_the_selection_under_it_and_not_the_focus() {
+        let mut app = with_a_session();
+        press(&mut app, KeyCode::Tab);
+        screen(&mut app, 100, 20);
+        let now = Instant::now();
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 20, 5, now);
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 20, 5, now);
+        let selected = app.tree.selected_worktree().map(|w| w.path.clone());
+        assert_eq!(selected, Some("/code/app.worktrees/fix".into()));
+        assert_eq!(app.focus, Pane::Sessions);
+    }
+
+    #[test]
+    fn the_terminal_has_the_mouse_only_when_its_program_asked() {
+        let mut app = with_sessions(vec![]);
+        let (stream, requests) = Stream::testing();
+        app.stream = Some(stream);
+        app.shown = Some(Shown {
+            terminal: "%7".into(),
+            screen: vt100::Parser::new(18, 58, SCROLLBACK),
+        });
+        let inputs = || -> Vec<Vec<u8>> {
+            let requests = requests.try_iter();
+            requests
+                .filter_map(|request| match request {
+                    Request::Input(bytes) => Some(bytes),
+                    _ => None,
+                })
+                .collect()
+        };
+        screen(&mut app, 100, 20);
+        assert!(app.wants_mouse(), "the dashboard's");
+        // The terminal's inside starts at (41, 1)
+        click(&mut app, 45, 2);
+        assert_eq!(app.focus, Pane::Terminal);
+        assert!(inputs().is_empty(), "not asked");
+        assert!(!app.wants_mouse(), "the terminal's, to select text");
+
+        let shown = app.shown.as_mut().unwrap();
+        shown.screen.process(b"\x1b[?1000h\x1b[?1006h");
+        assert!(app.wants_mouse(), "the program's");
+        click(&mut app, 45, 2);
+        let now = Instant::now();
+        mouse_at(&mut app, MouseEventKind::ScrollUp, 41, 1, now);
+        mouse_at(&mut app, MouseEventKind::Moved, 42, 1, now);
+        let sent: Vec<&[u8]> = vec![b"\x1b[<0;5;2M", b"\x1b[<64;1;1M"];
+        assert_eq!(inputs(), sent, "no motion in mode 1000");
+
+        app.focus = Pane::Worktrees;
+        app.shown.as_mut().unwrap().screen.process(b"\x1b[?1000l");
+        app.focus = Pane::Terminal;
+        app.open_over(
+            Dialog::Message(Message::new("t", "x")),
+            Purpose::Notice,
+            "x",
+        );
+        assert!(app.wants_mouse(), "a dialog's");
+    }
+
+    #[test]
+    fn clicks_pick_in_choice_lists_and_focus_form_fields() {
+        let (_dir, mut app) = with_themes("");
+        press(&mut app, KeyCode::Char('T'));
+        let lines = screen(&mut app, 100, 20);
+        let y = lines
+            .iter()
+            .position(|l| l.contains("monokai-pro"))
+            .unwrap() as u16;
+        let x = lines[y as usize].chars().position(|c| c == 'm').unwrap() as u16;
+        click(&mut app, 0, y);
+        assert_eq!(choice(&app), Some("terminal"), "outside the dialog");
+        click(&mut app, x, y);
+        assert_eq!(choice(&app), Some("monokai-pro"));
+        assert_eq!(app.theme.name, "monokai-pro", "previewed");
+        mouse_at(&mut app, MouseEventKind::ScrollDown, x, y, Instant::now());
+        assert_eq!(choice(&app), Some("terminal"), "the wheel moves");
+        let now = Instant::now();
+        mouse_at(&mut app, CLICK, x, y, now);
+        mouse_at(&mut app, CLICK, x, y, now + Duration::from_millis(100));
+        assert!(app.dialog.is_none(), "chosen");
+        assert_eq!(app.tasks.len(), 1, "{:?}", app.tasks);
+
+        let mut app = with_a_project(None);
+        press(&mut app, KeyCode::Char('n'));
+        let lines = screen(&mut app, 80, 12);
+        let y = lines.iter().position(|l| l.contains("Base")).unwrap() as u16;
+        let x = lines[y as usize].chars().position(|c| c == 'B').unwrap() as u16;
+        click(&mut app, x, y);
+        type_text(&mut app, "x");
+        assert_eq!(form_values(&mut app), ["", "mainx", "claude"]);
     }
 
     /// With a config whose `themes/` has an invalid theme, `broken`; the themes

@@ -8,8 +8,8 @@ use std::thread::{self, ThreadId};
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -27,6 +27,9 @@ static ENTERED: AtomicBool = AtomicBool::new(false);
 /// Whether the terminal reports keys with the kitty keyboard protocol, to undo.
 static ENHANCED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the mouse is captured, to undo.
+static MOUSE: AtomicBool = AtomicBool::new(false);
+
 /// Restores the terminal when dropped.
 pub struct Guard;
 
@@ -37,7 +40,7 @@ impl Drop for Guard {
 }
 
 /// Raw mode, the alternate screen and bracketed paste, until the guard is dropped.
-/// The mouse is left to the terminal, to select text in the shown terminal. Where
+/// The mouse is the terminal's until `capture_mouse` takes it. Where
 /// the terminal supports the kitty keyboard protocol, keys come disambiguated: a
 /// legacy terminal sends Shift-Enter as Enter, and an agent needs to tell them apart.
 pub fn enter() -> io::Result<(Tui, Guard)> {
@@ -57,6 +60,18 @@ pub fn enter() -> io::Result<(Tui, Guard)> {
     Ok((terminal, guard))
 }
 
+/// Takes the mouse from the terminal, which then reports it to the dashboard, or
+/// gives it back, for the terminal to select text with.
+pub fn capture_mouse(on: bool) -> io::Result<()> {
+    if on {
+        execute!(stdout(), EnableMouseCapture)?;
+    } else {
+        execute!(stdout(), DisableMouseCapture)?;
+    }
+    MOUSE.store(on, Ordering::SeqCst);
+    Ok(())
+}
+
 /// Undoes `enter`, once: after a panic both the hook and the guard call it, and
 /// leaving the alternate screen a second time would move the cursor back over the
 /// panic message.
@@ -67,6 +82,9 @@ fn restore() {
     // Nothing more can be done if the terminal refuses
     if ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+    }
+    if MOUSE.swap(false, Ordering::SeqCst) {
+        let _ = execute!(stdout(), DisableMouseCapture);
     }
     let _ = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen, Show);
     let _ = disable_raw_mode();

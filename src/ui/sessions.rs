@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
@@ -31,6 +31,8 @@ pub struct Sessions {
     index: usize,
     /// Keeps the scroll position from one frame to the next.
     list: ListState,
+    /// Where the rows were last drawn, to find the one clicked.
+    inner: Rect,
 }
 
 impl Sessions {
@@ -200,6 +202,28 @@ impl Sessions {
         terminal.to_string()
     }
 
+    /// Selects the row drawn at (`x`, `y`); whether that was on a session's fold
+    /// arrow, or `None` when no row is there.
+    pub fn click(&mut self, x: u16, y: u16) -> Option<bool> {
+        if !self.inner.contains(Position::new(x, y)) {
+            return None;
+        }
+        let heights = vec![1; self.len()];
+        let index = super::row_at(&heights, self.list.offset(), self.inner, y)?;
+        self.select(index);
+        let session = matches!(self.selected, Some(Row::Session(_)));
+        Some(session && x < self.inner.x + 2)
+    }
+
+    /// Folds or unfolds the selected session.
+    pub fn toggle(&mut self) {
+        if let Some(Row::Session(id)) = &self.selected
+            && !self.collapsed.remove(id)
+        {
+            self.collapsed.insert(id.clone());
+        }
+    }
+
     pub fn up(&mut self) {
         self.select(self.index.saturating_sub(1));
     }
@@ -272,6 +296,7 @@ impl Sessions {
     /// and what it is for, dimmed; then each window's index, what runs in it, and
     /// `*` on the session's current one.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block, theme: &Theme) {
+        self.inner = block.inner(area);
         if self.sessions.is_empty() {
             frame.render_widget(Paragraph::new("No sessions").block(block), area);
             return;
