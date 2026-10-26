@@ -27,7 +27,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 ## 3. What it deliberately does not do
 
 - Splits, layouts, tabs, a keyboard copy mode, or more than one terminal on screen.
-- Keep agents across a reboot, or across the daemon ending: terminals live as long as the daemon.
+- Keep agents across a reboot, or across the daemon ending: terminals live as long as the daemon (an open question: §12.2).
 - A database or state file beyond its config: `config.toml` and one small file per project (§9).
 - Show, edit, create, rename or delete files itself: no file tree, viewer or diff viewer — `$EDITOR` (`e`), a shell opened in the worktree (`t`), or the agent.
 - A PR review UI — `gh`/browser for PRs.
@@ -257,6 +257,7 @@ Milestone 2 is already a useful tool. `MILESTONE.md` breaks these milestones int
 - The kitty keyboard protocol inside the shown terminal: tatou does not answer programs asking for it, so they fall back to legacy keys (Shift-Enter arrives as Alt-Enter).
 - ~~Mouse support and text selection~~ — decided in 6.6 and 6.9: the mouse is the dashboard's, always; tatou selects in the shown terminal for a program that does not read the mouse, and elsewhere the terminal's bypass key does (§6).
 - **The terminal architecture** (raised 2026-10-26, #121): whether tatou should go on emulating terminals at all. Undecided; #119 (6.11) and #120 (6.12) wait for it. See §12.1.
+- **Sessions across restarts** (raised 2026-10-26, #123): whether agents should come back after a reboot, `tatou stop` or an upgrade, not just after the dashboard quits. Undecided. See §12.2.
 
 ### 12.1 The terminal architecture
 
@@ -277,3 +278,21 @@ Milestone 2 is already a useful tool. `MILESTONE.md` breaks these milestones int
 Leaning, unconfirmed: 6 for the least to maintain, or 2; 5 or 7 if everything must be in one window. Either way, a spike first, as #108 was for 2.19.
 
 **What was known of the libraries on 2026-10-26.** The full libghostty supacode embeds (terminal, renderer and a macOS view) exists for macOS only; a proposal to port its embedding API to Linux was declined in March 2026, the effort moving to libghostty-vt, with a GTK widget library "within consideration", not committed ([discussion #11722](https://github.com/ghostty-org/ghostty/discussions/11722)). libghostty-vt is the emulation core alone, for macOS, Linux, Windows and WebAssembly, with a C and Zig API not yet stable and no tagged release ([Ghostty](https://github.com/ghostty-org/ghostty), [C API overview](https://ghostty-org-ghostty.mintlify.app/api/overview)). Rust: [`libghostty-vt`](https://lib.rs/crates/libghostty-vt), a safe wrapper by Ghostty maintainers ([libghostty-rs](https://github.com/uzaaft/libghostty-rs)), 0.2.2, changing; [`ghostty-vt-rs`](https://github.com/nklmilojevic/ghostty-vt-rs) ships prebuilt static libraries for macOS and Linux, without Zig. GUI widgets build on [`alacritty_terminal`](https://docs.rs/crate/alacritty_terminal/^0.15.0): [`gpui_terminal`](https://docs.rs/gpui-terminal) (macOS and Linux, pre-1.0), and the earlier [`iced_term`](https://docs.rs/crate/iced_term/latest) and [`egui_term`](https://docs.rs/crate/egui_term/latest).
+
+### 12.2 Sessions across restarts
+
+**The question.** A terminal lives as long as the daemon (§3, §8.3): quitting the dashboard keeps every agent, but a reboot, `tatou stop` or the daemon ending ends them all, and upgrading tatou means stopping the daemon (#120). Could the sessions be kept across those restarts too?
+
+**What can't be kept.** The processes: a reboot ends them, whatever runs them, tmux and the GUI apps included. Checkpointing them to disk (CRIU) is Linux only, needs privileges and breaks on open sockets, so not for tatou. Nor their screens or a shell's history.
+
+**What can.** Most of a session already lives elsewhere. The worktrees are in git, and tatou finds them again by itself. An agent's conversation is kept by the agent, per directory: `claude --continue` opens the latest conversation of the directory it starts in, `codex resume --last` likewise ([Codex CLI features](https://developers.openai.com/codex/cli/features)), and each worktree being a directory of its own, a worktree's conversation is its own. Keeping a session can then mean starting its agent again in its worktree with its resume command: the conversation comes back, not the running process nor its screen.
+
+**The options.**
+
+1. **Resume on demand, with no state.** An agent in `[agents]` may give a resume command beside its command (`claude = { command = "claude", resume = "claude --continue" }`, the built-in `claude` and `codex` having theirs). On a worktree without a session, `s` (or `Enter`) offers to start its agent anew or to resume it, and the agent's own history does the rest; a key may resume every worktree of a project at once. Nothing is written, nothing starts by itself, and §3's line stays true of the processes. Costs: one more setting and one more choice; after a reboot, the user resumes each worktree as they come back to it; shells and editors come back as `t` and `e` start them, empty; an agent whose resume command does not exist, or whose history was cleared, simply starts anew.
+2. **A sessions file**, as tmux-resurrect does: the daemon writes which worktrees had which windows and commands (agent, shell, editor) to a file in `$XDG_STATE_HOME/tatou/`, and the next daemon starts them all again, agents with their resume commands, shells and editors anew. The closest to everything as it was left. Costs: a state file, which §1 and §3 rule out; it goes stale (worktrees removed, agents renamed, a config changed meanwhile), so tatou must check it against git at each start; and starting every agent at boot, all at once, is not always wanted.
+3. **For upgrades only, a new daemon taking the old one's terminals**: the old daemon passes its pseudo-terminals' file descriptors and screens to the new one over the socket (`SCM_RIGHTS`, macOS and Linux alike), so the programs go on running through an upgrade, as some servers restart without dropping a connection. Nothing to do with reboots. Costs: real plumbing in the daemon and the protocol, for a case #120's warning (the daemon is older than the dashboard; restart it when convenient) already makes bearable.
+
+These go together: 1 for reboots and `tatou stop`, 3 later should upgrades end agents too often. Leaning, unconfirmed: 1.
+
+**How it relates to §12.1.** Every option there but 3 keeps tatou's daemon, so this question stands apart from it: whatever shows the terminal, the daemon starts the agents, with their resume commands or not. With tmux (option 3 there), tmux-resurrect would play option 2's part here.
