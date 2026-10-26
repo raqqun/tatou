@@ -96,12 +96,7 @@ pub fn run(client: Client) -> Result<()> {
     // Debug builds only: checks that a panic leaves the terminal usable
     let panic_after_first_frame =
         cfg!(debug_assertions) && std::env::var_os("TATOU_PANIC").is_some();
-    let mut mouse = false;
     loop {
-        if app.wants_mouse() != mouse {
-            mouse = !mouse;
-            terminal::capture_mouse(mouse).map_err(Error::Terminal)?;
-        }
         terminal
             .draw(|frame| app.render(frame))
             .map_err(Error::Terminal)?;
@@ -316,18 +311,11 @@ impl App {
         }
     }
 
-    /// Whether the dashboard takes the mouse from its terminal: unless the focus is
-    /// in the shown terminal, whose program then has it only when it asked for it.
-    /// Otherwise the terminal keeps it, and a drag selects the program's text.
-    fn wants_mouse(&self) -> bool {
-        let reading = self.modes().mouse != vt100::MouseProtocolMode::None;
-        self.focus != Pane::Terminal || self.dialog.is_some() || reading
-    }
-
-    /// A click selects in a pane and moves the focus there, a double one acts as
-    /// Enter; the wheel moves the selection of the pane under it. In the shown
-    /// terminal, a click gives it the focus, and the mouse goes to its program when
-    /// it asked. An open dialog takes the mouse; `now` times double clicks.
+    /// A click anywhere in a pane moves the focus there; on a row it selects it, and
+    /// a double one acts as Enter. The wheel moves the selection of the pane under
+    /// it. In the shown terminal, the mouse goes to its program when it asked for
+    /// it; else the wheel is ↑/↓ on the alternate screen, as in an xterm. An open
+    /// dialog takes the mouse; `now` times double clicks.
     fn mouse(&mut self, mouse: MouseEvent, now: Instant) {
         let (x, y) = (mouse.column, mouse.row);
         let position = Position::new(x, y);
@@ -368,11 +356,23 @@ impl App {
                 self.focus = Pane::Terminal;
             }
             let inner = self.areas.terminal_inner;
-            if inner.contains(position) {
-                let bytes = term::mouse_bytes(mouse, x - inner.x, y - inner.y, self.modes());
-                if !bytes.is_empty() {
-                    self.send(Request::Input(bytes));
+            if !inner.contains(position) {
+                return;
+            }
+            let modes = self.modes();
+            let alternate = self
+                .shown
+                .as_ref()
+                .is_some_and(|s| s.screen.screen().alternate_screen());
+            let bytes = match wheel {
+                // less, man and the like scroll with the arrows
+                Some(code) if modes.mouse == vt100::MouseProtocolMode::None && alternate => {
+                    term::key_bytes(KeyEvent::new(code, KeyModifiers::NONE), modes)
                 }
+                _ => term::mouse_bytes(mouse, x - inner.x, y - inner.y, modes),
+            };
+            if !bytes.is_empty() {
+                self.send(Request::Input(bytes));
             }
             return;
         }
@@ -391,6 +391,8 @@ impl App {
             (_, None) if !click => return,
             _ => {}
         }
+        // Anywhere in the pane, its borders and the space below its rows included
+        self.focus = pane;
         let hit = match pane {
             Pane::Worktrees => self.tree.click(x, y),
             _ => self.sessions.click(x, y),
@@ -398,7 +400,6 @@ impl App {
         let Some(arrow) = hit else {
             return;
         };
-        self.focus = pane;
         match (arrow, pane) {
             (true, Pane::Worktrees) => self.tree.toggle(),
             (true, _) => self.sessions.toggle(),
@@ -2870,8 +2871,18 @@ unknown field `popop`, expected one of `popup`, `back`";
             app.sessions.selected(),
             Some(&sessions::Row::Session("$1".into()))
         );
+        let selected = app.tree.selected().cloned();
         click(&mut app, 8, 8);
-        assert_eq!(app.focus, Pane::Sessions, "below the rows: nothing");
+        assert_eq!(app.focus, Pane::Worktrees, "below the rows");
+        assert_eq!(
+            app.tree.selected().cloned(),
+            selected,
+            "nothing selected there"
+        );
+        click(&mut app, 20, top as u16);
+        assert_eq!(app.focus, Pane::Sessions, "on its border");
+        click(&mut app, 39, 4);
+        assert_eq!(app.focus, Pane::Worktrees, "on the other border");
     }
 
     #[test]
@@ -2944,7 +2955,7 @@ unknown field `popop`, expected one of `popup`, `back`";
     }
 
     #[test]
-    fn the_terminal_has_the_mouse_only_when_its_program_asked() {
+    fn the_mouse_goes_to_the_terminals_program_when_it_asked() {
         let mut app = with_sessions(vec![]);
         let (stream, requests) = Stream::testing();
         app.stream = Some(stream);
@@ -2962,32 +2973,32 @@ unknown field `popop`, expected one of `popup`, `back`";
                 .collect()
         };
         screen(&mut app, 100, 20);
-        assert!(app.wants_mouse(), "the dashboard's");
         // The terminal's inside starts at (41, 1)
+        click(&mut app, 70, 0);
+        assert_eq!(app.focus, Pane::Terminal, "on its border");
+        click(&mut app, 8, 8);
+        assert_eq!(app.focus, Pane::Worktrees, "back, from the terminal");
         click(&mut app, 45, 2);
         assert_eq!(app.focus, Pane::Terminal);
-        assert!(inputs().is_empty(), "not asked");
-        assert!(!app.wants_mouse(), "the terminal's, to select text");
+        let now = Instant::now();
+        mouse_at(&mut app, MouseEventKind::ScrollUp, 45, 2, now);
+        assert!(inputs().is_empty(), "not asked, on the main screen");
+
+        let shown = app.shown.as_mut().unwrap();
+        shown.screen.process(b"\x1b[?1049h\x1b[?1h");
+        mouse_at(&mut app, MouseEventKind::ScrollUp, 45, 2, now);
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 45, 2, now);
+        let arrows: Vec<&[u8]> = vec![b"\x1bOA", b"\x1bOB"];
+        assert_eq!(inputs(), arrows, "the alternate screen's wheel, as arrows");
 
         let shown = app.shown.as_mut().unwrap();
         shown.screen.process(b"\x1b[?1000h\x1b[?1006h");
-        assert!(app.wants_mouse(), "the program's");
         click(&mut app, 45, 2);
-        let now = Instant::now();
         mouse_at(&mut app, MouseEventKind::ScrollUp, 41, 1, now);
         mouse_at(&mut app, MouseEventKind::Moved, 42, 1, now);
+        click(&mut app, 70, 0);
         let sent: Vec<&[u8]> = vec![b"\x1b[<0;5;2M", b"\x1b[<64;1;1M"];
-        assert_eq!(inputs(), sent, "no motion in mode 1000");
-
-        app.focus = Pane::Worktrees;
-        app.shown.as_mut().unwrap().screen.process(b"\x1b[?1000l");
-        app.focus = Pane::Terminal;
-        app.open_over(
-            Dialog::Message(Message::new("t", "x")),
-            Purpose::Notice,
-            "x",
-        );
-        assert!(app.wants_mouse(), "a dialog's");
+        assert_eq!(inputs(), sent, "no motion in mode 1000, nor the border");
     }
 
     #[test]

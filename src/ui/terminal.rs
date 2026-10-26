@@ -27,9 +27,6 @@ static ENTERED: AtomicBool = AtomicBool::new(false);
 /// Whether the terminal reports keys with the kitty keyboard protocol, to undo.
 static ENHANCED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the mouse is captured, to undo.
-static MOUSE: AtomicBool = AtomicBool::new(false);
-
 /// Restores the terminal when dropped.
 pub struct Guard;
 
@@ -39,8 +36,9 @@ impl Drop for Guard {
     }
 }
 
-/// Raw mode, the alternate screen and bracketed paste, until the guard is dropped.
-/// The mouse is the terminal's until `capture_mouse` takes it. Where
+/// Raw mode, the alternate screen, bracketed paste and the mouse, until the guard
+/// is dropped: the terminal then selects text only with its bypass key held
+/// (Shift, Option in iTerm2), and every click is the dashboard's. Where
 /// the terminal supports the kitty keyboard protocol, keys come disambiguated: a
 /// legacy terminal sends Shift-Enter as Enter, and an agent needs to tell them apart.
 pub fn enter() -> io::Result<(Tui, Guard)> {
@@ -49,7 +47,12 @@ pub fn enter() -> io::Result<(Tui, Guard)> {
     // From here on, a failure still restores what was already changed
     ENTERED.store(true, Ordering::SeqCst);
     let guard = Guard;
-    execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     // A terminal that cannot answer simply keeps sending legacy keys
     if supports_keyboard_enhancement().unwrap_or(false) {
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
@@ -58,18 +61,6 @@ pub fn enter() -> io::Result<(Tui, Guard)> {
     }
     let terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     Ok((terminal, guard))
-}
-
-/// Takes the mouse from the terminal, which then reports it to the dashboard, or
-/// gives it back, for the terminal to select text with.
-pub fn capture_mouse(on: bool) -> io::Result<()> {
-    if on {
-        execute!(stdout(), EnableMouseCapture)?;
-    } else {
-        execute!(stdout(), DisableMouseCapture)?;
-    }
-    MOUSE.store(on, Ordering::SeqCst);
-    Ok(())
 }
 
 /// Undoes `enter`, once: after a panic both the hook and the guard call it, and
@@ -83,10 +74,13 @@ fn restore() {
     if ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
-    if MOUSE.swap(false, Ordering::SeqCst) {
-        let _ = execute!(stdout(), DisableMouseCapture);
-    }
-    let _ = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen, Show);
+    let _ = execute!(
+        stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
     let _ = disable_raw_mode();
 }
 
