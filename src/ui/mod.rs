@@ -61,8 +61,15 @@ const LEFT_WIDTH: u16 = 40;
 /// Two clicks on one cell within this are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
-/// Lines of scrollback kept for the shown terminal.
-const SCROLLBACK: usize = 1_000;
+/// How long the pane keeps a size before the shown terminal gets it: one resize
+/// at the end of a drag, not one a frame, each followed by its whole screen.
+const RESIZE_AFTER: Duration = Duration::from_millis(100);
+
+/// Lines the wheel scrolls the shown terminal's history by, a step.
+const WHEEL_LINES: isize = 3;
+
+/// Lines of scrollback kept for the shown terminal: all the daemon has.
+const SCROLLBACK: usize = crate::daemon::SCROLLBACK;
 
 /// The worktree actions, hidden from the hint bar on a project row.
 const WORKTREE_ACTIONS: [Action; 5] = [
@@ -115,6 +122,7 @@ pub fn run(client: Client) -> Result<()> {
             app.streamed(reply);
         }
         app.apply_all(&received, &happened);
+        app.tick(Instant::now());
         if let Some(text) = app.clipboard.take() {
             terminal::copy(&text).map_err(Error::Terminal)?;
         }
@@ -233,6 +241,12 @@ struct App {
     shown: Option<Shown>,
     /// The shown terminal's size inside its pane, as last drawn: (rows, cols).
     slot: (u16, u16),
+    /// Whether `slot` changed since the last tick.
+    slot_changed: bool,
+    /// When to give the shown terminal the pane's size, once it has held.
+    resize_due: Option<Instant>,
+    /// The size the daemon last gave the shown terminal, and draws its screens at.
+    sent: (u16, u16),
     quit: bool,
 }
 
@@ -266,6 +280,9 @@ impl App {
             stream: None,
             shown: None,
             slot: (24, 80),
+            slot_changed: false,
+            resize_due: None,
+            sent: (24, 80),
             quit: false,
         }
     }
@@ -275,8 +292,7 @@ impl App {
             && self.focus == Pane::Terminal
         {
             let bytes = term::paste_bytes(text, self.modes());
-            self.selection = None;
-            return self.send(Request::Input(bytes));
+            return self.input_to_program(bytes);
         }
         if let Event::Mouse(mouse) = event {
             return self.mouse(mouse, Instant::now());
@@ -302,13 +318,25 @@ impl App {
             }
             return;
         }
+        // A page of the shown terminal's history, from anywhere but a dialog; on the
+        // alternate screen, which has none, they are the program's
+        let page = (self.slot.0 as isize - 1).max(1);
+        let scroll = match (key.code, key.modifiers) {
+            (KeyCode::PageUp, KeyModifiers::SHIFT) => Some(page),
+            (KeyCode::PageDown, KeyModifiers::SHIFT) => Some(-page),
+            _ => None,
+        };
+        if let (Some(lines), None) = (scroll, &self.dialog)
+            && self.scroll(lines)
+        {
+            return;
+        }
         // Every key goes to the shown terminal's program, but these and the one back
         if self.focus == Pane::Terminal && self.dialog.is_none() {
             if (key.code, key.modifiers) == BACK {
                 self.focus = Pane::Worktrees;
             } else {
-                self.selection = None;
-                self.send(Request::Input(term::key_bytes(key, self.modes())));
+                self.input_to_program(term::key_bytes(key, self.modes()));
             }
             return;
         }
@@ -417,15 +445,26 @@ impl App {
                 .shown
                 .as_ref()
                 .is_some_and(|s| s.screen.screen().alternate_screen());
+            let reading = modes.mouse != vt100::MouseProtocolMode::None;
             let bytes = match wheel {
+                // The history, on the main screen
+                Some(code) if !reading && !alternate => {
+                    let lines = if code == KeyCode::Up {
+                        WHEEL_LINES
+                    } else {
+                        -WHEEL_LINES
+                    };
+                    self.scroll(lines);
+                    return;
+                }
                 // less, man and the like scroll with the arrows
-                Some(code) if modes.mouse == vt100::MouseProtocolMode::None && alternate => {
+                Some(code) if !reading => {
                     term::key_bytes(KeyEvent::new(code, KeyModifiers::NONE), modes)
                 }
                 _ => term::mouse_bytes(mouse, x - inner.x, y - inner.y, modes),
             };
             if !bytes.is_empty() {
-                self.send(Request::Input(bytes));
+                self.input_to_program(bytes);
             }
             return;
         }
@@ -459,6 +498,63 @@ impl App {
             (false, _) if double => self.handle(Action::Jump),
             _ => {}
         }
+    }
+
+    /// Gives the shown terminal the pane's size once it has held for `RESIZE_AFTER`;
+    /// `now` is the time.
+    fn tick(&mut self, now: Instant) {
+        if std::mem::take(&mut self.slot_changed) {
+            self.resize_due = Some(now + RESIZE_AFTER);
+        }
+        if self.resize_due.is_some_and(|due| now >= due) {
+            self.resize_due = None;
+            if self.shown.is_some() && self.slot != self.sent {
+                let (rows, cols) = self.slot;
+                self.send(Request::Resize { rows, cols });
+                self.sent = self.slot;
+            }
+        }
+    }
+
+    /// Sends `bytes` to the shown terminal's program, the view back at the bottom
+    /// first, where they land, and the selection gone.
+    fn input_to_program(&mut self, bytes: Vec<u8>) {
+        if let Some(shown) = &mut self.shown {
+            shown.screen.screen_mut().set_scrollback(0);
+        }
+        self.selection = None;
+        self.send(Request::Input(bytes));
+    }
+
+    /// Moves the shown terminal's view `lines` back through its history, forward
+    /// when negative, between its start and the screen. False when it has none to
+    /// move through: none is shown, or it is on the alternate screen.
+    fn scroll(&mut self, lines: isize) -> bool {
+        let Some(shown) = &mut self.shown else {
+            return false;
+        };
+        let screen = shown.screen.screen_mut();
+        if screen.alternate_screen() {
+            return false;
+        }
+        // Clamped to the history's length by vt100
+        screen.set_scrollback(screen.scrollback().saturating_add_signed(lines));
+        self.selection = None;
+        true
+    }
+
+    /// How far back the shown terminal's view is, and how long its history: (0, _)
+    /// at the bottom.
+    fn scrolled(&mut self) -> (usize, usize) {
+        let Some(shown) = &mut self.shown else {
+            return (0, 0);
+        };
+        let screen = shown.screen.screen_mut();
+        let at = screen.scrollback();
+        screen.set_scrollback(usize::MAX);
+        let len = screen.scrollback();
+        screen.set_scrollback(at);
+        (at, len)
     }
 
     /// The shown terminal's cell at (`x`, `y`), or the nearest one inside it.
@@ -1099,6 +1195,8 @@ impl App {
             rows,
             cols,
         });
+        self.sent = self.slot;
+        self.resize_due = None;
         self.shown = Some(Shown {
             terminal: terminal.to_string(),
             screen: vt100::Parser::new(rows, cols, SCROLLBACK),
@@ -1125,8 +1223,9 @@ impl App {
     /// What the daemon streams for the shown terminal.
     fn streamed(&mut self, reply: Reply) {
         match (reply, &mut self.shown) {
+            // On attach, and after each resize: the daemon's screen, at its size
             (Reply::Screen(bytes), Some(shown)) => {
-                let (rows, cols) = self.slot;
+                let (rows, cols) = self.sent;
                 shown.screen = vt100::Parser::new(rows, cols, SCROLLBACK);
                 shown.screen.process(&bytes);
                 self.selection = None;
@@ -1218,7 +1317,12 @@ impl App {
     /// The shown terminal, at the pane's size, which the daemon follows; what to do
     /// when none is shown.
     fn render_terminal(&mut self, frame: &mut Frame, area: Rect) {
+        let (back, history) = self.scrolled();
         let title = match &self.shown {
+            Some(shown) if back > 0 => {
+                let name = self.sessions.title(&shown.terminal);
+                format!(" {name} · ↑ {back} of {history} ")
+            }
             Some(shown) => format!(" {} ", self.sessions.title(&shown.terminal)),
             None => " Terminal ".to_string(),
         };
@@ -1226,21 +1330,17 @@ impl App {
         let inner = block.inner(area);
         self.areas.terminal = area;
         self.areas.terminal_inner = inner;
-        let size = (inner.height.max(1), inner.width.max(1));
+        let (rows, cols) = crate::daemon::MIN_SIZE;
+        let size = (inner.height.max(rows), inner.width.max(cols));
+        // The daemon resizes it once the size holds, then sends its screen anew
         if size != self.slot {
             self.slot = size;
-            if let Some(shown) = &mut self.shown {
-                shown.screen.screen_mut().set_size(size.0, size.1);
-                self.send(Request::Resize {
-                    rows: size.0,
-                    cols: size.1,
-                });
-            }
+            self.slot_changed = true;
         }
         match &self.shown {
             Some(shown) => {
                 let mut cursor = tui_term::widget::Cursor::default();
-                if self.focus != Pane::Terminal {
+                if self.focus != Pane::Terminal || back > 0 {
                     cursor.hide();
                 }
                 let widget = PseudoTerminal::new(shown.screen.screen())
@@ -1356,7 +1456,7 @@ impl App {
 
     /// The message, else the dialog's keys, else what runs in the background, else
     /// the keys that apply to the selection.
-    fn hint_bar(&self) -> Paragraph<'static> {
+    fn hint_bar(&mut self) -> Paragraph<'static> {
         if let Some(message) = &self.message {
             return Paragraph::new(message.clone());
         }
@@ -1365,13 +1465,20 @@ impl App {
         }
         if self.focus == Pane::Terminal && self.dialog.is_none() {
             let bold = self.key_style();
+            let rest = match self.scrolled().0 {
+                0 => "; other keys go to the terminal",
+                _ => "; any key: back to the bottom",
+            };
             let keys = vec![
                 Span::styled("M-d", bold),
                 Span::raw(" dashboard  "),
                 Span::styled("M-l/M-h", bold),
-                Span::raw(" next/previous session  "),
+                Span::raw(" session  "),
                 Span::styled("M-j/M-k", bold),
-                Span::raw(" next/previous window; other keys go to the terminal"),
+                Span::raw(" window  "),
+                Span::styled("S-PgUp/PgDn", bold),
+                Span::raw(" scroll"),
+                Span::raw(rest),
             ];
             return Paragraph::new(Line::from(keys));
         }
@@ -1461,6 +1568,8 @@ mod tests {
 
     use super::projects::tests::{project, worktree};
     use super::*;
+    use std::sync::mpsc::Receiver;
+
     use crate::client::Stream;
     use crate::model::{ProjectView, Status};
     use crate::protocol;
@@ -3237,6 +3346,179 @@ unknown field `popop`, expected one of `popup`, `back`";
                 .unwrap()
                 .contains("asked the terminal")
         );
+    }
+
+    /// A shell that printed 1 to 100 on 18 rows, 83 lines of history, shown from
+    /// (41, 1) on the pane's 17, a page of 16 lines; and what it is sent.
+    fn with_a_long_shell() -> (App, Receiver<Request>) {
+        let mut app = with_sessions(vec![]);
+        let (stream, requests) = Stream::testing();
+        app.stream = Some(stream);
+        let mut screen = vt100::Parser::new(18, 58, SCROLLBACK);
+        for n in 1..=100 {
+            screen.process(format!("{n}\r\n").as_bytes());
+        }
+        app.shown = Some(Shown {
+            terminal: "%7".into(),
+            screen,
+        });
+        screen_of(&mut app);
+        (app, requests)
+    }
+
+    fn inputs(requests: &Receiver<Request>) -> Vec<Vec<u8>> {
+        let requests = requests.try_iter();
+        requests
+            .filter_map(|request| match request {
+                Request::Input(bytes) => Some(bytes),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn shift(app: &mut App, code: KeyCode) {
+        app.input(Event::Key(KeyEvent::new(code, KeyModifiers::SHIFT)));
+    }
+
+    /// The pane's title and its first line.
+    fn terminal_top(app: &mut App) -> (String, String) {
+        let lines = screen(app, 100, 20);
+        let title: String = lines[0].chars().skip(40).collect();
+        let first: String = lines[1].chars().skip(41).collect();
+        (title, first.trim_end_matches(['│', ' ']).to_string())
+    }
+
+    #[test]
+    fn the_wheel_and_shift_page_keys_browse_the_history() {
+        let (mut app, requests) = with_a_long_shell();
+        let now = Instant::now();
+        mouse_at(&mut app, MouseEventKind::ScrollUp, 45, 5, now);
+        assert_eq!(app.scrolled(), (3, 83));
+        let (title, first) = terminal_top(&mut app);
+        assert!(title.starts_with("┌ %7 · ↑ 3 of 83 ─"), "{title}");
+        assert_eq!(first, "81");
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 45, 5, now);
+        assert_eq!(app.scrolled(), (0, 83));
+        assert!(terminal_top(&mut app).0.starts_with("┌ %7 ─"));
+
+        // From the projects too, a page less a line at a time
+        assert_eq!(app.focus, Pane::Worktrees);
+        shift(&mut app, KeyCode::PageUp);
+        shift(&mut app, KeyCode::PageUp);
+        assert_eq!(app.scrolled(), (32, 83));
+        shift(&mut app, KeyCode::PageDown);
+        assert_eq!(app.scrolled(), (16, 83));
+        app.focus = Pane::Terminal;
+        for _ in 0..10 {
+            shift(&mut app, KeyCode::PageUp);
+        }
+        assert_eq!(terminal_top(&mut app).1, "1", "its start");
+        assert!(hint_line_of(&mut app).contains("any key: back to the bottom"));
+        assert_eq!(
+            inputs(&requests),
+            Vec::<Vec<u8>>::new(),
+            "never the program's"
+        );
+    }
+
+    fn hint_line_of(app: &mut App) -> String {
+        screen(app, 100, 20)[19].clone()
+    }
+
+    #[test]
+    fn a_key_goes_back_to_the_bottom_and_still_reaches_the_program() {
+        let (mut app, requests) = with_a_long_shell();
+        app.focus = Pane::Terminal;
+        shift(&mut app, KeyCode::PageUp);
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.scrolled(), (0, 83));
+        assert_eq!(inputs(&requests), [b"x".to_vec()]);
+        assert!(hint_line_of(&mut app).contains("other keys go to the terminal"));
+    }
+
+    #[test]
+    fn a_resize_waits_for_the_size_to_hold_then_for_the_daemons_screen() {
+        let (mut app, requests) = with_a_long_shell();
+        let resizes = || -> Vec<(u16, u16)> {
+            let requests = requests.try_iter();
+            requests
+                .filter_map(|request| match request {
+                    Request::Resize { rows, cols } => Some((rows, cols)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let now = Instant::now();
+        let later = |ms| now + Duration::from_millis(ms);
+        // Drawn at 100×20: the pane is 17×58 inside
+        app.tick(now);
+        app.tick(later(50));
+        assert_eq!(resizes(), [], "not held long enough");
+        screen(&mut app, 90, 20);
+        app.tick(later(60));
+        app.tick(later(150));
+        assert_eq!(resizes(), [], "still being dragged");
+        app.tick(later(160));
+        assert_eq!(resizes(), [(17, 48)], "once, at the last size");
+        let shown = app.shown.as_ref().unwrap();
+        assert_eq!(shown.screen.screen().size(), (18, 58), "left to the daemon");
+
+        app.streamed(Reply::Screen(b"redrawn".to_vec()));
+        let shown = app.shown.as_ref().unwrap();
+        assert_eq!(
+            shown.screen.screen().size(),
+            (17, 48),
+            "the daemon's, at its size"
+        );
+        assert_eq!(shown.screen.screen().contents(), "redrawn");
+        app.tick(later(500));
+        assert_eq!(resizes(), [], "nothing more");
+    }
+
+    #[test]
+    fn output_keeps_the_view_where_it_is() {
+        let (mut app, _requests) = with_a_long_shell();
+        mouse_at(&mut app, MouseEventKind::ScrollUp, 45, 5, Instant::now());
+        app.streamed(Reply::Output(b"101\r\n".to_vec()));
+        assert_eq!(app.scrolled(), (4, 84));
+        assert_eq!(terminal_top(&mut app).1, "81", "the same line on top");
+    }
+
+    #[test]
+    fn the_alternate_screen_has_no_history_and_gets_the_keys() {
+        let (mut app, requests) = with_a_long_shell();
+        app.focus = Pane::Terminal;
+        app.streamed(Reply::Output(b"\x1b[?1049h".to_vec()));
+        shift(&mut app, KeyCode::PageUp);
+        assert_eq!(app.scrolled(), (0, 0));
+        assert_eq!(inputs(&requests), [b"\x1b[5;2~".to_vec()]);
+    }
+
+    #[test]
+    fn a_program_reading_the_mouse_gets_the_wheel_and_shift_page_keys_still_scroll() {
+        let (mut app, requests) = with_a_long_shell();
+        app.streamed(Reply::Output(b"\x1b[?1000h\x1b[?1006h".to_vec()));
+        mouse_at(&mut app, MouseEventKind::ScrollUp, 41, 1, Instant::now());
+        assert_eq!(app.scrolled().0, 0);
+        assert_eq!(inputs(&requests), [b"\x1b[<64;1;1M".to_vec()]);
+        shift(&mut app, KeyCode::PageUp);
+        assert_eq!(app.scrolled().0, 16);
+    }
+
+    #[test]
+    fn a_selection_in_the_scrolled_view_copies_what_it_shows() {
+        let (mut app, _requests) = with_a_long_shell();
+        for _ in 0..10 {
+            shift(&mut app, KeyCode::PageUp);
+        }
+        screen_of(&mut app);
+        let now = Instant::now();
+        mouse_at(&mut app, CLICK, 41, 1, now);
+        mouse_at(&mut app, DRAG, 41, 2, now);
+        mouse_at(&mut app, UP, 41, 2, now);
+        assert_eq!(app.tasks, [Task::Copy("1\n2".into())]);
+        mouse_at(&mut app, MouseEventKind::ScrollDown, 45, 5, now);
+        assert!(app.selection.is_none(), "the view moved");
     }
 
     #[test]

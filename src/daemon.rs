@@ -10,6 +10,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
@@ -23,9 +24,17 @@ use tui_term::vt100;
 use crate::config;
 use crate::error::Result;
 use crate::protocol::{Reply, Request, Session, Window};
+use crate::reflow;
 
-/// Lines of scrollback kept per terminal.
-const SCROLLBACK: usize = 10_000;
+/// Lines of scrollback kept per terminal, by the daemon and by the dashboard for
+/// the one it shows, which gets them all on attach.
+pub const SCROLLBACK: usize = 10_000;
+
+/// The smallest a terminal gets, (rows, columns), as a terminal window's: a pane
+/// smaller than this shows the top left of a screen this size. Smaller, `vt100`
+/// panics wrapping text on a single row, and shells misbehave: bash clears its
+/// screen at 2 rows and moves over the lines above its prompt after.
+pub const MIN_SIZE: (u16, u16) = (4, 20);
 
 /// How long a daemon with nothing to do waits before ending, in case a dashboard
 /// connects meanwhile: one just starting, between its first requests.
@@ -38,6 +47,11 @@ pub fn socket_path() -> Result<PathBuf> {
 
 /// `tatou daemon`.
 pub fn run() -> ExitCode {
+    // Without a terminal, a panic's message would go nowhere
+    std::panic::set_hook(Box::new(|info| {
+        let thread = thread::current().name().map(String::from);
+        tracing::error!(thread = ?thread, %info, "the daemon panicked");
+    }));
     let served = socket_path()
         .map_err(|err| err.to_string())
         .and_then(|path| serve(&path, true).map_err(|err| format!("{}: {err}", path.display())));
@@ -122,6 +136,8 @@ struct Terminal {
     child: Box<dyn Child + Send + Sync>,
     /// When it last printed, in seconds since the Unix epoch.
     activity: u64,
+    /// Whether its shell waits at its prompt, which it draws again on a resize.
+    at_prompt: bool,
     /// The connections attached to it, by id.
     watchers: Vec<(u32, Sender<Reply>)>,
 }
@@ -307,8 +323,10 @@ impl Daemon {
             }
             Request::Resize { rows, cols } => {
                 let mut state = self.lock();
-                if let Some(terminal) = attached.and_then(|id| state.terminals.get_mut(&id)) {
-                    resize(terminal, rows, cols);
+                if let Some(terminal) = attached.and_then(|id| state.terminals.get_mut(&id))
+                    && resize(terminal, rows, cols)
+                {
+                    redraw_watchers(terminal);
                 }
                 return None;
             }
@@ -408,6 +426,7 @@ impl Daemon {
                 writer: Arc::new(Mutex::new(writer)),
                 child,
                 activity: unix_now(),
+                at_prompt: false,
                 watchers: Vec::new(),
             },
         );
@@ -438,7 +457,8 @@ impl Daemon {
             let Some(terminal) = state.terminals.get_mut(&id) else {
                 break;
             };
-            terminal.screen.process(&buffer[..n]);
+            feed(&mut terminal.screen, &buffer[..n], id);
+            terminal.at_prompt = at_prompt(terminal.at_prompt, &buffer[..n]);
             terminal.activity = unix_now();
             let output = &buffer[..n];
             terminal
@@ -489,8 +509,10 @@ impl Daemon {
         let Some(terminal) = state.terminals.get_mut(&id) else {
             return Reply::Error(format!("no terminal %{id}"));
         };
-        resize(terminal, rows, cols);
-        let screen = terminal.screen.screen().state_formatted();
+        if resize(terminal, rows, cols) {
+            redraw_watchers(terminal);
+        }
+        let screen = screen_now(terminal);
         terminal.watchers.push((client, replies.clone()));
         let session = terminal.session;
         if let Some(session) = state.sessions.iter_mut().find(|s| s.id == session) {
@@ -533,11 +555,23 @@ impl Daemon {
     }
 }
 
-fn resize(terminal: &mut Terminal, rows: u16, cols: u16) {
-    if (rows, cols) == terminal.screen.screen().size() || rows == 0 || cols == 0 {
-        return;
+/// Gives `terminal` a new size, its screen and its program's; false when it has
+/// it already. Its screen is reflowed, as a terminal's, lines wrapping again at
+/// the new width with nothing lost, and its cursor's line kept in sight.
+fn resize(terminal: &mut Terminal, rows: u16, cols: u16) -> bool {
+    let size = terminal.screen.screen().size();
+    if (rows, cols) == size || rows < MIN_SIZE.0 || cols < MIN_SIZE.1 {
+        return false;
     }
-    terminal.screen.screen_mut().set_size(rows, cols);
+    let screen = &mut terminal.screen;
+    let at_prompt = terminal.at_prompt;
+    let reflowed = panic::catch_unwind(AssertUnwindSafe(|| {
+        reflow::reflow(screen, rows, cols, SCROLLBACK, at_prompt)
+    }));
+    terminal.screen = reflowed.unwrap_or_else(|_| {
+        tracing::error!(rows, cols, "cannot reflow a screen; starting it afresh");
+        vt100::Parser::new(rows, cols, SCROLLBACK)
+    });
     let size = PtySize {
         rows,
         cols,
@@ -547,6 +581,79 @@ fn resize(terminal: &mut Terminal, rows: u16, cols: u16) {
     if let Err(err) = terminal.master.resize(size) {
         tracing::warn!(%err, "cannot resize a terminal");
     }
+    true
+}
+
+/// Whether a shell is at its prompt after printing `output`, from `before`: a
+/// shell with shell integration marks where its input starts with OSC 133;B, and
+/// leaves the prompt with a new line, the Enter that runs a command. A mark cut in
+/// two between reads is missed, until the next prompt's.
+fn at_prompt(before: bool, output: &[u8]) -> bool {
+    const INPUT: &[u8] = b"\x1b]133;B";
+    let marked = output.windows(INPUT.len()).rposition(|w| w == INPUT);
+    let after = marked.map_or(0, |at| at + INPUT.len());
+    let left = output[after..].contains(&b'\n');
+    (before || marked.is_some()) && !left
+}
+
+/// Feeds `bytes`, terminal `id`'s output, to its screen. Should `vt100` panic on
+/// them, the screen starts afresh at its size, which the program draws again: its
+/// output still has to be read, or the program would block on it for good.
+fn feed(screen: &mut vt100::Parser, bytes: &[u8], id: u32) {
+    if panic::catch_unwind(AssertUnwindSafe(|| screen.process(bytes))).is_err() {
+        tracing::error!(
+            id,
+            "a terminal's screen failed on its output; starting it afresh"
+        );
+        let (rows, cols) = screen.screen().size();
+        *screen = vt100::Parser::new(rows, cols, SCROLLBACK);
+    }
+}
+
+/// What a dashboard draws `terminal` from: its main screen's history and
+/// contents, then, when a full-screen program runs, the alternate screen's,
+/// switched to as the program did, which `state_formatted` alone does not say;
+/// then the input modes.
+fn screen_now(terminal: &mut Terminal) -> Vec<u8> {
+    let alternate = terminal.screen.screen().alternate_screen();
+    let mut bytes = Vec::new();
+    on_main_screen(&mut terminal.screen, |screen| {
+        bytes = history(screen.screen_mut());
+        bytes.extend(screen.screen().contents_formatted());
+    });
+    if alternate {
+        bytes.extend(b"\x1b[?1049h");
+        bytes.extend(terminal.screen.screen().contents_formatted());
+    }
+    bytes.extend(terminal.screen.screen().input_mode_formatted());
+    bytes
+}
+
+/// Runs `with` on `screen`'s main screen, and back to the alternate one after,
+/// when a full-screen program runs; mode 47 switches without clearing either.
+fn on_main_screen(screen: &mut vt100::Parser, with: impl FnOnce(&mut vt100::Parser)) {
+    let alternate = screen.screen().alternate_screen();
+    if alternate {
+        screen.process(b"\x1b[?47l");
+    }
+    with(screen);
+    if alternate {
+        screen.process(b"\x1b[?47h");
+    }
+}
+
+/// Sends `terminal`'s screen anew to the dashboards showing it, after a resize: a
+/// screen they resized themselves would differ from the daemon's, which output
+/// printed for the old size reaches after. In order with its output, sent under
+/// the same lock.
+fn redraw_watchers(terminal: &mut Terminal) {
+    if terminal.watchers.is_empty() {
+        return;
+    }
+    let screen = screen_now(terminal);
+    terminal
+        .watchers
+        .retain(|(_, watcher)| watcher.send(Reply::Screen(screen.clone())).is_ok());
 }
 
 /// `3` from `%3` (with `prefix` `%`).
@@ -579,6 +686,39 @@ fn unix_now() -> u64 {
     since_epoch.map_or(0, |elapsed| elapsed.as_secs())
 }
 
+/// The lines that scrolled off the top of `screen`, oldest first, each with its
+/// colours and a line end, then as many line ends as it is tall less one: fed to a
+/// new screen of its size before `state_formatted`, they all become its scrollback.
+/// None on the alternate screen, which keeps no history. Lines that wrapped come
+/// back as separate lines.
+fn history(screen: &mut vt100::Screen) -> Vec<u8> {
+    if screen.alternate_screen() {
+        return Vec::new();
+    }
+    let (rows, cols) = screen.size();
+    // Viewing the history a screen at a time, from its start; offsets are clamped
+    screen.set_scrollback(usize::MAX);
+    let mut left = screen.scrollback();
+    let mut bytes = Vec::new();
+    while left > 0 {
+        screen.set_scrollback(left);
+        let take = left.min(usize::from(rows));
+        // Each row moves the cursor right only: a stream of them draws line after line
+        for row in screen.rows_formatted(0, cols).take(take) {
+            bytes.extend(row);
+            bytes.extend(b"\x1b[m\r\n");
+        }
+        left -= take;
+    }
+    screen.set_scrollback(0);
+    if !bytes.is_empty() {
+        for _ in 1..rows {
+            bytes.extend(b"\r\n");
+        }
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,6 +728,45 @@ mod tests {
         assert_eq!(program_name(Some("claude --resume")), "claude");
         assert_eq!(program_name(Some("/usr/local/bin/codex")), "codex");
         assert_eq!(program_name(Some("sleep 1000")), "sleep");
+    }
+
+    #[test]
+    fn a_screen_that_panics_on_output_starts_afresh() {
+        // A single row: vt100 cannot wrap text there
+        let mut screen = vt100::Parser::new(1, 1, SCROLLBACK);
+        feed(&mut screen, b"abc", 1);
+        assert_eq!(screen.screen().size(), (1, 1));
+        feed(&mut screen, b"x", 1);
+        assert_eq!(screen.screen().contents(), "x", "and goes on");
+    }
+
+    #[test]
+    fn the_smallest_screen_takes_any_output_and_reflows() {
+        let mut screen = vt100::Parser::new(24, 80, SCROLLBACK);
+        screen.process("日本語 the quick brown fox\r\n".repeat(30).as_bytes());
+        let (rows, cols) = MIN_SIZE;
+        let mut small = reflow::reflow(&mut screen, rows, cols, SCROLLBACK, false);
+        small.process(
+            "日本 more output that wraps\r\n\x1b[2J\x1b[H"
+                .repeat(5)
+                .as_bytes(),
+        );
+        let back = reflow::reflow(&mut small, 24, 80, SCROLLBACK, false);
+        assert_eq!(back.screen().size(), (24, 80));
+    }
+
+    #[test]
+    fn a_shell_is_at_its_prompt_from_its_input_mark_to_a_new_line() {
+        let prompt = b"\x1b]133;A\x07\r\nstatus\r\n> \x1b]133;B\x07";
+        assert!(at_prompt(false, prompt));
+        assert!(at_prompt(true, b"ls -l"), "typing");
+        assert!(!at_prompt(true, b"\r\n"), "Enter");
+        assert!(!at_prompt(false, b"output\r\nmore"), "a command's output");
+        let redrawn = b"\r\x1b[K> \x1b]133;B\x07";
+        assert!(at_prompt(false, redrawn));
+        let after = b"\r\nfile\r\n> \x1b]133;B\x07";
+        assert!(at_prompt(false, after), "the prompt again after a listing");
+        assert!(!at_prompt(false, b"no marks, no prompt"));
     }
 
     #[test]

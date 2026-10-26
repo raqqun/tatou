@@ -38,6 +38,7 @@ src/
   git.rs      # worktrees, branches, status; output parsing
   gh.rs       # PR list; output parsing
   daemon.rs   # `tatou daemon`: terminals (pseudo-terminal + vt100 screen), sessions, the socket
+  reflow.rs   # a terminal's screen at a new size, its lines wrapped again
   protocol.rs # the daemon's frames: requests and replies
   client.rs   # the dashboard's side of the socket; starts the daemon
   term.rs     # keys and pastes into the bytes a terminal program reads
