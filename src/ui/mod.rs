@@ -52,6 +52,9 @@ const PREVIOUS: (KeyCode, KeyModifiers) = (KeyCode::Char('h'), KeyModifiers::ALT
 const NEXT_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('j'), KeyModifiers::ALT);
 const PREVIOUS_WINDOW: (KeyCode, KeyModifiers) = (KeyCode::Char('k'), KeyModifiers::ALT);
 
+/// The width of the Projects and Sessions column; the terminal takes the rest.
+const LEFT_WIDTH: u16 = 40;
+
 /// Lines of scrollback kept for the shown terminal.
 const SCROLLBACK: usize = 1_000;
 
@@ -818,9 +821,10 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let [main, hints] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+        // Half the screen at most, so that the terminal always shows
+        let width = LEFT_WIDTH.min(main.width / 2);
         let [left, right] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .areas(main);
+            Layout::horizontal([Constraint::Length(width), Constraint::Min(1)]).areas(main);
         self.render_terminal(frame, right);
         // Sessions as tall as its rows and borders, up to a third of the column; not
         // drawn when a third has no room for one row, so the projects keep theirs
@@ -1075,17 +1079,18 @@ mod tests {
             project("/code/app", &["fix-login"]),
             project("/code/web", &[]),
         ]);
+        // The left column 40 wide, the terminal the rest
         let expected = [
-            "┌ Projects ──────────────────┐┌ Terminal ──────────────────────────────────┐",
-            "│▾ app                       ││Enter on a worktree or a session shows its  │",
-            "│  · main  repo              ││terminal here                               │",
-            "│  · fix-login               ││                                            │",
-            "│▾ web                       ││                                            │",
-            "│  · main  repo              ││                                            │",
-            "└────────────────────────────┘└────────────────────────────────────────────┘",
+            "┌ Projects ────────────────────────────┐┌ Terminal ──────────────────────────────────────┐",
+            "│▾ app                                 ││Enter on a worktree or a session shows its      │",
+            "│  · main  repo                        ││terminal here                                   │",
+            "│  · fix-login                         ││                                                │",
+            "│▾ web                                 ││                                                │",
+            "│  · main  repo                        ││                                                │",
+            "└──────────────────────────────────────┘└────────────────────────────────────────────────┘",
             "n new  e edit  ? help  q quit",
         ];
-        assert_eq!(screen(&mut app, 76, 8), expected);
+        assert_eq!(screen(&mut app, 90, 8), expected);
     }
 
     #[test]
@@ -1343,7 +1348,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert!(lines[1].starts_with("│▾ app"), "still listed: {lines:?}");
         assert!(
             // Cut at the pane's width
-            lines[3].starts_with("└ config.toml: unknown field `popop`, expected one of"),
+            lines[3].starts_with("└ config.toml: unknown field `popop`, e┘"),
             "{lines:?}"
         );
         // Fixed: the error goes away
@@ -2213,6 +2218,25 @@ unknown field `popop`, expected one of `popup`, `back`";
         app.show("%20");
         alt(&mut app, 'k');
         assert_eq!(shown(&app), Some("%21"));
+    }
+
+    #[test]
+    fn the_left_column_keeps_its_width_and_the_terminal_takes_the_rest() {
+        let mut app = showing(vec![project("/code/app", &[])]);
+        for width in [100, 200] {
+            let top = &screen(&mut app, width, 6)[0];
+            let left: String = top.chars().take_while(|c| *c != '┐').collect();
+            assert_eq!(left.chars().count() + 1, 40, "{width}: {top}");
+            assert_eq!(
+                top.chars().count(),
+                width as usize,
+                "the terminal to the edge"
+            );
+        }
+        // Narrower than 80: half each, so that the terminal still shows
+        let top = &screen(&mut app, 60, 6)[0];
+        let left: String = top.chars().take_while(|c| *c != '┐').collect();
+        assert_eq!(left.chars().count() + 1, 30, "{top}");
     }
 
     #[test]
