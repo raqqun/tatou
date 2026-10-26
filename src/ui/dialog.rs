@@ -5,9 +5,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
+
+use crate::theme::Theme;
 
 /// The widest a dialog gets, borders included.
 const MAX_WIDTH: u16 = 72;
@@ -56,12 +58,12 @@ impl Dialog {
     }
 
     /// Draws it over the middle of `area`, the whole screen.
-    pub fn render(&mut self, frame: &mut Frame, area: Rect) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         match self {
-            Dialog::Form(form) => form.render(frame, area),
-            Dialog::Choice(choice) => choice.render(frame, area),
-            Dialog::Confirm(confirm) => confirm.render(frame, area),
-            Dialog::Message(message) => message.render(frame, area),
+            Dialog::Form(form) => form.render(frame, area, theme),
+            Dialog::Choice(choice) => choice.render(frame, area, theme),
+            Dialog::Confirm(confirm) => confirm.render(frame, area, theme),
+            Dialog::Message(message) => message.render(frame, area, theme),
         }
     }
 }
@@ -280,13 +282,13 @@ impl Form {
         Outcome::Open
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let label_width = self.fields.iter().map(|f| f.label().chars().count()).max();
         let label_width = label_width.unwrap_or(0);
         let error_lines = self.error.as_ref().map_or(0, |e| e.lines().count() + 1);
         let busy_lines = if self.busy.is_some() { 2 } else { 0 };
         let height = self.fields.len() + error_lines + busy_lines;
-        let inner = open(frame, area, &self.title, height as u16);
+        let inner = open(frame, area, &self.title, height as u16, theme);
         let value_width = (inner.width as usize).saturating_sub(label_width + 2);
 
         let mut lines = Vec::new();
@@ -316,7 +318,7 @@ impl Form {
         }
         if let Some(error) = &self.error {
             lines.push(Line::raw(""));
-            let red = Style::new().fg(Color::Red);
+            let red = Style::new().fg(theme.error);
             lines.extend(
                 error
                     .lines()
@@ -371,16 +373,16 @@ impl Choice {
         Outcome::Open
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         // Up to half the screen; the list scrolls past that
         let height = self.options.len().min(area.height as usize / 2).max(1);
-        let inner = open(frame, area, &self.title, height as u16);
+        let inner = open(frame, area, &self.title, height as u16, theme);
         let items: Vec<ListItem> = self
             .options
             .iter()
             .map(|o| ListItem::new(o.as_str()))
             .collect();
-        let list = List::new(items).highlight_style(Style::new().add_modifier(Modifier::REVERSED));
+        let list = List::new(items).highlight_style(theme.selected());
         frame.render_stateful_widget(list, inner, &mut self.list);
     }
 }
@@ -423,7 +425,7 @@ impl Confirm {
         }
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect) {
+    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let choices = if self.default { "[Y/n]" } else { "[y/N]" };
         let text = format!("{} {choices}", self.question);
         let width = dialog_width(area) as usize - 2;
@@ -433,7 +435,7 @@ impl Confirm {
             lines.push(String::new());
         }
         lines.extend(wrap_words(&text, width));
-        let inner = open(frame, area, &self.title, lines.len() as u16);
+        let inner = open(frame, area, &self.title, lines.len() as u16, theme);
         let lines: Vec<Line> = lines.into_iter().map(Line::raw).collect();
         frame.render_widget(Paragraph::new(lines), inner);
     }
@@ -474,7 +476,7 @@ impl Message {
         Outcome::Open
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let width = dialog_width(area) as usize - 2;
         let lines = wrap(&self.text, width);
         // Up to the screen's height less a margin, borders and a line for the position
@@ -482,7 +484,13 @@ impl Message {
         self.page = lines.len().min(room);
         self.scroll = self.scroll.min(lines.len() - self.page);
         let more = lines.len() > self.page;
-        let inner = open(frame, area, &self.title, (self.page + more as usize) as u16);
+        let inner = open(
+            frame,
+            area,
+            &self.title,
+            (self.page + more as usize) as u16,
+            theme,
+        );
         let mut shown: Vec<Line> = lines[self.scroll..self.scroll + self.page]
             .iter()
             .map(|line| Line::raw(line.clone()))
@@ -507,8 +515,8 @@ fn dialog_width(area: Rect) -> u16 {
 }
 
 /// Clears a bordered box for `height` lines of content in the middle of `area`,
-/// titled, and returns the space inside it.
-fn open(frame: &mut Frame, area: Rect, title: &str, height: u16) -> Rect {
+/// titled, in the theme's colours, and returns the space inside it.
+fn open(frame: &mut Frame, area: Rect, title: &str, height: u16, theme: &Theme) -> Rect {
     let width = dialog_width(area);
     let height = (height + 2).min(area.height);
     let x = area.x + (area.width - width) / 2;
@@ -517,6 +525,7 @@ fn open(frame: &mut Frame, area: Rect, title: &str, height: u16) -> Rect {
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(format!(" {title} "))
+        .style(theme.base())
         .border_style(Style::new().add_modifier(Modifier::BOLD));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
@@ -691,7 +700,7 @@ mod tests {
     fn screen(dialog: &mut Dialog, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| dialog.render(frame, frame.area()))
+            .draw(|frame| dialog.render(frame, frame.area(), &crate::theme::terminal()))
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)

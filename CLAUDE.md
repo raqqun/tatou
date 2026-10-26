@@ -32,6 +32,7 @@ src/
   error.rs    # crate-wide Error enum and Result alias
   logging.rs  # log file setup and rotation
   config.rs   # load config.toml and projects/*.toml, write project files; XDG directories
+  theme.rs    # themes: the dashboard's colours, built in (themes/) or from the config's themes/
   exec.rs     # the only place that runs external commands, but the terminals' programs
   platform.rs # the only platform-specific code: notify(title, body)
   git.rs      # worktrees, branches, status; output parsing
@@ -45,6 +46,7 @@ src/
   actions.rs  # the requests and commands behind each action, on threads of their own, reporting events
   keys.rs     # keymap: defaults, config overrides, action dispatch
   ui/         # ratatui rendering and input handling only, the shown terminal included
+themes/          # the built-in themes, one TOML file each, compiled in
 tests/fixtures/  # captured git/gh outputs used by parser tests
 ```
 
@@ -63,7 +65,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 ## Rules
 
 - **One terminal at a time, no multiplexer.** The dashboard shows one terminal, beside the projects. No splits, layouts, tabs, copy mode or scripting; if a feature needs them, it does not belong in tatou.
-- **No persistent state** besides `config.toml` and the project files in `projects/` next to it (one per repository, written by `tatou add` and the launch offer, plain TOML the user may edit). The daemon keeps its terminals in memory only, and its socket is a runtime file. No database, cache or other state file; derive everything from `git`, `gh` and the daemon.
+- **No persistent state** besides `config.toml`, the project files in `projects/` next to it (one per repository, written by `tatou add` and the launch offer, plain TOML the user may edit) and the user's own themes in `themes/`. The daemon keeps its terminals in memory only, and its socket is a runtime file. No database, cache or other state file; derive everything from `git`, `gh` and the daemon.
 - **The daemon owns the terminals.** Every terminal is started, written to, resized and ended through the daemon's protocol (`protocol.rs`, via `client.rs`); the dashboard never runs a program in a pseudo-terminal itself. One daemon per user, on `$XDG_STATE_HOME/tatou/tatou.sock`.
 - **Don't reimplement tools.** No built-in editor, pager, diff viewer or file operations; delegate to `$EDITOR`, a shell, or the agent.
 - **Everything tatou creates in a repository is a plain git worktree**, usable without tatou.

@@ -30,12 +30,10 @@ use crate::model::{self, SessionView, Sources, WorktreeView};
 use crate::protocol::{Reply, Request};
 use crate::refresh::{ConfigWatch, Refresh, Update};
 use crate::term::{self, Modes};
+use crate::theme::{self, Theme};
 use dialog::{Choice, Confirm, Dialog, Field, Form, Message, Outcome};
 use projects::Tree;
 use sessions::Sessions;
-
-/// The focused pane's border and title: cyan, as the `repo` tag.
-const ACCENT: Color = Color::Cyan;
 
 /// How long to wait for input before applying updates and drawing again; short
 /// enough for a shown terminal's output to appear as it comes.
@@ -171,6 +169,8 @@ struct App {
     config: std::result::Result<Config, String>,
     /// Why the config could not be loaded again; the last valid one stays meanwhile.
     reload_error: Option<String>,
+    /// The config's, else the default one.
+    theme: Theme,
     /// `None` in tests.
     refresh: Option<Refresh>,
     sources: Sources,
@@ -200,9 +200,14 @@ struct App {
 
 impl App {
     fn new(config: std::result::Result<Config, String>) -> App {
+        let theme = match &config {
+            Ok(config) => config.theme.clone(),
+            Err(_) => theme::terminal(),
+        };
         App {
             config,
             reload_error: None,
+            theme,
             refresh: None,
             sources: Sources::default(),
             tree: Tree::default(),
@@ -407,6 +412,7 @@ impl App {
         if let Some(refresh) = &mut self.refresh {
             refresh.set_projects(&project_paths(&config));
         }
+        self.theme = config.theme.clone();
         self.config = Ok(config);
         self.reload_error = None;
     }
@@ -844,6 +850,7 @@ impl App {
     }
 
     fn render(&mut self, frame: &mut Frame) {
+        frame.render_widget(Block::new().style(self.theme.base()), frame.area());
         let [main, hints] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
         // Half the screen at most, so that the terminal always shows
@@ -867,7 +874,7 @@ impl App {
         }
         frame.render_widget(self.hint_bar(), hints);
         if let Some(open) = &mut self.dialog {
-            open.dialog.render(frame, main);
+            open.dialog.render(frame, main, &self.theme);
         }
     }
 
@@ -901,6 +908,7 @@ impl App {
                     .block(block)
                     .cursor(cursor);
                 frame.render_widget(widget, area);
+                self.paint_defaults(frame, inner);
             }
             None => {
                 let text = "Enter on a worktree or a session shows its terminal here";
@@ -910,21 +918,42 @@ impl App {
         }
     }
 
+    /// The theme's colours in the cells of `area` its program left in the default
+    /// ones; those it set itself are kept.
+    fn paint_defaults(&self, frame: &mut Frame, area: Rect) {
+        let (fg, bg) = (self.theme.foreground, self.theme.background);
+        if (fg, bg) == (Color::Reset, Color::Reset) {
+            return;
+        }
+        let buffer = frame.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &mut buffer[(x, y)];
+                if cell.fg == Color::Reset {
+                    cell.fg = fg;
+                }
+                if cell.bg == Color::Reset {
+                    cell.bg = bg;
+                }
+            }
+        }
+    }
+
     /// Every session the daemon has; its error at the bottom.
     fn render_sessions(&mut self, frame: &mut Frame, area: Rect) {
         let mut block = self.pane_block(" Sessions ", Pane::Sessions);
         if let Some(err) = self.sources.sessions_error() {
-            let style = error_style();
+            let style = error_style(&self.theme);
             block = block.title_bottom(Line::styled(format!(" {err} "), style));
         }
-        self.sessions.render(frame, area, block);
+        self.sessions.render(frame, area, block, &self.theme);
     }
 
     /// The projects, else why there are none; a reload error at the bottom, and
     /// the sessions' error with `sessions_error`.
     fn render_projects(&mut self, frame: &mut Frame, area: Rect, sessions_error: bool) {
         let mut block = self.pane_block(" Projects ", Pane::Worktrees);
-        let style = error_style();
+        let style = error_style(&self.theme);
         if let (Some(err), Ok(config)) = (&self.reload_error, &self.config) {
             let err = one_line(err, &config.path);
             block = block.title_bottom(Line::styled(format!(" config.toml: {err} "), style));
@@ -933,7 +962,9 @@ impl App {
             block = block.title_bottom(Line::styled(format!(" {err} "), style));
         }
         let message = match &self.config {
-            Ok(_) if !self.tree.is_empty() => return self.tree.render(frame, area, block),
+            Ok(_) if !self.tree.is_empty() => {
+                return self.tree.render(frame, area, block, &self.theme);
+            }
             Ok(config) => format!(
                 "No projects yet: run `tatou add` in a repository, or add a file to {}",
                 config::projects_dir(&config.path).display()
@@ -953,7 +984,9 @@ impl App {
     fn pane_block_titled(&self, title: String, pane: Pane) -> Block<'static> {
         let block = Block::bordered().title(title);
         if self.focus == pane {
-            let accent = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+            let accent = Style::new()
+                .fg(self.theme.accent)
+                .add_modifier(Modifier::BOLD);
             block.border_style(accent).title_style(accent)
         } else {
             block.style(Style::new().add_modifier(Modifier::DIM))
@@ -970,7 +1003,7 @@ impl App {
             return Paragraph::new(format!("… {progress}"));
         }
         if self.focus == Pane::Terminal && self.dialog.is_none() {
-            let bold = Style::new().add_modifier(Modifier::BOLD);
+            let bold = self.key_style();
             let keys = vec![
                 Span::styled("M-d", bold),
                 Span::raw(" dashboard  "),
@@ -995,10 +1028,15 @@ impl App {
             if !spans.is_empty() {
                 spans.push(Span::raw("  "));
             }
-            spans.push(Span::styled(key, Style::new().add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(key, self.key_style()));
             spans.push(Span::raw(format!(" {label}")));
         }
         Paragraph::new(Line::from(spans))
+    }
+
+    /// Keys in the hint bar.
+    fn key_style(&self) -> Style {
+        Style::new().fg(self.theme.key).add_modifier(Modifier::BOLD)
     }
 }
 
@@ -1028,8 +1066,8 @@ fn one_line(err: &str, path: &std::path::Path) -> String {
 }
 
 /// Errors on a pane's border, bright even in a dim pane.
-fn error_style() -> Style {
-    Style::new().fg(Color::Red).remove_modifier(Modifier::DIM)
+fn error_style(theme: &Theme) -> Style {
+    Style::new().fg(theme.error).remove_modifier(Modifier::DIM)
 }
 
 /// Seconds since the Unix epoch, like the daemon's activity times.
@@ -2385,7 +2423,7 @@ unknown field `popop`, expected one of `popup`, `back`";
 
     fn accent(buffer: &ratatui::buffer::Buffer, x: u16, y: u16) -> bool {
         let cell = &buffer[(x, y)];
-        cell.fg == ACCENT
+        cell.fg == Color::Cyan
             && cell.modifier.contains(Modifier::BOLD)
             && !cell.modifier.contains(Modifier::DIM)
     }
@@ -2458,6 +2496,64 @@ unknown field `popop`, expected one of `popup`, `back`";
         let cell = &buffer[(3, y)];
         assert_eq!(cell.fg, Color::Red);
         assert!(!cell.modifier.contains(Modifier::DIM), "the error");
+    }
+
+    #[test]
+    fn a_theme_colours_the_dashboard_and_the_terminals_default_cells() {
+        let mut app = with_sessions(vec![daemon_session(
+            "$1",
+            "app-fix",
+            "/code/app.worktrees/fix",
+        )]);
+        let dir = tempfile::tempdir().unwrap();
+        app.theme = theme::load(dir.path(), "monokai-pro").unwrap();
+        let mut screen = vt100::Parser::new(18, 58, SCROLLBACK);
+        screen.process(b"\x1b[31mred\x1b[0m plain");
+        app.shown = Some(Shown {
+            terminal: "%7".into(),
+            screen,
+        });
+        let (background, foreground) = (Color::Rgb(0x2d, 0x2a, 0x2e), Color::Rgb(0xfc, 0xfc, 0xfa));
+        let buffer = styles(&mut app, 100, 20);
+        assert_eq!(
+            buffer[(0, 0)].fg,
+            Color::Rgb(0xff, 0xd8, 0x66),
+            "the accent"
+        );
+        assert_eq!(
+            buffer[(3, 1)].bg,
+            Color::Rgb(0x5b, 0x59, 0x5c),
+            "the selection"
+        );
+        assert!(!buffer[(3, 1)].modifier.contains(Modifier::REVERSED));
+        assert_eq!(buffer[(99, 19)].bg, background, "the hint bar");
+        // The terminal's inside starts at (41, 1)
+        let red = &buffer[(41, 1)];
+        assert_eq!(
+            (red.fg, red.bg),
+            (Color::Indexed(1), background),
+            "its program's colour"
+        );
+        let plain = &buffer[(45, 1)];
+        assert_eq!(
+            (plain.fg, plain.bg),
+            (foreground, background),
+            "the defaults"
+        );
+    }
+
+    #[test]
+    fn the_default_theme_leaves_the_terminals_colours() {
+        let mut app = with_sessions(vec![]);
+        let mut screen = vt100::Parser::new(18, 58, SCROLLBACK);
+        screen.process(b"plain");
+        app.shown = Some(Shown {
+            terminal: "%7".into(),
+            screen,
+        });
+        let buffer = styles(&mut app, 100, 20);
+        let plain = &buffer[(41, 1)];
+        assert_eq!((plain.fg, plain.bg), (Color::Reset, Color::Reset));
     }
 
     fn test_config() -> Config {

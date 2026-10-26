@@ -267,6 +267,7 @@ mod tests {
             default_agent: "claude".into(),
             agents: BTreeMap::new(),
             keys: Keys::default(),
+            theme: crate::theme::terminal(),
             projects: projects
                 .iter()
                 .map(|path| Project {

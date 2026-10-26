@@ -654,6 +654,20 @@ Depends on: 2.15
 **Done when**
 - Unit tests mapping mouse events to actions by layout area.
 
+### 6.7 Themes: `theme = …` and theme files (#110)
+
+Depends on: 2.19
+
+- Decided: themes colour the dashboard, not the shown terminal's program. A theme is a flat TOML file named after it, every key optional: `background`, `foreground`, `accent`, `selection`, `error`, `input`, `busy`, `tag`, `key`. Colours are `#rrggbb`, ANSI names, indexes `0`–`255` or `reset`, parsed by ratatui; unknown keys are errors with their line; a key left out takes `terminal`'s value.
+- Built in, from the repository's `themes/` with `include_str!`: `terminal`, today's look in the terminal's own palette (the default), and `monokai-pro`. Users' themes in `$XDG_CONFIG_HOME/tatou/themes/*.toml`, a built-in's name replacing it.
+- `theme = "…"` in `config.toml`; an unknown or invalid theme is a config error. The config's stamp covers `themes/`, so editing a theme restyles a running dashboard.
+- The shown terminal's cells in the default colours take the theme's `foreground` and `background`; colours its program sets are kept.
+
+**Done when**
+- Unit tests: every colour form, an unknown key, fallback to `terminal`, a user theme replacing a built-in, an unknown theme as a config error, the stamp with a theme file.
+- `TestBackend` tests: `terminal` keeps today's styles; Monokai Pro colours the accent, the selection and the shown terminal's default cells, keeping its program's colours.
+- Manual check documented in the PR: `theme = "monokai-pro"` restyles a running dashboard.
+
 ---
 
 ## M7 — Ship
