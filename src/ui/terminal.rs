@@ -8,8 +8,8 @@ use std::thread::{self, ThreadId};
 
 use crossterm::cursor::Show;
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -36,8 +36,9 @@ impl Drop for Guard {
     }
 }
 
-/// Raw mode, the alternate screen and bracketed paste, until the guard is dropped.
-/// The mouse is left to the terminal, to select text in the shown terminal. Where
+/// Raw mode, the alternate screen, bracketed paste and the mouse, until the guard
+/// is dropped: the terminal then selects text only with its bypass key held
+/// (Shift, Option in iTerm2), and every click is the dashboard's. Where
 /// the terminal supports the kitty keyboard protocol, keys come disambiguated: a
 /// legacy terminal sends Shift-Enter as Enter, and an agent needs to tell them apart.
 pub fn enter() -> io::Result<(Tui, Guard)> {
@@ -46,7 +47,12 @@ pub fn enter() -> io::Result<(Tui, Guard)> {
     // From here on, a failure still restores what was already changed
     ENTERED.store(true, Ordering::SeqCst);
     let guard = Guard;
-    execute!(stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     // A terminal that cannot answer simply keeps sending legacy keys
     if supports_keyboard_enhancement().unwrap_or(false) {
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
@@ -68,7 +74,13 @@ fn restore() {
     if ENHANCED.swap(false, Ordering::SeqCst) {
         let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
     }
-    let _ = execute!(stdout(), DisableBracketedPaste, LeaveAlternateScreen, Show);
+    let _ = execute!(
+        stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        LeaveAlternateScreen,
+        Show
+    );
     let _ = disable_raw_mode();
 }
 

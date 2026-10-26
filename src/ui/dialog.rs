@@ -57,6 +57,17 @@ impl Dialog {
         }
     }
 
+    /// A click at `position`, a double one with `double`: in a choice list, selects
+    /// the option there, and a double click chooses it; in a form, focuses the
+    /// field. A confirmation takes no clicks, so that none answers it by mistake.
+    pub fn click(&mut self, position: Position, double: bool) -> Outcome {
+        match self {
+            Dialog::Form(form) => form.click(position),
+            Dialog::Choice(choice) => choice.click(position, double),
+            Dialog::Confirm(_) | Dialog::Message(_) => Outcome::Open,
+        }
+    }
+
     /// Draws it over the middle of `area`, the whole screen.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         match self {
@@ -219,6 +230,8 @@ pub struct Form {
     error: Option<String>,
     /// What runs with the answer; only Esc works until it is done.
     busy: Option<String>,
+    /// Where the fields were last drawn, a line each, to find the one clicked.
+    inner: Rect,
 }
 
 impl Form {
@@ -227,6 +240,7 @@ impl Form {
             title: title.to_string(),
             fields,
             focus: 0,
+            inner: Rect::default(),
             error: None,
             busy: None,
         }
@@ -282,13 +296,22 @@ impl Form {
         Outcome::Open
     }
 
-    fn render(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn click(&mut self, position: Position) -> Outcome {
+        let row = position.y.wrapping_sub(self.inner.y) as usize;
+        if self.busy.is_none() && self.inner.contains(position) && row < self.fields.len() {
+            self.focus = row;
+        }
+        Outcome::Open
+    }
+
+    fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let label_width = self.fields.iter().map(|f| f.label().chars().count()).max();
         let label_width = label_width.unwrap_or(0);
         let error_lines = self.error.as_ref().map_or(0, |e| e.lines().count() + 1);
         let busy_lines = if self.busy.is_some() { 2 } else { 0 };
         let height = self.fields.len() + error_lines + busy_lines;
         let inner = open(frame, area, &self.title, height as u16, theme);
+        self.inner = inner;
         let value_width = (inner.width as usize).saturating_sub(label_width + 2);
 
         let mut lines = Vec::new();
@@ -341,6 +364,8 @@ pub struct Choice {
     title: String,
     options: Vec<String>,
     list: ListState,
+    /// Where the options were last drawn, to find the one clicked.
+    inner: Rect,
 }
 
 impl Choice {
@@ -351,6 +376,7 @@ impl Choice {
             title: title.to_string(),
             options,
             list: ListState::default().with_selected(Some(selected)),
+            inner: Rect::default(),
         }
     }
 
@@ -373,10 +399,27 @@ impl Choice {
         Outcome::Open
     }
 
+    fn click(&mut self, position: Position, double: bool) -> Outcome {
+        if !self.inner.contains(position) {
+            return Outcome::Open;
+        }
+        let heights = vec![1; self.options.len()];
+        let Some(index) = super::row_at(&heights, self.list.offset(), self.inner, position.y)
+        else {
+            return Outcome::Open;
+        };
+        self.list.select(Some(index));
+        match double {
+            true => Outcome::Submit,
+            false => Outcome::Open,
+        }
+    }
+
     fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         // Up to half the screen; the list scrolls past that
         let height = self.options.len().min(area.height as usize / 2).max(1);
         let inner = open(frame, area, &self.title, height as u16, theme);
+        self.inner = inner;
         let items: Vec<ListItem> = self
             .options
             .iter()

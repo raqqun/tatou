@@ -1,7 +1,8 @@
-//! Keys and pastes, as crossterm reports them, back into the bytes a program in
-//! a terminal reads: what an xterm would send for them.
+//! Keys, pastes and the mouse, as crossterm reports them, back into the bytes a
+//! program in a terminal reads: what an xterm would send for them.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use tui_term::vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 /// What the shown terminal's program asked for, which changes some keys' bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -10,6 +11,9 @@ pub struct Modes {
     pub application_cursor: bool,
     /// Pastes between `ESC [200~` and `ESC [201~`.
     pub bracketed_paste: bool,
+    /// Which mouse events it reads; none by default.
+    pub mouse: MouseProtocolMode,
+    pub mouse_encoding: MouseProtocolEncoding,
 }
 
 /// The bytes for `key`; none for keys a terminal sends nothing for.
@@ -65,6 +69,64 @@ pub fn paste_bytes(text: &str, modes: Modes) -> Vec<u8> {
         format!("\x1b[200~{text}\x1b[201~").into_bytes()
     } else {
         text.into_bytes()
+    }
+}
+
+/// The bytes for `event`, at (`column`, `row`) from the terminal's top left
+/// corner; none when the program did not ask for this kind of event, or when its
+/// encoding cannot say where it happened.
+pub fn mouse_bytes(event: MouseEvent, column: u16, row: u16, modes: Modes) -> Vec<u8> {
+    use MouseProtocolMode as Mode;
+    let motion = matches!(modes.mouse, Mode::ButtonMotion | Mode::AnyMotion);
+    // xterm's button codes: 0 to 2 for buttons, 3 for a release in the legacy
+    // encodings, 64 and up for the wheel, plus 32 for motion
+    let (button, release) = match event.kind {
+        MouseEventKind::Down(button) => (button_code(button), false),
+        MouseEventKind::Up(button) if modes.mouse != Mode::Press => (button_code(button), true),
+        MouseEventKind::Drag(button) if motion => (button_code(button) + 32, false),
+        MouseEventKind::Moved if modes.mouse == Mode::AnyMotion => (3 + 32, false),
+        MouseEventKind::ScrollUp => (64, false),
+        MouseEventKind::ScrollDown => (65, false),
+        MouseEventKind::ScrollLeft => (66, false),
+        MouseEventKind::ScrollRight => (67, false),
+        _ => return Vec::new(),
+    };
+    if modes.mouse == Mode::None {
+        return Vec::new();
+    }
+    let modifiers = event.modifiers;
+    let held = 4 * u32::from(modifiers.contains(KeyModifiers::SHIFT))
+        + 8 * u32::from(modifiers.contains(KeyModifiers::ALT))
+        + 16 * u32::from(modifiers.contains(KeyModifiers::CONTROL));
+    let (x, y) = (u32::from(column) + 1, u32::from(row) + 1);
+    if modes.mouse_encoding == MouseProtocolEncoding::Sgr {
+        let end = if release { 'm' } else { 'M' };
+        return format!("\x1b[<{};{x};{y}{end}", button + held).into_bytes();
+    }
+    // The legacy encodings cannot tell which button was released
+    let button = if release { 3 } else { button };
+    let mut bytes = b"\x1b[M".to_vec();
+    for value in [button + held, x, y] {
+        // Each value is a character, 32 past it: one byte, else UTF-8 in mode 1005
+        let Some(c) = char::from_u32(32 + value) else {
+            return Vec::new();
+        };
+        match modes.mouse_encoding {
+            MouseProtocolEncoding::Utf8 if c as u32 <= 0x7ff => {
+                bytes.extend(c.to_string().as_bytes());
+            }
+            MouseProtocolEncoding::Default if c as u32 <= 0xff => bytes.push(c as u8),
+            _ => return Vec::new(),
+        }
+    }
+    bytes
+}
+
+fn button_code(button: MouseButton) -> u32 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
     }
 }
 
@@ -185,5 +247,97 @@ mod tests {
             ..Modes::default()
         };
         assert_eq!(paste_bytes("x", bracketed), b"\x1b[200~x\x1b[201~");
+    }
+
+    fn mouse(kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
+        // Where the dashboard saw it; `mouse_bytes` is told where it is in the pane
+        MouseEvent {
+            kind,
+            column: 50,
+            row: 10,
+            modifiers,
+        }
+    }
+
+    fn reading(mode: MouseProtocolMode, encoding: MouseProtocolEncoding) -> Modes {
+        Modes {
+            mouse: mode,
+            mouse_encoding: encoding,
+            ..Modes::default()
+        }
+    }
+
+    const LEFT: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+    const NONE: KeyModifiers = KeyModifiers::NONE;
+
+    #[test]
+    fn the_mouse_goes_only_to_a_program_that_asked() {
+        use MouseProtocolEncoding::Sgr;
+        use MouseProtocolMode::*;
+        let left = mouse(LEFT, NONE);
+        let up = mouse(MouseEventKind::Up(MouseButton::Left), NONE);
+        let drag = mouse(MouseEventKind::Drag(MouseButton::Left), NONE);
+        let moved = mouse(MouseEventKind::Moved, NONE);
+        let wheel = mouse(MouseEventKind::ScrollDown, NONE);
+        let sent = |event, mode| !mouse_bytes(event, 0, 0, reading(mode, Sgr)).is_empty();
+        assert!(!sent(left, None), "not asked");
+        assert!(!sent(wheel, None));
+        assert!(sent(left, Press) && sent(wheel, Press));
+        assert!(!sent(up, Press), "presses only");
+        assert!(sent(up, PressRelease) && !sent(drag, PressRelease));
+        assert!(sent(drag, ButtonMotion) && !sent(moved, ButtonMotion));
+        assert!(sent(moved, AnyMotion));
+    }
+
+    #[test]
+    fn sgr_says_which_button_where_and_what_was_held() {
+        let modes = reading(MouseProtocolMode::AnyMotion, MouseProtocolEncoding::Sgr);
+        let bytes = |kind, modifiers, column, row| {
+            String::from_utf8(mouse_bytes(mouse(kind, modifiers), column, row, modes)).unwrap()
+        };
+        assert_eq!(bytes(LEFT, NONE, 0, 0), "\x1b[<0;1;1M");
+        let right_up = MouseEventKind::Up(MouseButton::Right);
+        assert_eq!(bytes(right_up, NONE, 4, 2), "\x1b[<2;5;3m");
+        let drag = MouseEventKind::Drag(MouseButton::Middle);
+        assert_eq!(
+            bytes(drag, KeyModifiers::CONTROL, 299, 99),
+            "\x1b[<49;300;100M"
+        );
+        assert_eq!(bytes(MouseEventKind::Moved, NONE, 1, 1), "\x1b[<35;2;2M");
+        assert_eq!(
+            bytes(MouseEventKind::ScrollUp, KeyModifiers::SHIFT, 0, 0),
+            "\x1b[<68;1;1M"
+        );
+        let alt = bytes(MouseEventKind::ScrollDown, KeyModifiers::ALT, 0, 0);
+        assert_eq!(alt, "\x1b[<73;1;1M");
+    }
+
+    #[test]
+    fn the_legacy_encodings_stop_where_they_cannot_say_where() {
+        let legacy = reading(
+            MouseProtocolMode::PressRelease,
+            MouseProtocolEncoding::Default,
+        );
+        let up = MouseEventKind::Up(MouseButton::Right);
+        assert_eq!(mouse_bytes(mouse(LEFT, NONE), 0, 0, legacy), b"\x1b[M !!");
+        assert_eq!(mouse_bytes(mouse(up, NONE), 9, 4, legacy), b"\x1b[M#*%");
+        assert_eq!(
+            mouse_bytes(mouse(LEFT, NONE), 222, 0, legacy),
+            b"\x1b[M \xff!"
+        );
+        assert_eq!(
+            mouse_bytes(mouse(LEFT, NONE), 223, 0, legacy),
+            b"",
+            "past 255"
+        );
+
+        let utf8 = reading(MouseProtocolMode::PressRelease, MouseProtocolEncoding::Utf8);
+        let far = mouse_bytes(mouse(LEFT, NONE), 223, 0, utf8);
+        assert_eq!(far, "\x1b[M \u{100}!".as_bytes());
+        assert_eq!(
+            mouse_bytes(mouse(LEFT, NONE), 2015, 0, utf8),
+            b"",
+            "past 2047"
+        );
     }
 }

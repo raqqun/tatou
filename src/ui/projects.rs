@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
@@ -30,6 +30,8 @@ pub struct Tree {
     index: usize,
     /// Keeps the scroll position from one frame to the next.
     list: ListState,
+    /// Where the rows were last drawn, to find the one clicked.
+    inner: Rect,
 }
 
 impl Tree {
@@ -92,6 +94,18 @@ impl Tree {
         }
     }
 
+    /// Selects the row drawn at (`x`, `y`); whether that was on a project's fold
+    /// arrow, or `None` when no row is there.
+    pub fn click(&mut self, x: u16, y: u16) -> Option<bool> {
+        if !self.inner.contains(Position::new(x, y)) {
+            return None;
+        }
+        let index = super::row_at(&self.heights(), self.list.offset(), self.inner, y)?;
+        self.select(index);
+        let project = matches!(self.selected, Some(Row::Project(_)));
+        Some(project && x < self.inner.x + 2)
+    }
+
     pub fn up(&mut self) {
         self.select(self.index.saturating_sub(1));
     }
@@ -146,6 +160,22 @@ impl Tree {
         }
     }
 
+    /// How many lines each row takes, as `render` draws them: a project's error too.
+    fn heights(&self) -> Vec<u16> {
+        let mut heights = Vec::new();
+        for project in &self.view {
+            let error = project
+                .error
+                .as_ref()
+                .map_or(0, |error| error.lines().count());
+            heights.push(1 + error as u16);
+            if !self.collapsed.contains(&project.path) {
+                heights.extend(project.worktrees.iter().map(|_| 1));
+            }
+        }
+        heights
+    }
+
     fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
         for project in &self.view {
@@ -170,6 +200,7 @@ impl Tree {
                 items.extend(worktrees.map(|worktree| worktree_item(worktree, theme)));
             }
         }
+        self.inner = block.inner(area);
         let list = List::new(items)
             .block(block)
             .highlight_style(theme.selected());

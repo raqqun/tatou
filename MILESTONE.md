@@ -646,13 +646,18 @@ Depends on: 2.3, 6.1, 1.17, 1.18
 
 ### 6.6 Mouse support (#37)
 
-Depends on: 2.15
+Depends on: 2.15, 2.19
 
-- Click selects a row in Projects or Sessions and moves the focus there; wheel scrolls the pane under the cursor; clicks on dialogs go to the dialog.
+- Decided: the mouse is captured always, from start to exit, so that a click moves the focus whatever has it, the shown terminal included; text is selected holding the terminal's bypass key (Shift, Option in iTerm2). No setting; the guard restores the terminal on every exit path. (Capturing only when needed, leaving plain drags to the terminal, was tried first in #114, and given up for this.)
+- A click anywhere in a pane, borders included, moves the focus there. Projects and Sessions: on a row it selects it, on a `▸`/`▾` folds it; a double click (one cell, within 400 ms) acts as Enter; the wheel moves the selection of the pane under it, not the focus. Rows are found through the list's scroll offset and each row's height.
+- The shown terminal: the mouse goes to its program by the mode it asked for, encoded as an xterm does (`term::mouse_bytes`: SGR, UTF-8, legacy); a program that did not ask gets the wheel as ↑/↓ on the alternate screen, nothing on the main one.
+- Dialogs: a click selects a choice (a double one chooses it) or focuses a form's field; the wheel moves a choice or scrolls a message; confirmations and clicks outside take none.
 - Moved from M4 (4.7) when the Files pane was dropped (2.18).
 
 **Done when**
-- Unit tests mapping mouse events to actions by layout area.
+- Unit tests: `mouse_bytes` (encodings, modes, modifiers, the legacy limit); clicks mapped to rows, with a project's error and a scrolled list.
+- `TestBackend` tests: click on a row, below the rows and on a border, double click, folding, the wheel, the terminal's focus (and back from it), forwarding and the alternate screen's wheel, dialog clicks.
+- Manual check documented in the PR, in a real terminal.
 
 ### 6.7 Themes: `theme = …` and theme files (#110)
 
