@@ -699,6 +699,19 @@ Depends on: 6.6
 - `TestBackend` tests: a drag highlights and copies on release, dragged off the pane; double and triple click; a program reading the mouse; output while dragging and after; no tool.
 - Manual check documented in the PR: a drag in a shell puts its text in the clipboard.
 
+### 6.10 Scrollback in the shown terminal (#117)
+
+Depends on: 6.9
+
+- Decided: the shown terminal's history is browsable (DESIGN §12's open question). The daemon's screen reply carries it on attach, for the main screen: each line that scrolled off, with its colours (`rows_formatted`, a screen at a time through `set_scrollback`), then line ends to scroll them into the dashboard's history, then `state_formatted`; no new frame. Both keep 10 000 lines (`daemon::SCROLLBACK`). Wrapped lines come back as separate lines.
+- The wheel, on the main screen, when the program does not read the mouse: 3 lines. Shift-PgUp/PgDn: a page (the pane's height less one), from anywhere but a dialog, whatever the program; the program's on the alternate screen.
+- Any key, paste or mouse report for the program goes back to the bottom first; output keeps the view (vt100 anchors it). The title reads `· ↑ 120 of 4210`, the cursor is hidden, the hint bar says `any key: back to the bottom`. A selection works on the view and goes when it moves.
+
+**Done when**
+- Daemon end to end: 100 coloured lines in a 10-row terminal arrive whole on attach; none on the alternate screen.
+- `TestBackend` tests: wheel, Shift-PgUp/PgDn from the projects and never sent, the title and its start, a key back to the bottom and sent, output keeping the view, the alternate screen, a program reading the mouse, a selection in the scrolled view.
+- Manual check documented in the PR: `seq 1 500` in a shell, browsed back to `1`, kept after switching away and back.
+
 ---
 
 ## M7 — Ship

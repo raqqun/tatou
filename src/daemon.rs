@@ -24,8 +24,9 @@ use crate::config;
 use crate::error::Result;
 use crate::protocol::{Reply, Request, Session, Window};
 
-/// Lines of scrollback kept per terminal.
-const SCROLLBACK: usize = 10_000;
+/// Lines of scrollback kept per terminal, by the daemon and by the dashboard for
+/// the one it shows, which gets them all on attach.
+pub const SCROLLBACK: usize = 10_000;
 
 /// How long a daemon with nothing to do waits before ending, in case a dashboard
 /// connects meanwhile: one just starting, between its first requests.
@@ -490,7 +491,8 @@ impl Daemon {
             return Reply::Error(format!("no terminal %{id}"));
         };
         resize(terminal, rows, cols);
-        let screen = terminal.screen.screen().state_formatted();
+        let mut screen = history(terminal.screen.screen_mut());
+        screen.extend(terminal.screen.screen().state_formatted());
         terminal.watchers.push((client, replies.clone()));
         let session = terminal.session;
         if let Some(session) = state.sessions.iter_mut().find(|s| s.id == session) {
@@ -577,6 +579,39 @@ fn program_name(command: Option<&str>) -> String {
 fn unix_now() -> u64 {
     let since_epoch = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH);
     since_epoch.map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// The lines that scrolled off the top of `screen`, oldest first, each with its
+/// colours and a line end, then as many line ends as it is tall less one: fed to a
+/// new screen of its size before `state_formatted`, they all become its scrollback.
+/// None on the alternate screen, which keeps no history. Lines that wrapped come
+/// back as separate lines.
+fn history(screen: &mut vt100::Screen) -> Vec<u8> {
+    if screen.alternate_screen() {
+        return Vec::new();
+    }
+    let (rows, cols) = screen.size();
+    // Viewing the history a screen at a time, from its start; offsets are clamped
+    screen.set_scrollback(usize::MAX);
+    let mut left = screen.scrollback();
+    let mut bytes = Vec::new();
+    while left > 0 {
+        screen.set_scrollback(left);
+        let take = left.min(usize::from(rows));
+        // Each row moves the cursor right only: a stream of them draws line after line
+        for row in screen.rows_formatted(0, cols).take(take) {
+            bytes.extend(row);
+            bytes.extend(b"\x1b[m\r\n");
+        }
+        left -= take;
+    }
+    screen.set_scrollback(0);
+    if !bytes.is_empty() {
+        for _ in 1..rows {
+            bytes.extend(b"\r\n");
+        }
+    }
+    bytes
 }
 
 #[cfg(test)]

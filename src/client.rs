@@ -231,6 +231,8 @@ pub mod testing {
 mod tests {
     use std::time::Instant;
 
+    use tui_term::vt100;
+
     use super::testing::{daemon, sessions_become};
     use super::*;
 
@@ -291,6 +293,83 @@ mod tests {
         let (_, exited) = printed(&received, |_| false);
         assert!(exited);
         sessions_become(&client, 0);
+    }
+
+    /// The first screen a new attach to `terminal` gets, drawn on a screen of the
+    /// attach's size, as the dashboard draws it.
+    fn screen_on_attach(client: &Client, terminal: &str) -> vt100::Parser {
+        let (stream, received) = client.stream().unwrap();
+        stream.send(Request::Attach {
+            terminal: terminal.to_string(),
+            rows: 10,
+            cols: 40,
+        });
+        let mut parser = vt100::Parser::new(10, 40, daemon::SCROLLBACK);
+        loop {
+            match received.recv_timeout(Duration::from_secs(5)) {
+                Ok(Reply::Screen(bytes)) => {
+                    parser.process(&bytes);
+                    return parser;
+                }
+                Ok(_) => {}
+                Err(err) => panic!("no screen: {err}"),
+            }
+        }
+    }
+
+    /// Starts `script` in a 10×40 terminal once attached, so that it prints at that
+    /// size, and waits for it to print `last`.
+    fn printing(client: &Client, dir: &Path, script: &str, last: &str) -> (Stream, String) {
+        let script = format!("read go; {script}; sleep 100");
+        let terminal = client
+            .spawn(None, "app-fix", dir, Some(&script), false)
+            .unwrap();
+        let (stream, received) = client.stream().unwrap();
+        stream.send(Request::Attach {
+            terminal: terminal.clone(),
+            rows: 10,
+            cols: 40,
+        });
+        stream.send(Request::Input(b"\r".to_vec()));
+        let (text, _) = printed(&received, |text| text.contains(last));
+        assert!(text.contains(last), "{text:?}");
+        (stream, terminal)
+    }
+
+    #[test]
+    fn a_terminal_shown_again_comes_with_its_history() {
+        let (dir, client) = daemon();
+        let lines = "i=1; while [ $i -le 100 ]; do printf '\\033[31mline %d\\033[m\\n' $i; \
+                     i=$((i + 1)); done; echo done";
+        let (_stream, terminal) = printing(&client, dir.path(), lines, "done");
+        let mut parser = screen_on_attach(&client, &terminal);
+        let screen = parser.screen_mut();
+        assert_eq!(
+            screen.contents_between(8, 0, 8, 40),
+            "done",
+            "the screen as it is"
+        );
+        // The Enter that started it echoed, 100 lines, "done" and the cursor's
+        // line: 93 above the 10 shown
+        screen.set_scrollback(usize::MAX);
+        assert_eq!(screen.scrollback(), 93);
+        assert_eq!(screen.contents_between(0, 0, 2, 40), "\nline 1\nline 2");
+        let red = screen.cell(1, 0).unwrap().fgcolor();
+        assert_eq!(red, vt100::Color::Idx(1), "with its colours");
+        let plain = screen.cell(1, 6).map(|cell| cell.fgcolor());
+        assert_eq!(plain, Some(vt100::Color::Default), "and none past them");
+    }
+
+    #[test]
+    fn the_alternate_screen_comes_without_history() {
+        let (dir, client) = daemon();
+        let lines = "i=1; while [ $i -le 30 ]; do echo line $i; i=$((i + 1)); done; \
+                     printf '\\033[?1049hfull screen\\n'";
+        let (_stream, terminal) = printing(&client, dir.path(), lines, "full screen");
+        let mut parser = screen_on_attach(&client, &terminal);
+        assert_eq!(parser.screen().contents_between(0, 0, 0, 40), "full screen");
+        parser.screen_mut().set_scrollback(usize::MAX);
+        assert_eq!(parser.screen().scrollback(), 0);
     }
 
     #[test]
