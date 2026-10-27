@@ -612,8 +612,9 @@ Depends on: 1.4
 
 Depends on: 5.1, 1.13
 
-- Every ~60 s and on demand (a refresh key). Missing `gh`, not authenticated, or no GitHub remote: no badges, one log line, no error spam in the UI.
-- `gh` talks to the network: decide whether `exec::run` needs a timeout now (it has none since 1.4).
+- Every ~60 s, a `gh` worker per project beside its git worker. Missing `gh`, not authenticated, or no GitHub remote: no badges for that project, one log line when the error appears or changes, nothing in the UI.
+- Decided: no timeout for `gh`: a hung one only delays its project's badges, on its own thread. No on-demand refresh key.
+- The model keeps each project's last listing and gives each worktree its branch's PR (`WorktreeView::pr`), for 5.3 to draw.
 
 **Done when**
 - Unit test: an error from `gh` maps to "no badges" for that project only.

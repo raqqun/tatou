@@ -1,9 +1,9 @@
-//! Background refresh: worker threads list the daemon's sessions and each project's
-//! worktrees, watch `config.toml`, and send the results to the UI loop over one
-//! channel.
+//! Background refresh: worker threads list the daemon's sessions, each project's
+//! worktrees and pull requests, watch `config.toml`, and send the results to the UI
+//! loop over one channel.
 //!
-//! One thread for the daemon, one per project, so a slow or broken repository only
-//! delays itself, and one for the config. Each refreshes on its interval, or at
+//! One thread for the daemon, two per project (git and `gh`), so a slow or broken
+//! repository, or a slow network, only delays itself, and one for the config. Each refreshes on its interval, or at
 //! once when woken (after tatou itself changed something). A worker ends quietly
 //! when the UI drops the receiving end, or drops `Refresh`.
 
@@ -15,12 +15,15 @@ use std::time::Duration;
 
 use crate::client::Client;
 use crate::config::{self, Config, Stamp};
+use crate::gh::{self, Pr};
 use crate::git::{self, Worktree};
 use crate::protocol::Session;
 
 const SESSIONS_EVERY: Duration = Duration::from_secs(1);
 const WORKTREES_EVERY: Duration = Duration::from_secs(5);
 const CONFIG_EVERY: Duration = Duration::from_secs(2);
+/// `gh` goes over the network, and CI moves in minutes.
+const PRS_EVERY: Duration = Duration::from_secs(60);
 
 /// A result from one source; it says what it is about, so sources never wait on
 /// each other. Errors are messages for the UI.
@@ -33,6 +36,12 @@ pub enum Update {
         /// The remote's default branch, `origin/main`, when it has one.
         remote_default: Option<String>,
     },
+    /// A project's pull requests by branch; empty when `gh` cannot list them
+    /// (not installed, not logged in, no GitHub remote), which is only logged.
+    Prs {
+        project: PathBuf,
+        prs: HashMap<String, Pr>,
+    },
     /// `config.toml` changed and was loaded again.
     Config(Result<Config, String>),
 }
@@ -42,7 +51,7 @@ pub struct Refresh {
     /// For the workers of projects added later.
     updates: Sender<Update>,
     sessions: Sender<()>,
-    projects: HashMap<PathBuf, Sender<()>>,
+    projects: HashMap<PathBuf, Workers>,
     /// Never woken; dropping it stops the config's worker.
     _config: Sender<()>,
 }
@@ -88,12 +97,15 @@ impl Refresh {
 
     /// Lists `projects` from now on: starts the new ones and stops the ones gone.
     pub fn set_projects(&mut self, projects: &[PathBuf]) {
-        // Dropping a project's wake-up sender ends its worker
+        // Dropping a project's wake-up senders ends its workers
         self.projects.retain(|path, _| projects.contains(path));
         for project in projects {
             if !self.projects.contains_key(project) {
-                let wake = spawn_project(project.clone(), &self.updates);
-                self.projects.insert(project.clone(), wake);
+                let workers = Workers {
+                    worktrees: spawn_project(project.clone(), &self.updates),
+                    _prs: spawn_prs(project.clone(), &self.updates),
+                };
+                self.projects.insert(project.clone(), workers);
             }
         }
     }
@@ -106,10 +118,17 @@ impl Refresh {
 
     /// Lists `project`'s worktrees again now, e.g. after tatou added one.
     pub fn worktrees_now(&self, project: &Path) {
-        if let Some(wake) = self.projects.get(project) {
-            let _ = wake.send(());
+        if let Some(workers) = self.projects.get(project) {
+            let _ = workers.worktrees.send(());
         }
     }
+}
+
+/// A project's workers, ended by dropping their senders.
+struct Workers {
+    worktrees: Sender<()>,
+    /// Never woken: pull requests change on GitHub, not through tatou.
+    _prs: Sender<()>,
 }
 
 /// Notices that `config.toml` or a project file changed, by their modification
@@ -154,6 +173,25 @@ fn spawn_project(project: PathBuf, updates: &Sender<Update>) -> Sender<()> {
             remote_default,
         })
     })
+}
+
+/// Starts the worker listing `project`'s pull requests; returns its sender.
+fn spawn_prs(project: PathBuf, updates: &Sender<Update>) -> Sender<()> {
+    let what = format!("{} pull requests", project.display());
+    let mut last_error = None;
+    spawn("refresh-gh", PRS_EVERY, updates.clone(), move || {
+        let result = gh::prs(&project).map_err(|err| err.to_string());
+        log_change(&mut last_error, &result, &what);
+        Some(prs_update(project.clone(), result))
+    })
+}
+
+/// No badges for a project whose pull requests `gh` cannot list; why is logged.
+fn prs_update(project: PathBuf, result: Result<HashMap<String, Pr>, String>) -> Update {
+    Update::Prs {
+        project,
+        prs: result.unwrap_or_default(),
+    }
 }
 
 /// Starts a thread running `poll`, and returns the sender that wakes it.
@@ -355,10 +393,22 @@ mod tests {
                     assert!(err.contains("cannot change to"), "{err}");
                     seen.insert("missing".to_string(), true);
                 }
+                // Neither has a GitHub remote: gh fails before any network
+                Update::Prs { prs, .. } => assert_eq!(prs, HashMap::new()),
                 Update::Config(result) => panic!("no config, no change: {result:?}"),
             }
         }
         drop(refresh);
+    }
+
+    #[test]
+    fn a_gh_error_is_no_pull_requests_for_that_project() {
+        let update = prs_update("/code/app".into(), Err("gh: not logged in".into()));
+        let Update::Prs { project, prs } = update else {
+            panic!("{update:?}");
+        };
+        assert_eq!(project, Path::new("/code/app"));
+        assert!(prs.is_empty());
     }
 
     #[test]

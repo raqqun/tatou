@@ -269,6 +269,7 @@ pub mod tests {
             main: false,
             session: None,
             status,
+            pr: None,
         }
     }
 

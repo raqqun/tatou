@@ -132,7 +132,7 @@ gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,isCro
                                                 checks: ✗ any failed, else ● any running, else ✓
 the daemon's stream for the shown terminal: its screen, then its output
 ```
-Refresh: the daemon's sessions every ~1 s; each project's worktrees every 5 s, on a thread of its own so a slow repository delays only itself; `gh` every ~60 s and on demand. tatou's own actions wake the matching refresh at once. Commands and requests run on background threads and send results to the UI loop over a channel; the shown terminal's output arrives over its connection as it comes, and the dashboard draws it within ~15 ms.
+Refresh: the daemon's sessions every ~1 s; each project's worktrees every 5 s, on a thread of its own so a slow repository delays only itself; `gh` every ~60 s per project, on a thread of its own, with no timeout and no key to refresh it: a `gh` that hangs delays only that project's badges, and one that fails (not installed, not logged in, no GitHub remote) leaves that project without badges, logged once, never shown in the UI (5.2). tatou's own actions wake the matching refresh at once. Commands and requests run on background threads and send results to the UI loop over a channel; the shown terminal's output arrives over its connection as it comes, and the dashboard draws it within ~15 ms.
 
 ### 8.2 Worktrees
 - Create: `git -C <repo> worktree add -b <branch> -- <path> <base>`. Path defaults to `<repo>/../<repo>.worktrees/<name>` (configurable with `worktree_dir`); a `/` in the branch name becomes `-` in the folder's, so `feature/login` goes in `feature-login`.
