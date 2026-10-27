@@ -170,7 +170,7 @@ With hooks (milestone 3, planned with agent support): agents report their own st
 ```
 Other agents run the same one-liner from their own notify/hook mechanism. How these get into each agent's configuration is part of milestone 3: each agent's module knows its own (§1 and §3 rule out editing them silently).
 
-On a transition to `input` for a terminal that isn't shown: a desktop notification (see §10; skipped silently if unavailable).
+On a transition to `input` for a terminal that isn't shown: a desktop notification (`notify-send` on Linux, `osascript` on macOS; skipped silently if unavailable).
 
 ## 9. Configuration
 
@@ -223,31 +223,13 @@ base = "main"
 - `path` and `worktree_dir` accept `~/`; any other path must be absolute. A project whose file does not parse, or whose `path` is missing, invalid or another file's, is shown with its error, and the other projects still load.
 - `base` is optional. The new-worktree form's Base follows the selected row: on a worktree, that worktree's branch; on the project (or a detached worktree), `base`, else the remote's default branch as `origin/main` (what `origin/HEAD` points to; tatou never fetches), else the branch checked out in the main worktree.
 
-## 10. Implementation notes
+## 10. Implementation
 
-- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `portable-pty`, `tui-term` (and its `vt100`, used through its re-export), `serde`, `toml`, `serde_json` (`gh`'s output, 5.1), `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`, default `info`; `--help` and `--version` do not log). The daemon logs to the same file.
-- Paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), honouring `$XDG_*` variables when set. No `~/Library/...` on macOS: CLI users expect `~/.config`.
-- All platform differences live in one `platform` module behind two functions, `copy(text)` and `notify(title, body)`, using `cfg(target_os)`. Nothing else in the codebase is platform-specific; `portable-pty` hides the pseudo-terminals'.
-- Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
-- Plain `std::thread` + `mpsc` channels for background work: per connection and per terminal in the daemon, per request and for the shown terminal's stream in the dashboard; no async runtime.
-- External commands go through `exec.rs`; the programs in terminals are the exception, started by the daemon through `portable-pty`.
-- Commands' stdout and stderr are read as UTF-8, lossily: file names that are not valid UTF-8 are not supported. Commands have no timeout; they run on background threads with stdin closed and git/gh prompts disabled, so a stuck command only stalls its own refresh.
-- Modules: `error`, `logging`, `config`, `theme`, `exec`, `launcher`, `daemon`, `reflow`, `protocol`, `client`, `term`, `platform`, `git`, `gh`, `model`, `refresh`, `actions`, `keys`, `ui`.
-- Parsers for git and gh output are pure and tested against captured fixtures; the protocol is tested by round trips, the daemon end to end on a temporary socket.
-- Runtime requirements: `git`. Optional: `gh`, `notify-send` (Linux; macOS uses the built-in `osascript`), `wl-copy`, `xclip` or `xsel` (Linux; macOS uses the built-in `pbcopy`).
-- Versioning: every build is an alpha until a stable v1. The `VERSION` file holds the version as its git tag (`v0.1.0-alpha.N`), mirrored in `Cargo.toml`; each task's pull request bumps `N`. Merging into `main` makes CI tag that version and publish it as a GitHub pre-release with GoReleaser (Rust builder). Tags are never created by hand.
+How tatou is built, the stack, the modules, the rules for the code, testing and versioning, is in `CLAUDE.md`.
 
 ## 11. Milestones
 
-1. **Navigate:** config, launcher, list projects/worktrees from git, sessions and status, show a worktree's terminal with Enter. (Built on tmux, which 2.19 replaced.)
-2. **Manage:** new/remove worktree, open shell, edit; native terminals in a daemon (2.19); agents dropped, tatou starts terminals only (2.20).
-3. **Agents:** one module per agent (Claude Code, Codex, …): finding the agents installed on the machine, setting each up for tatou (automatically or by asking the user), starting them, their hooks reporting status to the daemon, notifications when one needs input.
-4. ~~**Files**~~: dropped (2.18, #103). Editing is `e`'s, with `$EDITOR`; mouse support moved to milestone 6.
-5. **PRs:** badges and open PR.
-6. **Keys:** configurable keymap, custom shell-command actions, `?` help overlay, mouse support.
-7. **Ship:** `cargo install`; Linux: AUR, `.deb`/`.rpm`; macOS: Homebrew tap, Apple silicon only (`darwin-arm64`; Intel Macs are not supported). All packaging goes through GoReleaser. From milestone 1, CI tests on Linux and macOS and every merged task is released as an alpha (static `linux-amd64` and `linux-arm64` binaries, a `darwin-arm64` binary).
-
-Milestone 2 is already a useful tool. `MILESTONE.md` breaks these milestones into steps, one GitHub issue each.
+The order of work, a line per finished step and the spec of each open one, is in `MILESTONE.md`.
 
 ## 12. Open questions
 
