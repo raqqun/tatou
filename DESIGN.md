@@ -127,8 +127,9 @@ All keys are configurable (§9). Custom actions run a shell command in a new ter
 projects/*.toml ─► projects
 git worktree list --porcelain (per project) ─► worktrees
 the daemon's list (sessions, their terminals, activity) ─► session and status per worktree (matched by path)
-gh pr list --state all --json number,headRefName,state,isDraft,statusCheckRollup,url (per project)
-                                             ─► PR badge per branch
+gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup,url
+  (per project)                              ─► PR badge per branch: the open PR, else the newest; none from forks
+                                                checks: ✗ any failed, else ● any running, else ✓
 the daemon's stream for the shown terminal: its screen, then its output
 ```
 Refresh: the daemon's sessions every ~1 s; each project's worktrees every 5 s, on a thread of its own so a slow repository delays only itself; `gh` every ~60 s and on demand. tatou's own actions wake the matching refresh at once. Commands and requests run on background threads and send results to the UI loop over a channel; the shown terminal's output arrives over its connection as it comes, and the dashboard draws it within ~15 ms.
@@ -221,7 +222,7 @@ base = "main"
 
 ## 10. Implementation notes
 
-- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `portable-pty`, `tui-term` (and its `vt100`, used through its re-export), `serde`, `toml`, `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`, default `info`; `--help` and `--version` do not log). The daemon logs to the same file.
+- Single Rust crate. Dependencies: `ratatui`, `crossterm`, `portable-pty`, `tui-term` (and its `vt100`, used through its re-export), `serde`, `toml`, `serde_json` (`gh`'s output, 5.1), `thiserror`, `tracing` + `tracing-subscriber` (logging to `$XDG_STATE_HOME/tatou/tatou.log`, never to the terminal; rotated to `tatou.log.old` at startup once past 1 MiB; level from `$TATOU_LOG`, default `info`; `--help` and `--version` do not log). The daemon logs to the same file.
 - Paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), honouring `$XDG_*` variables when set. No `~/Library/...` on macOS: CLI users expect `~/.config`.
 - All platform differences live in one `platform` module behind two functions, `copy(text)` and `notify(title, body)`, using `cfg(target_os)`. Nothing else in the codebase is platform-specific; `portable-pty` hides the pseudo-terminals'.
 - Shell snippets and command templates must be POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).

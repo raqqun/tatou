@@ -15,7 +15,7 @@ Read `DESIGN.md` before starting any feature. Its philosophy section is the deci
 - Rust (stable), single crate
 - `ratatui` + `crossterm` for the UI
 - `portable-pty` for pseudo-terminals, `tui-term` (and its `vt100`) to keep and draw their screens
-- `serde` + `toml` for config; paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), macOS included, honouring `$XDG_*` when set
+- `serde` + `toml` for config, `serde_json` for `gh`'s output; paths follow XDG on every platform (`~/.config/tatou`, `~/.local/state/tatou`), macOS included, honouring `$XDG_*` when set
 - `thiserror` for errors, `tracing` + `tracing-subscriber` (`fmt` only) for logs (to `$XDG_STATE_HOME/tatou/tatou.log`, rotated at startup past 1 MiB, never to the terminal)
 - `std::thread` + `mpsc` for background work; no async runtime
 - External tools, called as commands: `git` (required), `gh` (optional); notifications via `notify-send` (Linux) or `osascript` (macOS); the clipboard via `pbcopy` (macOS) or `wl-copy`, `xclip`, `xsel` (Linux, optional; else OSC 52)

@@ -1,0 +1,62 @@
+[
+  {
+    "headRefName": "wip",
+    "isCrossRepository": false,
+    "isDraft": true,
+    "number": 53,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-10-27T20:41:28Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/acme/app/actions/runs/40579904304/job/122456179482",
+        "name": "Test (ubuntu-latest)",
+        "startedAt": "2026-10-27T20:38:55Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "url": "https://github.com/acme/app/pull/53"
+  },
+  {
+    "headRefName": "shipped",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "number": 52,
+    "state": "MERGED",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-10-27T20:41:28Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/acme/app/actions/runs/40579904304/job/122456179482",
+        "name": "Test (ubuntu-latest)",
+        "startedAt": "2026-10-27T20:38:55Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "url": "https://github.com/acme/app/pull/52"
+  },
+  {
+    "headRefName": "abandoned",
+    "isCrossRepository": false,
+    "isDraft": false,
+    "number": 51,
+    "state": "CLOSED",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-10-27T20:41:28Z",
+        "conclusion": "FAILURE",
+        "detailsUrl": "https://github.com/acme/app/actions/runs/40579904304/job/122456179482",
+        "name": "Test (ubuntu-latest)",
+        "startedAt": "2026-10-27T20:38:55Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "url": "https://github.com/acme/app/pull/51"
+  }
+]

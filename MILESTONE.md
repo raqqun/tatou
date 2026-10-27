@@ -601,9 +601,9 @@ PR/CI badge per worktree and open PR.
 
 Depends on: 1.4
 
-- `gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,statusCheckRollup,url`, run in the project directory.
-- Pure parser; badge per branch: number, state (open / draft / merged / closed) and checks summary `✓` all passed, `✗` any failed, `●` pending, from both `CheckRun` and `StatusContext` entries. Open PRs win over closed ones for the same branch.
-- Uses `serde_json` (comes with gh's JSON; confirm adding it, or justify).
+- `gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup,url`, run in the project directory.
+- Pure parser; badge per branch: number, state (open / draft / merged / closed) and checks summary `✓` all passed, `✗` any failed, `●` pending, from both `CheckRun` and `StatusContext` entries. Open PRs win over closed ones for the same branch, then the newest.
+- Decided: `serde_json` reads gh's JSON (rather than `--jq` to tab-separated lines), so the fixtures are gh's own output. Checks as GitHub shows them: `✗` for `FAILURE`, `ERROR`, `TIMED_OUT`, `CANCELLED`, `ACTION_REQUIRED`, `STARTUP_FAILURE`; `●` for a check run not completed, or a status `PENDING`/`EXPECTED`; `✓` for `SUCCESS`, `NEUTRAL`, `SKIPPED`; any `✗` wins, then any `●`; no checks, no mark. PRs from forks (`isCrossRepository`) are left out, so a fork's `main` never badges the project's.
 
 **Done when**
 - Fixture tests in `tests/fixtures/gh/`: no PRs, open with passing / failing / pending checks, draft, merged, two PRs on one branch.
