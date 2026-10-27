@@ -601,7 +601,7 @@ PR/CI badge per worktree and open PR.
 
 Depends on: 1.4
 
-- `gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup,url`, run in the project directory.
+- `gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup`, run in the project directory.
 - Pure parser; badge per branch: number, state (open / draft / merged / closed) and checks summary `✓` all passed, `✗` any failed, `●` pending, from both `CheckRun` and `StatusContext` entries. Open PRs win over closed ones for the same branch, then the newest.
 - Decided: `serde_json` reads gh's JSON (rather than `--jq` to tab-separated lines), so the fixtures are gh's own output. Checks as GitHub shows them: `✗` for `FAILURE`, `ERROR`, `TIMED_OUT`, `CANCELLED`, `ACTION_REQUIRED`, `STARTUP_FAILURE`; `●` for a check run not completed, or a status `PENDING`/`EXPECTED`; `✓` for `SUCCESS`, `NEUTRAL`, `SKIPPED`; any `✗` wins, then any `●`; no checks, no mark. PRs from forks (`isCrossRepository`) are left out, so a fork's `main` never badges the project's.
 
@@ -625,6 +625,7 @@ Depends on: 5.2, 1.15
 
 - Badge after the worktree name: `#42 ✓`; muted for draft/merged/closed.
 - `p`: `gh pr view --web <number>` in the project directory; message when the branch has no PR.
+- Decided: the badge goes against the pane's right edge, aligned, a label too long for both cut with `…`. The checks take three new theme keys, `passed`, `pending` and `failed` (green, yellow, red in `terminal`; Monokai Pro's in `monokai-pro`). Once not open, the badge is dim and says its state instead of its checks: `#40 merged`, `#41 closed`; a draft keeps its checks, `#45 draft ✓`. `p` is hidden from the hints on a worktree without a PR. `Pr` loses `url`, which nothing reads: `gh` finds the PR by number.
 
 **Done when**
 - `TestBackend` test for each badge kind.

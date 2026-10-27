@@ -39,8 +39,6 @@ pub struct WorktreeView {
     pub session: Option<SessionView>,
     pub status: Status,
     /// Its branch's pull request, as `gh` last listed them.
-    // Not read yet: the badges and `p` use it (#40)
-    #[allow(dead_code)]
     pub pr: Option<Pr>,
 }
 
@@ -494,7 +492,6 @@ mod tests {
             number,
             state: gh::State::Open,
             checks: Some(gh::Checks::Passed),
-            url: format!("https://github.com/acme/app/pull/{number}"),
         }
     }
 

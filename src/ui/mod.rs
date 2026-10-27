@@ -673,6 +673,9 @@ impl App {
                 self.message = Some(format!("The theme is not saved: {err}"));
             }
             Event::Copied(chars) => self.message = Some(format!("Copied {chars} characters")),
+            Event::OpenedPr(number) => {
+                self.message = Some(format!("#{number} opened in the browser"))
+            }
             Event::NoClipboardTool(text) => {
                 let chars = text.chars().count();
                 self.message = Some(format!(
@@ -768,6 +771,7 @@ impl App {
             Action::NewWorktree if worktrees => self.open_new_worktree(),
             Action::Shell if worktrees => self.open(None, false),
             Action::Edit if worktrees => self.open(Some(EDITOR), true),
+            Action::OpenPr if worktrees => self.open_pr(),
             Action::RemoveWorktree if worktrees => self.confirm_remove(),
             Action::RemoveWorktree if sessions => self.confirm_end(),
             // Between Projects and Sessions only: Enter goes into the terminal, and
@@ -974,6 +978,22 @@ impl App {
         }));
     }
 
+    /// `p` on a worktree: its branch's pull request in the browser, through `gh`.
+    fn open_pr(&mut self) {
+        let (Some(project), Some(worktree)) =
+            (self.tree.selected_project(), self.tree.selected_worktree())
+        else {
+            return;
+        };
+        match &worktree.pr {
+            Some(pr) => self.tasks.push(Task::OpenPr {
+                project: project.path.clone(),
+                number: pr.number,
+            }),
+            None => self.message = Some(format!("No pull request for {}", worktree.label())),
+        }
+    }
+
     /// The form for a new worktree in the selected row's project: name and base.
     /// On a worktree, the base is its branch; on the project, or a detached
     /// worktree, the project's `base`, else its remote's default branch
@@ -1077,22 +1097,27 @@ impl App {
     }
 
     /// The actions that do not apply to the selected row.
-    fn hidden(&self) -> &'static [Action] {
+    fn hidden(&self) -> Vec<Action> {
         if self.focus == Pane::Sessions && self.sessions.selected().is_none() {
-            return &[Action::Jump, Action::RemoveWorktree];
+            return vec![Action::Jump, Action::RemoveWorktree];
         }
         if self.focus != Pane::Worktrees {
-            return &[];
+            return Vec::new();
         }
-        match self.tree.selected_worktree() {
-            Some(worktree) => match (worktree.session.is_some(), worktree.main) {
-                (true, false) => &[],
-                (true, true) => &[Action::RemoveWorktree],
-                (false, false) => &[Action::Jump],
-                (false, true) => &[Action::Jump, Action::RemoveWorktree],
-            },
-            None => &WORKTREE_ACTIONS,
+        let Some(worktree) = self.tree.selected_worktree() else {
+            return WORKTREE_ACTIONS.to_vec();
+        };
+        let mut hidden = Vec::new();
+        if worktree.session.is_none() {
+            hidden.push(Action::Jump);
         }
+        if worktree.pr.is_none() {
+            hidden.push(Action::OpenPr);
+        }
+        if worktree.main {
+            hidden.push(Action::RemoveWorktree);
+        }
+        hidden
     }
 
     /// Shows `terminal` on the right and gives it the focus: the daemon sends its
@@ -1398,7 +1423,7 @@ impl App {
                 .iter()
                 .map(|&(k, l)| (k.to_string(), l))
                 .collect(),
-            None => self.keymap.hints(self.focus, self.hidden()),
+            None => self.keymap.hints(self.focus, &self.hidden()),
         };
         let mut spans = Vec::new();
         for (key, label) in hints {
@@ -1480,6 +1505,7 @@ mod tests {
     use std::sync::mpsc::Receiver;
 
     use crate::client::Stream;
+    use crate::gh;
     use crate::model::{ProjectView, Status};
     use crate::protocol;
 
@@ -1592,6 +1618,84 @@ mod tests {
                 "  · none"
             ]
         );
+    }
+
+    fn pr(number: u32, state: gh::State, checks: Option<gh::Checks>) -> gh::Pr {
+        gh::Pr {
+            number,
+            state,
+            checks,
+        }
+    }
+
+    #[test]
+    fn each_pull_request_has_its_badge_against_the_right_edge() {
+        use gh::{Checks, State};
+        let badges = [
+            ("passing", pr(48, State::Open, Some(Checks::Passed))),
+            ("pending", pr(46, State::Open, Some(Checks::Pending))),
+            ("failing", pr(47, State::Open, Some(Checks::Failed))),
+            ("no-checks", pr(42, State::Open, None)),
+            ("wip", pr(53, State::Draft, Some(Checks::Passed))),
+            ("shipped", pr(52, State::Merged, Some(Checks::Passed))),
+            ("abandoned", pr(51, State::Closed, Some(Checks::Failed))),
+            (
+                "feature/a-very-long-branch-name",
+                pr(128, State::Open, Some(Checks::Failed)),
+            ),
+        ];
+        let mut app_project = project("/code/app", &[]);
+        app_project
+            .worktrees
+            .extend(badges.into_iter().map(|(name, pr)| {
+                let mut worktree = worktree(&format!("/code/{name}"), Some(name), Status::Quiet);
+                worktree.pr = Some(pr);
+                worktree
+            }));
+        let mut app = showing(vec![app_project]);
+        assert_eq!(
+            projects_pane(&mut app, 13)[1..],
+            [
+                "  · main  repo",
+                "  ○ passing                     #48 ✓",
+                "  ○ pending                     #46 ●",
+                "  ○ failing                     #47 ✗",
+                "  ○ no-checks                     #42",
+                "  ○ wip                   #53 draft ✓",
+                "  ○ shipped                #52 merged",
+                "  ○ abandoned              #51 closed",
+                "  ○ feature/a-very-long-bran…  #128 ✗",
+            ]
+        );
+    }
+
+    #[test]
+    fn p_opens_the_pull_request_or_says_there_is_none() {
+        let mut app = with_a_session();
+        app.tree.set_view({
+            let mut app_project = project("/code/app", &["fix"]);
+            app_project.worktrees[1].pr = Some(pr(42, gh::State::Open, None));
+            vec![app_project]
+        });
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('p'));
+        assert_eq!(app.tasks, []);
+        assert_eq!(hint_line(&mut app), "No pull request for main");
+
+        press(&mut app, KeyCode::Char('j'));
+        assert!(
+            hint_line(&mut app).contains("p PR"),
+            "{}",
+            hint_line(&mut app)
+        );
+        press(&mut app, KeyCode::Char('p'));
+        let expected = Task::OpenPr {
+            project: "/code/app".into(),
+            number: 42,
+        };
+        assert_eq!(app.tasks, [expected]);
+        event(&mut app, actions::Event::OpenedPr(42));
+        assert_eq!(hint_line(&mut app), "#42 opened in the browser");
     }
 
     #[test]
@@ -1776,8 +1880,8 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(
             hint_line(&mut app),
-            "n new  t shell  e edit  p PR  T theme  ? help  q quit",
-            "no session, and the main worktree: no remove"
+            "n new  t shell  e edit  T theme  ? help  q quit",
+            "no session, no pull request, and the main worktree: no remove"
         );
         press(&mut app, KeyCode::Char('j'));
         assert!(hint_line(&mut app).starts_with("⏎ jump  n new"), "session");

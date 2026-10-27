@@ -9,6 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
 
+use crate::gh::{Checks, Pr, State};
 use crate::model::{ProjectView, Status, WorktreeView};
 use crate::theme::Theme;
 
@@ -196,8 +197,9 @@ impl Tree {
             let collapsed = self.collapsed.contains(&project.path);
             items.push(project_item(project, collapsed, theme));
             if !collapsed {
+                let width = block.inner(area).width as usize;
                 let worktrees = project.worktrees.iter();
-                items.extend(worktrees.map(|worktree| worktree_item(worktree, theme)));
+                items.extend(worktrees.map(|worktree| worktree_item(worktree, theme, width)));
             }
         }
         self.inner = block.inner(area);
@@ -230,18 +232,75 @@ fn project_item(project: &ProjectView, collapsed: bool, theme: &Theme) -> ListIt
     ListItem::new(lines)
 }
 
-/// The status icon, then the worktree's label.
-fn worktree_item(worktree: &WorktreeView, theme: &Theme) -> ListItem<'static> {
+/// The status icon, the worktree's label, then its pull request's badge against
+/// the right edge of `width` columns. A label too long for both is cut with `…`;
+/// with no room for even that, the badge goes.
+fn worktree_item(worktree: &WorktreeView, theme: &Theme, width: usize) -> ListItem<'static> {
     let (icon, style) = status_icon(worktree.status, theme);
-    let mut spans = vec![
-        Span::raw("  "),
-        Span::styled(icon, style),
-        Span::raw(format!(" {}", worktree.label())),
-    ];
-    if worktree.main {
-        spans.push(Span::styled("  repo", Style::new().fg(theme.tag)));
+    let row = |label: &str| {
+        let mut spans = vec![
+            Span::raw("  "),
+            Span::styled(icon, style),
+            Span::raw(format!(" {label}")),
+        ];
+        if worktree.main {
+            spans.push(Span::styled("  repo", Style::new().fg(theme.tag)));
+        }
+        spans
+    };
+    let label = worktree.label();
+    let Some(badge) = worktree.pr.as_ref().map(|pr| badge(pr, theme)) else {
+        return ListItem::new(Line::from(row(label)));
+    };
+    let badge_width = Line::from(badge.clone()).width();
+    // Two spaces at least between the row and the badge, and one after it
+    let room = width.saturating_sub(badge_width + 3);
+    let mut shown = label.to_string();
+    if Line::from(row(&shown)).width() > room {
+        loop {
+            if shown.pop().is_none() {
+                return ListItem::new(Line::from(row(label)));
+            }
+            if Line::from(row(&format!("{shown}…"))).width() <= room {
+                break;
+            }
+        }
+        shown.push('…');
     }
+    let mut spans = row(&shown);
+    let used = Line::from(spans.clone()).width();
+    spans.push(Span::raw(" ".repeat(width - used - badge_width - 1)));
+    spans.extend(badge);
+    spans.push(Span::raw(" "));
     ListItem::new(Line::from(spans))
+}
+
+/// `#42 ✓` for an open pull request; `#42 draft ✓`, `#42 merged` and `#42 closed`
+/// dim. Checks are coloured, and left out once it is merged or closed.
+fn badge(pr: &Pr, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw(format!("#{}", pr.number))];
+    let word = match pr.state {
+        State::Open => None,
+        State::Draft => Some(" draft"),
+        State::Merged => Some(" merged"),
+        State::Closed => Some(" closed"),
+    };
+    spans.extend(word.map(Span::raw));
+    if let (State::Open | State::Draft, Some(checks)) = (pr.state, pr.checks) {
+        let (mark, color) = match checks {
+            Checks::Passed => ("✓", theme.passed),
+            Checks::Pending => ("●", theme.pending),
+            Checks::Failed => ("✗", theme.failed),
+        };
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(mark, Style::new().fg(color)));
+    }
+    if pr.state != State::Open {
+        for span in &mut spans {
+            span.style = span.style.add_modifier(Modifier::DIM);
+        }
+    }
+    spans
 }
 
 /// Guessed statuses, from activity without hooks, are dim.
@@ -270,6 +329,34 @@ pub mod tests {
             session: None,
             status,
             pr: None,
+        }
+    }
+
+    #[test]
+    fn badges_colour_the_checks_and_dim_what_is_not_open() {
+        let theme = crate::theme::terminal();
+        let pr = |state, checks| Pr {
+            number: 7,
+            state,
+            checks,
+        };
+        let open = badge(&pr(State::Open, Some(Checks::Passed)), &theme);
+        assert_eq!(
+            open,
+            [
+                Span::raw("#7"),
+                Span::raw(" "),
+                Span::styled("✓", Style::new().fg(theme.passed)),
+            ]
+        );
+        let failed = badge(&pr(State::Open, Some(Checks::Failed)), &theme);
+        assert_eq!(failed[2].style.fg, Some(theme.failed));
+        let pending = badge(&pr(State::Open, Some(Checks::Pending)), &theme);
+        assert_eq!(pending[2].style.fg, Some(theme.pending));
+        for state in [State::Draft, State::Merged, State::Closed] {
+            let spans = badge(&pr(state, Some(Checks::Passed)), &theme);
+            let dim = |span: &Span| span.style.add_modifier.contains(Modifier::DIM);
+            assert!(spans.iter().all(dim), "{state:?}: {spans:?}");
         }
     }
 

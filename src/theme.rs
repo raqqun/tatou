@@ -36,6 +36,10 @@ pub struct Theme {
     pub input: Color,
     /// The busy status.
     pub busy: Color,
+    /// A pull request's checks: `✓` all passed, `●` some running, `✗` some failed.
+    pub passed: Color,
+    pub pending: Color,
+    pub failed: Color,
     /// The `repo` tag.
     pub tag: Color,
     /// Keys in the hint bar.
@@ -76,6 +80,12 @@ struct File {
     #[serde(default, deserialize_with = "color")]
     busy: Option<Color>,
     #[serde(default, deserialize_with = "color")]
+    passed: Option<Color>,
+    #[serde(default, deserialize_with = "color")]
+    pending: Option<Color>,
+    #[serde(default, deserialize_with = "color")]
+    failed: Option<Color>,
+    #[serde(default, deserialize_with = "color")]
     tag: Option<Color>,
     #[serde(default, deserialize_with = "color")]
     key: Option<Color>,
@@ -104,6 +114,9 @@ pub fn terminal() -> Theme {
         error: Color::Reset,
         input: Color::Reset,
         busy: Color::Reset,
+        passed: Color::Reset,
+        pending: Color::Reset,
+        failed: Color::Reset,
         tag: Color::Reset,
         key: Color::Reset,
     };
@@ -163,6 +176,9 @@ fn resolve(name: &str, file: File, base: &Theme) -> Theme {
         error: file.error.unwrap_or(base.error),
         input: file.input.unwrap_or(base.input),
         busy: file.busy.unwrap_or(base.busy),
+        passed: file.passed.unwrap_or(base.passed),
+        pending: file.pending.unwrap_or(base.pending),
+        failed: file.failed.unwrap_or(base.failed),
         tag: file.tag.unwrap_or(base.tag),
         key: file.key.unwrap_or(base.key),
     }
@@ -195,6 +211,10 @@ mod tests {
         assert_eq!(theme.accent, Color::Cyan);
         assert_eq!(theme.error, Color::Red);
         assert_eq!(theme.input, Color::Yellow);
+        assert_eq!(
+            (theme.passed, theme.pending, theme.failed),
+            (Color::Green, Color::Yellow, Color::Red)
+        );
         assert_eq!(theme.tag, Color::Cyan);
         assert_eq!(
             theme.selected(),

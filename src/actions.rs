@@ -9,6 +9,7 @@ use crate::client::Client;
 use crate::config;
 use crate::error::Error;
 use crate::exec;
+use crate::gh;
 use crate::git;
 use crate::platform;
 
@@ -28,6 +29,11 @@ pub enum Task {
     },
     /// Puts text selected in the shown terminal in the clipboard.
     Copy(String),
+    /// Opens a pull request of the project's repository in the browser.
+    OpenPr {
+        project: PathBuf,
+        number: u32,
+    },
 }
 
 /// What `d` ends in the sessions' pane.
@@ -111,6 +117,8 @@ pub enum Event {
     ThemeNotSaved(String),
     /// This many characters are in the clipboard.
     Copied(usize),
+    /// The browser was asked to show this pull request.
+    OpenedPr(u32),
     /// No clipboard tool could copy the text: the dashboard's terminal is asked to.
     NoClipboardTool(String),
 }
@@ -161,6 +169,10 @@ fn run(task: Task, client: &Client, events: &Sender<Event>) {
         Task::Copy(text) => send(match platform::copy(&text) {
             Some(_) => Event::Copied(text.chars().count()),
             None => Event::NoClipboardTool(text),
+        }),
+        Task::OpenPr { project, number } => send(match gh::open(&project, number) {
+            Ok(()) => Event::OpenedPr(number),
+            Err(err) => Event::Failed(format!("#{number}: {}", message(err))),
         }),
         Task::SaveTheme { config, name } => {
             send(match config::save_theme(&config, &name) {

@@ -9,18 +9,15 @@ use crate::error::{Error, Result};
 use crate::exec;
 
 /// The fields `gh pr list` is asked for, as `--json` takes them.
-const FIELDS: &str = "number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup,url";
+const FIELDS: &str = "number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup";
 
 /// A branch's pull request, for its badge.
-// Not read yet: the badges and `p` use it (#40)
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pr {
     pub number: u32,
     pub state: State,
     /// `None` when it has no checks.
     pub checks: Option<Checks>,
-    pub url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +50,13 @@ pub fn prs(project: &Path) -> Result<HashMap<String, Pr>> {
     parse_prs(&output.stdout)
 }
 
+/// Opens pull request `number` of `project`'s GitHub repository in the browser.
+pub fn open(project: &Path, number: u32) -> Result<()> {
+    let number = number.to_string();
+    exec::run("gh", &["pr", "view", "--web", &number], Some(project))?;
+    Ok(())
+}
+
 /// One entry of `gh pr list --json`; other fields are ignored.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,7 +69,6 @@ struct Entry {
     // `null` for a pull request whose commit has no checks
     #[serde(default)]
     status_check_rollup: Option<Vec<Rollup>>,
-    url: String,
 }
 
 /// A check of the rollup: a check run (GitHub Actions, apps), or a commit
@@ -109,7 +112,6 @@ fn parse_prs(text: &str) -> Result<HashMap<String, Pr>> {
             number: entry.number,
             state,
             checks: summary(entry.status_check_rollup.as_deref().unwrap_or_default()),
-            url: entry.url,
         };
         let open = |pr: &Pr| matches!(pr.state, State::Open | State::Draft);
         match prs.get(&entry.head_ref_name) {
@@ -197,9 +199,7 @@ mod tests {
                 ("status-pending", 45, Some(Checks::Pending)),
             ]
         );
-        let passing = &prs["passing"];
-        assert_eq!(passing.state, State::Open);
-        assert_eq!(passing.url, "https://github.com/acme/app/pull/48");
+        assert_eq!(prs["passing"].state, State::Open);
     }
 
     #[test]
