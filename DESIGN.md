@@ -1,6 +1,6 @@
 # tatou — Design
 
-A minimal terminal UI for running coding agents (Claude Code, Codex, Gemini CLI, …) in parallel across several repositories, one git worktree per task. tatou lists the work, opens shells and your editor in its worktrees, where you run your agents, shows the terminal you pick in a pane beside it, and keeps every terminal running in a small daemon of its own. It starts no agent itself (decided in 2.20, #127): support for each agent, found on the machine and set up for tatou, comes in milestone 3.
+What tatou does and why; `README.md` says how to use it. tatou runs coding agents (Claude Code, Codex, Gemini CLI, …) side by side across repositories, a git worktree per task: it lists the work, opens shells and your editor in its worktrees, where you run your agents, shows the terminal you pick in a pane beside it, and keeps every terminal running in a small daemon of its own. It starts no agent itself (decided in 2.20, #127): support for each agent, found on the machine and set up for tatou, comes in milestone 3.
 
 Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
@@ -38,18 +38,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
 ## 4. Building blocks
 
-| Need | Brick |
-|---|---|
-| UI | `ratatui` + `crossterm` |
-| Terminals | `portable-pty` (pseudo-terminals), `vt100` (screens), `tui-term` (drawing) |
-| Sessions that outlive the dashboard | tatou's daemon, over a Unix socket |
-| Worktrees, branches | `git` |
-| Status | Output activity, seen by the daemon; later, agents' hooks reporting to it (milestone 3) |
-| PR / CI | `gh pr list --json …` |
-| Notifications | `notify-send` (Linux) or `osascript` (macOS) |
-| Clipboard | `pbcopy` (macOS); `wl-copy`, `xclip` or `xsel` (Linux); else OSC 52 to the dashboard's terminal |
-| Editing | `$EDITOR` |
-| Config | one TOML file |
+Each need goes to an existing tool (§1): git for worktrees, `gh` for PRs and CI, `$EDITOR` for files, tatou's daemon for terminals that outlive the dashboard, and the system's notification and clipboard tools. The crates and tools themselves are listed in `CLAUDE.md`'s tech stack.
 
 ## 5. Running modes
 
