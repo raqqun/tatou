@@ -174,49 +174,17 @@ impl Input {
     }
 }
 
-pub enum Field {
-    Text {
-        label: String,
-        input: Input,
-    },
-    Choice {
-        label: String,
-        options: Vec<String>,
-        selected: usize,
-    },
+/// A labelled text input of a form.
+pub struct Field {
+    label: String,
+    input: Input,
 }
 
 impl Field {
     pub fn text(label: &str, value: &str) -> Field {
-        Field::Text {
+        Field {
             label: label.to_string(),
             input: Input::new(value),
-        }
-    }
-
-    /// `options` with the one equal to `selected` chosen, else the first.
-    pub fn choice(label: &str, options: Vec<String>, selected: &str) -> Field {
-        let selected = options.iter().position(|o| o == selected).unwrap_or(0);
-        Field::Choice {
-            label: label.to_string(),
-            options,
-            selected,
-        }
-    }
-
-    fn label(&self) -> &str {
-        match self {
-            Field::Text { label, .. } | Field::Choice { label, .. } => label,
-        }
-    }
-
-    /// The text typed, or the option chosen.
-    fn value(&self) -> &str {
-        match self {
-            Field::Text { input, .. } => input.text(),
-            Field::Choice {
-                options, selected, ..
-            } => options.get(*selected).map_or("", String::as_str),
         }
     }
 }
@@ -248,7 +216,7 @@ impl Form {
 
     /// The fields' values, in order.
     pub fn values(&self) -> Vec<&str> {
-        self.fields.iter().map(Field::value).collect()
+        self.fields.iter().map(|f| f.input.text()).collect()
     }
 
     /// Shows why the answer cannot be used, e.g. not a repository.
@@ -274,22 +242,11 @@ impl Form {
             KeyCode::Enter => return Outcome::Submit,
             KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % count,
             KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + count - 1) % count,
-            _ => match self.fields.get_mut(self.focus) {
-                Some(Field::Text { input, .. }) => {
-                    input.key(key);
+            _ => {
+                if let Some(field) = self.fields.get_mut(self.focus) {
+                    field.input.key(key);
                 }
-                Some(Field::Choice {
-                    options, selected, ..
-                }) => {
-                    let n = options.len().max(1);
-                    match key.code {
-                        KeyCode::Right | KeyCode::Char(' ') => *selected = (*selected + 1) % n,
-                        KeyCode::Left => *selected = (*selected + n - 1) % n,
-                        _ => {}
-                    }
-                }
-                None => {}
-            },
+            }
         }
         // Editing is an answer to the error: it goes until the next submit
         self.error = None;
@@ -305,7 +262,7 @@ impl Form {
     }
 
     fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
-        let label_width = self.fields.iter().map(|f| f.label().chars().count()).max();
+        let label_width = self.fields.iter().map(|f| f.label.chars().count()).max();
         let label_width = label_width.unwrap_or(0);
         let error_lines = self.error.as_ref().map_or(0, |e| e.lines().count() + 1);
         let busy_lines = if self.busy.is_some() { 2 } else { 0 };
@@ -321,19 +278,12 @@ impl Form {
                 true => Style::new().add_modifier(Modifier::BOLD),
                 false => Style::new(),
             };
-            let label = format!("{:label_width$}  ", field.label());
-            let value = match field {
-                Field::Text { input, .. } => {
-                    let (shown, cursor) = input.visible(value_width);
-                    if focused {
-                        let x = inner.x + (label_width + 2 + cursor) as u16;
-                        frame.set_cursor_position(Position::new(x, inner.y + i as u16));
-                    }
-                    shown
-                }
-                Field::Choice { .. } if focused => format!("◂ {} ▸", field.value()),
-                Field::Choice { .. } => format!("  {}", field.value()),
-            };
+            let label = format!("{:label_width$}  ", field.label);
+            let (value, cursor) = field.input.visible(value_width);
+            if focused {
+                let x = inner.x + (label_width + 2 + cursor) as u16;
+                frame.set_cursor_position(Position::new(x, inner.y + i as u16));
+            }
             lines.push(Line::from(vec![
                 Span::styled(label, style),
                 Span::raw(value),
@@ -756,18 +706,9 @@ mod tests {
     }
 
     fn new_worktree() -> Form {
-        let agents = vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "shell".to_string(),
-        ];
         Form::new(
             "New worktree in my-app",
-            vec![
-                Field::text("Name", ""),
-                Field::text("Base", "main"),
-                Field::choice("Agent", agents, "codex"),
-            ],
+            vec![Field::text("Name", ""), Field::text("Base", "main")],
         )
     }
 
@@ -777,8 +718,7 @@ mod tests {
         let expected = [
             "  ┌ New worktree in my-app ──────────────┐",
             "  │Name                                  │",
-            "  │Base   main                           │",
-            "  │Agent    codex                        │",
+            "  │Base  main                            │",
             "  └──────────────────────────────────────┘",
         ];
         assert_eq!(screen(&mut form, 44, 9), expected);
@@ -791,17 +731,12 @@ mod tests {
             assert_eq!(form.key(key(KeyCode::Char(c))), Outcome::Open);
         }
         form.key(key(KeyCode::Tab));
-        form.key(key(KeyCode::Tab));
-        form.key(key(KeyCode::Right));
-        assert_eq!(form.values(), ["fix", "main", "shell"]);
-        form.key(key(KeyCode::Right));
-        assert_eq!(form.values()[2], "claude", "round");
-        form.key(key(KeyCode::Up));
         form.key(ctrl('u'));
-        assert_eq!(form.values(), ["fix", "", "claude"]);
+        assert_eq!(form.values(), ["fix", ""]);
+        form.key(key(KeyCode::Tab));
+        assert_eq!(form.focus, 0, "round");
         form.key(key(KeyCode::BackTab));
-        form.key(key(KeyCode::BackTab));
-        assert_eq!(form.focus, 2, "round");
+        assert_eq!(form.focus, 1, "round");
         assert_eq!(form.key(key(KeyCode::Enter)), Outcome::Submit);
         assert_eq!(form.key(key(KeyCode::Esc)), Outcome::Cancel);
     }
@@ -813,7 +748,7 @@ mod tests {
         let mut dialog = Dialog::Form(form);
         let lines = screen(&mut dialog, 60, 12);
         assert_eq!(
-            lines[5],
+            lines[4],
             "  │a branch named 'fix' already exists                   │"
         );
         dialog.key(key(KeyCode::Char('x')));

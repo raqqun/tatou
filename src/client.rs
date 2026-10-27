@@ -104,14 +104,12 @@ impl Client {
         name: &str,
         path: &Path,
         command: Option<&str>,
-        agent: bool,
     ) -> Result<String> {
         let request = Request::Spawn {
             session: session.map(String::from),
             name: name.to_string(),
             path: path.to_path_buf(),
             command: command.map(String::from),
-            agent,
         };
         match self.request(&request)? {
             Reply::Spawned { terminal, .. } => Ok(terminal),
@@ -260,12 +258,11 @@ mod tests {
     fn spawns_attaches_types_and_sees_the_program_end() {
         let (dir, client) = daemon();
         let terminal = client
-            .spawn(None, "app-fix", dir.path(), Some("cat"), true)
+            .spawn(None, "app-fix", dir.path(), Some("cat"))
             .unwrap();
         let sessions = client.sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "app-fix");
-        assert_eq!(sessions[0].agent.as_deref(), Some(terminal.as_str()));
         assert_eq!(sessions[0].windows[0].command, "cat");
 
         let (stream, received) = client.stream().unwrap();
@@ -321,9 +318,7 @@ mod tests {
     /// size, and waits for it to print `last`.
     fn printing(client: &Client, dir: &Path, script: &str, last: &str) -> (Stream, String) {
         let script = format!("read go; {script}; sleep 100");
-        let terminal = client
-            .spawn(None, "app-fix", dir, Some(&script), false)
-            .unwrap();
+        let terminal = client.spawn(None, "app-fix", dir, Some(&script)).unwrap();
         let (stream, received) = client.stream().unwrap();
         stream.send(Request::Attach {
             terminal: terminal.clone(),
@@ -424,15 +419,15 @@ mod tests {
     fn terminals_of_a_worktree_share_its_session() {
         let (dir, client) = daemon();
         let first = client
-            .spawn(None, "app-fix", dir.path(), Some("sleep 100"), true)
+            .spawn(None, "app-fix", dir.path(), Some("sleep 100"))
             .unwrap();
         let session = client.sessions().unwrap()[0].id.clone();
         let second = client
-            .spawn(Some(&session), "app-fix", dir.path(), None, false)
+            .spawn(Some(&session), "app-fix", dir.path(), None)
             .unwrap();
         // A new session with the same name gets a number
         client
-            .spawn(None, "app-fix", dir.path(), Some("sleep 100"), false)
+            .spawn(None, "app-fix", dir.path(), Some("sleep 100"))
             .unwrap();
         let sessions = client.sessions().unwrap();
         let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();

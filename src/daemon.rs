@@ -1,4 +1,4 @@
-//! `tatou daemon`: owns the terminals the agents, shells and editors run in, so
+//! `tatou daemon`: owns the terminals the shells, editors and agents run in, so
 //! that they outlive the dashboard. Each terminal is a pseudo-terminal with a
 //! program in it and a `vt100` screen kept from its output, so that a dashboard
 //! attaching gets the screen as it is. Dashboards talk to it over a Unix socket
@@ -117,7 +117,6 @@ struct SessionState {
     id: u32,
     name: String,
     path: PathBuf,
-    agent: Option<u32>,
     /// In the order they were opened.
     terminals: Vec<u32>,
     /// The one spawned or attached to last.
@@ -167,19 +166,15 @@ impl State {
                         })
                     })
                     .collect();
-                let activity = match session.agent.and_then(|id| self.terminals.get(&id)) {
-                    Some(agent) => agent.activity,
-                    None => (session.terminals.iter())
-                        .filter_map(|id| self.terminals.get(id))
-                        .map(|terminal| terminal.activity)
-                        .max()
-                        .unwrap_or(0),
-                };
+                let activity = (session.terminals.iter())
+                    .filter_map(|id| self.terminals.get(id))
+                    .map(|terminal| terminal.activity)
+                    .max()
+                    .unwrap_or(0);
                 Session {
                     id: format!("${}", session.id),
                     name: session.name.clone(),
                     path: session.path.clone(),
-                    agent: session.agent.map(|id| format!("%{id}")),
                     activity,
                     windows,
                 }
@@ -279,8 +274,7 @@ impl Daemon {
                 name,
                 path,
                 command,
-                agent,
-            } => match self.spawn(session.as_deref(), &name, &path, command.as_deref(), agent) {
+            } => match self.spawn(session.as_deref(), &name, &path, command.as_deref()) {
                 Ok((session, terminal)) => Reply::Spawned {
                     session: format!("${session}"),
                     terminal: format!("%{terminal}"),
@@ -359,7 +353,6 @@ impl Daemon {
         name: &str,
         path: &Path,
         command: Option<&str>,
-        agent: bool,
     ) -> std::result::Result<(u32, u32), String> {
         let size = PtySize {
             rows: 24,
@@ -408,7 +401,6 @@ impl Daemon {
                     id,
                     name,
                     path: path.to_path_buf(),
-                    agent: None,
                     terminals: Vec::new(),
                     current: None,
                 });
@@ -433,9 +425,6 @@ impl Daemon {
         if let Some(session) = state.sessions.iter_mut().find(|s| s.id == session_id) {
             session.terminals.push(id);
             session.current = Some(id);
-            if agent {
-                session.agent = Some(id);
-            }
         }
         drop(state);
         tracing::info!(id, ?path, command, "terminal started");
@@ -476,9 +465,6 @@ impl Daemon {
         }
         if let Some(session) = state.sessions.iter_mut().find(|s| s.id == terminal.session) {
             session.terminals.retain(|t| *t != id);
-            if session.agent == Some(id) {
-                session.agent = None;
-            }
             if session.current == Some(id) {
                 session.current = session.terminals.last().copied();
             }

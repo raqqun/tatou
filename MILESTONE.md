@@ -499,35 +499,69 @@ Depends on: 2.6, 2.18
 - Protocol round trips; key encoding; the daemon end to end on a temporary socket (spawn, attach, input, a second attach gets the screen, an exit ends the terminal and its session); actions against an in-process daemon; the CLI (`tatou daemon` listens until `tatou stop`, a second refuses; the launcher needs git and stops on an invalid config); `TestBackend` tests (the terminal pane, Enter shows and focuses, Tab, the session and window keys, a neighbour after an exit).
 - Manual check documented in the PR: Claude Code in the pane; a shell kept across quitting and relaunching the dashboard; vi full screen; `tatou stop`.
 
+### 2.20 Drop agents: tatou starts terminals only (#127)
+
+Depends on: 2.19
+
+- Decided: tatou starts no agent itself. `n` opens a shell in the new worktree's session (the form asks for name and base only), `t` a shell, `e` the editor; the user runs any agent in a shell. Agent support comes back in M3, one module per agent.
+- Removed: `default_agent`, `[agents]` and the built-in `claude` and `codex` (2.11); `s`, start / restart agent (2.5), with its choice and confirmation; the form's choice field; the spawn request's `agent` flag and the session's agent terminal in the protocol and the daemon: a session's status follows all its terminals' output.
+- `default_agent` or `[agents]` in `config.toml` is an error saying to remove them, as `[[project]]` is (1.18).
+- Kept: the busy / input / idle statuses and their theme colours, for M3.
+- M3 rewritten as Agents: #26–#29 renumbered under it.
+
+**Done when**
+- Config tests: the defaults without agents; `default_agent` and `[agents]` are errors with the hint. Action test: a new worktree gets a session with a shell. `TestBackend` tests: the form's two fields, the hint bar without `s`.
+
 ---
 
-## M3 — Status
+## M3 — Agents
 
-Hook-based agent status reported to the daemon, `tatou hooks`, notifications.
+Support for coding agents, one module per agent (Claude Code, Codex, …), replacing the generic `[agents]` dropped in 2.20 (#127). Each module knows its agent: how to find it on the machine, how to start and resume it, and how it reports its state. Steps 3.1–3.3 are outlines, to design and open as issues when M3 starts.
 
-### 3.1 `tatou hooks` (#26)
+### 3.1 Agent modules and detection
 
-Depends on: 1.10
+Depends on: 2.20
+
+- One module per agent, behind one small shape they share (a trait, once there are two of them): its name, the program to look for, its command, its resume command (DESIGN §12.2).
+- Detection: which agents are installed, found on `$PATH` (through `exec.rs`), at startup and on demand; nothing written down.
+- Decisions to make: where the modules live (`src/agents/`); what the user may override in `config.toml` (a command, a flag, turning one off).
+
+### 3.2 Setting an agent up for tatou
+
+Depends on: 3.1
+
+- What an agent needs from tatou: its hooks (3.4), any other setting.
+- Decision to make: applying it automatically or by asking the user. Writing an agent's own configuration conflicts with DESIGN §1 and §3 (tatou never modifies files it does not own; it prints the snippet instead), so automatic setup needs that rule changed first, or setup stays a snippet the user applies, offered when an agent is found without it.
+
+### 3.3 Starting an agent
+
+Depends on: 3.1
+
+- Starting a detected agent in a worktree's session, and in a new worktree: the key, the choice when several are installed, restarting and resuming.
+
+### 3.4 `tatou hooks` (#26)
+
+Depends on: 3.2
 
 - `tatou mark busy|input|idle`: tells the daemon, over its socket, that the terminal it runs in (`$TATOU_TERMINAL`, which the daemon sets for each program, with `$TATOU_SOCKET`) is in that state; a no-op, quiet, without them. The daemon keeps the state with the terminal and lists it; the model shows it before activity.
-- Prints, for the user to paste (tatou never edits agent configs): the Claude Code hooks JSON from DESIGN §8.4, and the generic one-liner `[ -n "$TATOU" ] && tatou mark <state>; true` for other agents, with notes for Codex and Gemini CLI where their hook mechanism is known.
+- Each agent's module gives its hooks: the Claude Code hooks JSON from DESIGN §8.4, Codex's and Gemini CLI's where their hook mechanism is known; set up as 3.2 decides.
 - Check whether `input` needs clearing after the user answers a permission prompt (e.g. a `PreToolUse`/`PostToolUse` hook setting `busy`), and include it if so.
 
 **Done when**
 - A test checks that the Claude section is valid JSON (`serde_json` as a dev-dependency; it becomes a normal one in 5.1). Snippets are POSIX `sh`.
 - Daemon test: a program running `tatou mark input` in its terminal shows as input in the list.
 
-### 3.2 Verify hook-driven status end to end (#27)
+### 3.5 Verify hook-driven status end to end (#27)
 
-Depends on: 3.1, 1.12
+Depends on: 3.4, 1.12
 
-- With the hooks installed, run a Claude Code session in a tatou worktree and confirm the icon cycles busy → input → idle within ~1 s.
+- With the hooks set up, run a Claude Code session in a tatou worktree and confirm the icon cycles busy → input → idle within ~1 s.
 - Confirm sessions without hooks fall back to active/quiet and that `TATOU` unset makes the hooks a no-op outside tatou.
 
 **Done when**
 - Findings recorded in the PR; DESIGN §8.4 corrected if the hooks needed changes.
 
-### 3.3 `platform.rs`: notify (#28)
+### 3.6 `platform.rs`: notify (#28)
 
 Depends on: 1.4
 
@@ -537,9 +571,9 @@ Depends on: 1.4
 **Done when**
 - Unit tests on the built argument vectors (title/body with quotes and backslashes); no test actually shows a notification.
 
-### 3.4 Notify when an agent needs input (#29)
+### 3.7 Notify when an agent needs input (#29)
 
-Depends on: 3.3, 1.13
+Depends on: 3.6, 3.4
 
 - The dashboard compares statuses between refreshes (in memory only) and, on a transition to `input`, notifies unless that terminal is the one it shows.
 - Also a message in the hint bar with the worktree's name.
@@ -547,7 +581,7 @@ Depends on: 3.3, 1.13
 **Done when**
 - Unit test for transition detection (input from busy/idle/none, no repeat while staying in input, suppressed when viewed).
 
-### 3.5 `tatou status` and the tmux status line (#30)
+### `tatou status` and the tmux status line (#30, was 3.5)
 
 **Dropped** in 2.19 (#109): it fed tmux's status line, and tatou has no tmux any more; the dashboard shows the statuses. Closed as not planned.
 
@@ -724,7 +758,7 @@ Documentation, packaging channels and the first complete alpha. Binaries and Git
 
 ### 7.1 User documentation (#45)
 
-Depends on: 6.4, 5.3, 3.4
+Depends on: 6.4, 5.3, 3.7
 
 - README: what and why, requirements (git, optional gh), install, quick start, full config reference, hooks setup (`tatou hooks`), keys (the dashboard's, and the terminal's Alt keys), the daemon and `tatou stop`, uninstall (nothing to clean except `~/.config/tatou` and `~/.local/state/tatou`).
 - A short screenshot or recording.
