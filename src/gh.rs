@@ -12,7 +12,7 @@ use crate::exec;
 const FIELDS: &str = "number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup,url";
 
 /// A branch's pull request, for its badge.
-// Not read yet: the background refresh and the badges use it (#39, #40)
+// Not read yet: the badges and `p` use it (#40)
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pr {
@@ -45,8 +45,6 @@ pub enum Checks {
 /// The pull requests of the GitHub repository of `project`, by the branch they
 /// come from, as `gh` sees them from that folder. Fails with gh's own message
 /// when it is missing, not logged in, or the project has no GitHub remote.
-// Not called yet: the background refresh runs it (#39)
-#[allow(dead_code)]
 pub fn prs(project: &Path) -> Result<HashMap<String, Pr>> {
     let args = [
         "pr", "list", "--state", "all", "--limit", "100", "--json", FIELDS,

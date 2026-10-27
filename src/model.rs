@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, Config};
+use crate::gh::Pr;
 use crate::git::Worktree;
 use crate::protocol::{Session, Window};
 use crate::refresh::Update;
@@ -37,6 +38,10 @@ pub struct WorktreeView {
     pub main: bool,
     pub session: Option<SessionView>,
     pub status: Status,
+    /// Its branch's pull request, as `gh` last listed them.
+    // Not read yet: the badges and `p` use it (#40)
+    #[allow(dead_code)]
+    pub pr: Option<Pr>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -94,6 +99,8 @@ pub struct Sources {
     sessions_error: Option<String>,
     worktrees: HashMap<PathBuf, Result<Vec<Worktree>, String>>,
     remote_defaults: HashMap<PathBuf, Option<String>>,
+    /// Each project's pull requests by branch, kept until the next listing.
+    prs: HashMap<PathBuf, HashMap<String, Pr>>,
 }
 
 impl Sources {
@@ -112,6 +119,9 @@ impl Sources {
                 self.remote_defaults.insert(project.clone(), remote_default);
                 self.worktrees.insert(project, result);
             }
+            Update::Prs { project, prs } => {
+                self.prs.insert(project, prs);
+            }
             // The UI applies it: it owns the config
             Update::Config(_) => {}
         }
@@ -121,6 +131,12 @@ impl Sources {
         let mut view = merge(config, &self.worktrees, &self.sessions, now);
         for project in &mut view {
             project.remote_default = self.remote_defaults.get(&project.path).cloned().flatten();
+            let Some(prs) = self.prs.get(&project.path) else {
+                continue;
+            };
+            for worktree in &mut project.worktrees {
+                worktree.pr = (worktree.branch.as_ref()).and_then(|b| prs.get(b).cloned());
+            }
         }
         view
     }
@@ -201,6 +217,7 @@ pub fn merge(
                         branch: worktree.branch.clone(),
                         main: i == 0 && !list[0].bare,
                         status: session.map_or(Status::NoSession, |s| status(s, now)),
+                        pr: None,
                         session: session.map(|s| SessionView {
                             id: s.id.clone(),
                             name: s.name.clone(),
@@ -253,6 +270,7 @@ fn file_name(path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::config::{Keys, Project};
+    use crate::gh;
 
     const NOW: u64 = 1_000_000;
 
@@ -350,6 +368,7 @@ mod tests {
                     main: true,
                     session: None,
                     status: Status::NoSession,
+                    pr: None,
                 },
                 WorktreeView {
                     path: "/code/app.worktrees/fix".into(),
@@ -362,6 +381,7 @@ mod tests {
                         current: Some("%1".into()),
                     }),
                     status: Status::Active,
+                    pr: None,
                 },
             ],
         };
@@ -467,6 +487,68 @@ mod tests {
             .map(|w| (w.name.as_str(), w.main))
             .collect();
         assert_eq!(names, [("main", false)]);
+    }
+
+    fn pr(number: u32) -> Pr {
+        Pr {
+            number,
+            state: gh::State::Open,
+            checks: Some(gh::Checks::Passed),
+            url: format!("https://github.com/acme/app/pull/{number}"),
+        }
+    }
+
+    #[test]
+    fn pull_requests_go_to_their_branchs_worktree_project_by_project() {
+        let mut sources = Sources::default();
+        let config = config(&["/code/app", "/code/web"]);
+        let fix_and_detached = vec![
+            worktree("/code/app", Some("main")),
+            worktree("/code/app.worktrees/fix", Some("fix")),
+            worktree("/code/app.worktrees/spike", None),
+        ];
+        sources.apply(Update::Worktrees {
+            project: "/code/app".into(),
+            result: Ok(fix_and_detached),
+            remote_default: None,
+        });
+        sources.apply(Update::Worktrees {
+            project: "/code/web".into(),
+            result: Ok(vec![worktree("/code/web.worktrees/fix", Some("fix"))]),
+            remote_default: None,
+        });
+        let fix_and_spike = HashMap::from([("fix".into(), pr(42)), ("spike".into(), pr(43))]);
+        sources.apply(Update::Prs {
+            project: "/code/app".into(),
+            prs: fix_and_spike,
+        });
+        // gh failed for web: no pull requests there, app's stay
+        sources.apply(Update::Prs {
+            project: "/code/web".into(),
+            prs: HashMap::new(),
+        });
+        let numbers = |sources: &Sources| -> Vec<Vec<Option<u32>>> {
+            (sources.view(&config, NOW).iter())
+                .map(|p| {
+                    p.worktrees
+                        .iter()
+                        .map(|w| w.pr.as_ref().map(|pr| pr.number))
+                })
+                .map(Iterator::collect)
+                .collect()
+        };
+        assert_eq!(
+            numbers(&sources),
+            [vec![None, Some(42), None], vec![None]],
+            "by branch: none for main, nor for the detached spike"
+        );
+        assert_eq!(sources.view(&config, NOW)[0].worktrees[1].pr, Some(pr(42)));
+
+        sources.apply(Update::Prs {
+            project: "/code/app".into(),
+            prs: HashMap::new(),
+        });
+        assert_eq!(numbers(&sources), [vec![None, None, None], vec![None]]);
     }
 
     #[test]
