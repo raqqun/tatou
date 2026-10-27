@@ -73,7 +73,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 - **Match sessions to worktrees by the path they were started in**, never by parsing session names.
 - No `unwrap()`/`expect()` outside tests unless the invariant is impossible to break; comment why.
 - Code written before anything calls it gets `#[allow(dead_code)]` on the item, with a comment naming the issue that will use it; that issue removes the attribute. Never allow dead code crate-wide.
-- Prefer plain, obvious code over abstractions. No traits or generics until there are two real uses.
+- Prefer plain, obvious code over abstractions. No traits or generics until there are two real uses; the change that creates the second extracts the shared part (or opens an issue for it, if it is large) and says so in its pull request. Never copy logic that exists elsewhere in the crate: reuse it, or extract it first.
 
 ## Testing
 
@@ -96,6 +96,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 - Follow `MILESTONE.md` in order: each step is a GitHub issue in the **tatou** project. One step = one issue = one pull request. A finished step becomes one line there; its spec and decisions stay in the issue and the pull request.
 - Plan first for anything touching more than two modules, and wait for approval.
 - Small steps, one logical change per commit, imperative commit messages.
+- Before opening a pull request, check the diff for logic it repeats from elsewhere in the crate, and for functions grown long or hard to follow; fix them in the same change, or open an issue and link it from the pull request.
 - Every commit is signed off for the DCO: `git commit -s` (also when amending).
 - When a design decision changes, update `DESIGN.md` in the same commit. Each fact has one home among the documents (above); elsewhere, link to it.
 - If something is ambiguous, ask instead of guessing.
