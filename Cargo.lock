@@ -1451,7 +1451,7 @@ dependencies = [
 
 [[package]]
 name = "tatou"
-version = "0.1.0-alpha.51"
+version = "0.1.0-alpha.52"
 dependencies = [
  "crossterm",
  "portable-pty",
