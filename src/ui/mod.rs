@@ -5,6 +5,7 @@ mod projects;
 mod selection;
 mod sessions;
 mod terminal;
+mod tree;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
@@ -1966,7 +1967,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(app.focus, Pane::Worktrees);
         assert_eq!(
             app.tree.selected().cloned(),
-            Some(projects::Row::Project("/code/app".into()))
+            Some(projects::Row::Parent("/code/app".into()))
         );
 
         let lines = screen(&mut app, 80, 10);
@@ -1989,7 +1990,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Char('j'));
         assert_ne!(
             app.tree.selected().cloned(),
-            Some(projects::Row::Project("/code/app".into()))
+            Some(projects::Row::Parent("/code/app".into()))
         );
     }
 
@@ -2358,15 +2359,15 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Char('l'));
         // l again: into its first window; h from there: back to the session
         press(&mut app, KeyCode::Char('l'));
-        let window = sessions::Row::Window {
-            session: "$1".into(),
-            window: "%10".into(),
+        let window = sessions::Row::Child {
+            parent: "$1".into(),
+            child: "%10".into(),
         };
         assert_eq!(app.sessions.selected(), Some(&window));
         press(&mut app, KeyCode::Char('h'));
         assert_eq!(
             app.sessions.selected(),
-            Some(&sessions::Row::Session("$1".into()))
+            Some(&sessions::Row::Parent("$1".into()))
         );
         assert_eq!(
             sessions_pane(&mut app, 40),
@@ -2407,9 +2408,9 @@ unknown field `popop`, expected one of `popup`, `back`";
         );
         app.sources.apply(Update::Sessions(Ok(vec![more])));
         app.update_view(NOW);
-        let window = sessions::Row::Window {
-            session: "$1".into(),
-            window: "%11".into(),
+        let window = sessions::Row::Child {
+            parent: "$1".into(),
+            child: "%11".into(),
         };
         assert_eq!(app.sessions.selected(), Some(&window));
     }
@@ -2462,7 +2463,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(shown(&app), Some("%11"), "its current window");
         assert_eq!(app.focus, Pane::Terminal);
         let selected = app.sessions.selected().cloned();
-        assert_eq!(selected, Some(sessions::Row::Session("$1".into())));
+        assert_eq!(selected, Some(sessions::Row::Parent("$1".into())));
         // From the terminal, whose program never sees them: the focus stays there
         app.focus = Pane::Terminal;
         alt(&mut app, 'l');
@@ -2490,9 +2491,9 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(shown(&app), Some("%10"));
         assert_eq!(app.focus, Pane::Terminal, "the focus goes to it");
         let selected = app.sessions.selected().cloned();
-        let window = |w: &str| sessions::Row::Window {
-            session: "$1".into(),
-            window: w.into(),
+        let window = |w: &str| sessions::Row::Child {
+            parent: "$1".into(),
+            child: w.into(),
         };
         assert_eq!(selected, Some(window("%10")));
         alt(&mut app, 'j');
@@ -2616,13 +2617,13 @@ unknown field `popop`, expected one of `popup`, `back`";
         app.update_view(NOW);
         assert_eq!(
             app.sessions.selected(),
-            Some(&sessions::Row::Session("$2".into())),
+            Some(&sessions::Row::Parent("$2".into())),
             "still notes"
         );
         // The tree did not move meanwhile
         assert_eq!(
             app.tree.selected().cloned(),
-            Some(projects::Row::Project("/code/app".into()))
+            Some(projects::Row::Parent("/code/app".into()))
         );
     }
 
@@ -2830,7 +2831,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(app.focus, Pane::Sessions);
         assert_eq!(
             app.sessions.selected(),
-            Some(&sessions::Row::Session("$1".into()))
+            Some(&sessions::Row::Parent("$1".into()))
         );
         let selected = app.tree.selected().cloned();
         click(&mut app, 8, 8);
@@ -2856,7 +2857,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         click(&mut app, 8, 2);
         assert_eq!(
             app.tree.selected(),
-            Some(&projects::Row::Project("/code/broken".into()))
+            Some(&projects::Row::Parent("/code/broken".into()))
         );
         click(&mut app, 8, 5);
         let main = app.tree.selected_worktree().map(|w| w.path.clone());
@@ -2871,7 +2872,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         click(&mut app, 8, 1);
         assert_eq!(
             app.tree.selected(),
-            Some(&projects::Row::Project("/code/web".into()))
+            Some(&projects::Row::Parent("/code/web".into()))
         );
     }
 

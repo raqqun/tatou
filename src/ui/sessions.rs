@@ -1,61 +1,51 @@
 //! The sessions' pane, below the projects: every session the daemon has, and
 //! under each, its terminals, which it calls windows.
 
-use std::collections::HashSet;
-
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, ListItem, Paragraph};
 
 use super::projects::status_icon;
+use super::tree::Fold;
 use crate::actions::End;
 use crate::model::SessionRow;
 use crate::theme::Theme;
 
-/// A row of the pane, by ids, so the selection follows it across refreshes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Row {
-    Session(String),
-    Window { session: String, window: String },
-}
+/// A row of the pane: a session's id, or a window's with its session's.
+pub type Row = super::tree::Row<String>;
 
 #[derive(Default)]
 pub struct Sessions {
     sessions: Vec<SessionRow>,
-    /// By session id; every session starts expanded.
-    collapsed: HashSet<String>,
-    selected: Option<Row>,
-    /// The selected row's index, kept for when that row goes away.
-    index: usize,
-    /// Keeps the scroll position from one frame to the next.
-    list: ListState,
-    /// Where the rows were last drawn, to find the one clicked.
-    inner: Rect,
+    fold: Fold<String>,
 }
 
 impl Sessions {
     pub fn set_rows(&mut self, sessions: Vec<SessionRow>) {
         self.sessions = sessions;
-        self.reselect();
+        self.fold.reselect(&self.groups());
     }
 
     /// How many rows show: the sessions, and the windows of those unfolded.
     pub fn len(&self) -> usize {
-        self.rows().len()
+        self.fold.rows(&self.groups()).len()
     }
 
     pub fn selected(&self) -> Option<&Row> {
-        self.selected.as_ref()
+        self.fold.selected()
     }
 
     /// What `d` would end, and how to ask about it: the selected window, or the
     /// selected session with all its windows.
     pub fn selected_end(&self) -> Option<(End, String)> {
-        let (session, window) = match self.selected.as_ref()? {
-            Row::Session(id) => (id, None),
-            Row::Window { session, window } => (session, Some(window)),
+        let (session, window) = match self.fold.selected()? {
+            Row::Parent(id) => (id, None),
+            Row::Child {
+                parent: session,
+                child: window,
+            } => (session, Some(window)),
         };
         let session = self.sessions.iter().find(|s| &s.id == session)?;
         match window {
@@ -83,9 +73,12 @@ impl Sessions {
     /// The terminal Enter shows: the selected window, or on a session, its
     /// current one.
     pub fn selected_terminal(&self) -> Option<String> {
-        let (session, window) = match self.selected.as_ref()? {
-            Row::Session(id) => (id, None),
-            Row::Window { session, window } => (session, Some(window)),
+        let (session, window) = match self.fold.selected()? {
+            Row::Parent(id) => (id, None),
+            Row::Child {
+                parent: session,
+                child: window,
+            } => (session, Some(window)),
         };
         let session = self.sessions.iter().find(|s| &s.id == session)?;
         let window = match window {
@@ -118,8 +111,8 @@ impl Sessions {
             .find(|w| w.current)
             .or(session.windows.first())?;
         let shown = window.id.clone();
-        self.selected = Some(Row::Session(session.id.clone()));
-        self.reselect();
+        let row = Row::Parent(session.id.clone());
+        self.fold.select(row, &self.groups());
         Some(shown)
     }
 
@@ -142,12 +135,11 @@ impl Sessions {
             None => count - 1,
         } as usize;
         let window = session.windows[index].id.clone();
-        self.collapsed.remove(&session.id);
-        self.selected = Some(Row::Window {
-            session: session.id.clone(),
-            window: window.clone(),
-        });
-        self.reselect();
+        let row = Row::Child {
+            parent: session.id.clone(),
+            child: window.clone(),
+        };
+        self.fold.select(row, &self.groups());
         Some(window)
     }
 
@@ -187,7 +179,7 @@ impl Sessions {
                 .and_then(current)
         };
         let shown = next.or_else(previous);
-        self.reselect();
+        self.fold.reselect(&self.groups());
         shown
     }
 
@@ -205,99 +197,51 @@ impl Sessions {
     /// Selects the row drawn at (`x`, `y`); whether that was on a session's fold
     /// arrow, or `None` when no row is there.
     pub fn click(&mut self, x: u16, y: u16) -> Option<bool> {
-        if !self.inner.contains(Position::new(x, y)) {
-            return None;
-        }
         let heights = vec![1; self.len()];
-        let index = super::row_at(&heights, self.list.offset(), self.inner, y)?;
-        self.select(index);
-        let session = matches!(self.selected, Some(Row::Session(_)));
-        Some(session && x < self.inner.x + 2)
+        self.fold.click(&self.groups(), &heights, x, y)
     }
 
     /// Folds or unfolds the selected session.
     pub fn toggle(&mut self) {
-        if let Some(Row::Session(id)) = &self.selected
-            && !self.collapsed.remove(id)
-        {
-            self.collapsed.insert(id.clone());
-        }
+        self.fold.toggle();
     }
 
     pub fn up(&mut self) {
-        self.select(self.index.saturating_sub(1));
+        self.fold.up(&self.groups());
     }
 
     pub fn down(&mut self) {
-        self.select(self.index + 1);
+        self.fold.down(&self.groups());
     }
 
     /// On an unfolded session, folds it; on a window, moves to its session.
     pub fn collapse(&mut self) {
-        match self.selected.clone() {
-            Some(Row::Session(id)) => {
-                self.collapsed.insert(id);
-            }
-            Some(Row::Window { session, .. }) => {
-                self.selected = Some(Row::Session(session));
-                self.reselect();
-            }
-            None => {}
-        }
+        self.fold.collapse(&self.groups());
     }
 
     /// On a folded session, unfolds it; on an unfolded one, moves to its first window.
     pub fn expand(&mut self) {
-        let Some(Row::Session(id)) = &self.selected else {
-            return;
-        };
-        if !self.collapsed.remove(id)
-            && let Some(Row::Window { .. }) = self.rows().get(self.index + 1)
-        {
-            self.select(self.index + 1);
-        }
+        self.fold.expand(&self.groups());
     }
 
-    /// Selects the row at `index`, or the last one past the end.
-    fn select(&mut self, index: usize) {
-        let rows = self.rows();
-        self.index = index.min(rows.len().saturating_sub(1));
-        self.selected = rows.get(self.index).cloned();
-    }
-
-    /// Finds the selected row again after the rows changed; when it is gone, the
-    /// row now in its place is selected.
-    fn reselect(&mut self) {
-        let rows = self.rows();
-        match rows
-            .iter()
-            .position(|row| Some(row) == self.selected.as_ref())
-        {
-            Some(index) => self.index = index,
-            None => self.select(self.index),
-        }
-    }
-
-    fn rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
-        for session in &self.sessions {
-            rows.push(Row::Session(session.id.clone()));
-            if !self.collapsed.contains(&session.id) {
-                rows.extend(session.windows.iter().map(|window| Row::Window {
-                    session: session.id.clone(),
-                    window: window.id.clone(),
-                }));
-            }
-        }
-        rows
+    /// Each session's id and its windows', as drawn.
+    fn groups(&self) -> Vec<(String, Vec<String>)> {
+        (self.sessions.iter())
+            .map(|s| {
+                (
+                    s.id.clone(),
+                    s.windows.iter().map(|w| w.id.clone()).collect(),
+                )
+            })
+            .collect()
     }
 
     /// Each session's fold, status icon, name, what runs in its current window,
     /// and what it is for, dimmed; then each window's index, what runs in it, and
     /// `*` on the session's current one.
     pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block, theme: &Theme) {
-        self.inner = block.inner(area);
         if self.sessions.is_empty() {
+            self.fold.place(block.inner(area));
             frame.render_widget(Paragraph::new("No sessions").block(block), area);
             return;
         }
@@ -305,7 +249,7 @@ impl Sessions {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let mut items = Vec::new();
         for session in &self.sessions {
-            let collapsed = self.collapsed.contains(&session.id);
+            let collapsed = self.fold.is_collapsed(&session.id);
             let (icon, style) = status_icon(session.status, theme);
             let mut spans = vec![
                 Span::raw(if collapsed { "▸ " } else { "▾ " }),
@@ -328,10 +272,6 @@ impl Sessions {
                 items.push(ListItem::new(line));
             }
         }
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(theme.selected());
-        self.list.select(self.selected.as_ref().map(|_| self.index));
-        frame.render_stateful_widget(list, area, &mut self.list);
+        self.fold.render(frame, area, block, items, theme);
     }
 }

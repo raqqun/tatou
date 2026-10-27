@@ -1,44 +1,31 @@
 //! The left pane: projects, collapsible, and their worktrees.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ratatui::Frame;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState};
+use ratatui::widgets::{Block, ListItem};
 
+use super::tree::Fold;
 use crate::gh::{Checks, Pr, State};
 use crate::model::{ProjectView, Status, WorktreeView};
 use crate::theme::Theme;
 
-/// A row of the pane. The selection is kept as one, so it follows its project or
-/// worktree across refreshes; a project and its main worktree share a path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Row {
-    Project(PathBuf),
-    Worktree { project: PathBuf, path: PathBuf },
-}
+/// A row of the pane: a project's path, or a worktree's with its project's.
+pub type Row = super::tree::Row<PathBuf>;
 
 #[derive(Default)]
 pub struct Tree {
     view: Vec<ProjectView>,
-    /// By project path; every project starts expanded.
-    collapsed: HashSet<PathBuf>,
-    selected: Option<Row>,
-    /// The selected row's index, kept for when that row goes away.
-    index: usize,
-    /// Keeps the scroll position from one frame to the next.
-    list: ListState,
-    /// Where the rows were last drawn, to find the one clicked.
-    inner: Rect,
+    fold: Fold<PathBuf>,
 }
 
 impl Tree {
     pub fn set_view(&mut self, view: Vec<ProjectView>) {
         self.view = view;
-        self.reselect();
+        self.fold.reselect(&self.groups());
     }
 
     pub fn is_empty(&self) -> bool {
@@ -47,12 +34,16 @@ impl Tree {
 
     #[cfg(test)]
     pub fn selected(&self) -> Option<&Row> {
-        self.selected.as_ref()
+        self.fold.selected()
     }
 
     /// The selected worktree; `None` on a project row.
     pub fn selected_worktree(&self) -> Option<&WorktreeView> {
-        let Some(Row::Worktree { project, path }) = &self.selected else {
+        let Some(Row::Child {
+            parent: project,
+            child: path,
+        }) = self.fold.selected()
+        else {
             return None;
         };
         let project = self.view.iter().find(|p| &p.path == project)?;
@@ -61,8 +52,8 @@ impl Tree {
 
     /// The selected row's project.
     pub fn selected_project(&self) -> Option<&ProjectView> {
-        let path = match self.selected.as_ref()? {
-            Row::Project(path) | Row::Worktree { project: path, .. } => path,
+        let path = match self.fold.selected()? {
+            Row::Parent(path) | Row::Child { parent: path, .. } => path,
         };
         self.view.iter().find(|p| &p.path == path)
     }
@@ -77,88 +68,53 @@ impl Tree {
         let Some(project) = project.map(|p| p.path.clone()) else {
             return false;
         };
-        self.collapsed.remove(&project);
-        self.selected = Some(Row::Worktree {
-            project,
-            path: path.to_path_buf(),
-        });
-        self.reselect();
+        let row = Row::Child {
+            parent: project,
+            child: path.to_path_buf(),
+        };
+        self.fold.select(row, &self.groups());
         true
     }
 
     /// Folds or unfolds the selected project.
     pub fn toggle(&mut self) {
-        if let Some(Row::Project(path)) = &self.selected
-            && !self.collapsed.remove(path)
-        {
-            self.collapsed.insert(path.clone());
-        }
+        self.fold.toggle();
     }
 
     /// Selects the row drawn at (`x`, `y`); whether that was on a project's fold
     /// arrow, or `None` when no row is there.
     pub fn click(&mut self, x: u16, y: u16) -> Option<bool> {
-        if !self.inner.contains(Position::new(x, y)) {
-            return None;
-        }
-        let index = super::row_at(&self.heights(), self.list.offset(), self.inner, y)?;
-        self.select(index);
-        let project = matches!(self.selected, Some(Row::Project(_)));
-        Some(project && x < self.inner.x + 2)
+        self.fold.click(&self.groups(), &self.heights(), x, y)
     }
 
     pub fn up(&mut self) {
-        self.select(self.index.saturating_sub(1));
+        self.fold.up(&self.groups());
     }
 
     pub fn down(&mut self) {
-        self.select(self.index + 1);
+        self.fold.down(&self.groups());
     }
 
     /// On an expanded project, collapses it; on a worktree, moves to its project.
     pub fn collapse(&mut self) {
-        match self.selected.clone() {
-            Some(Row::Project(path)) => {
-                self.collapsed.insert(path);
-            }
-            Some(Row::Worktree { project, .. }) => {
-                self.selected = Some(Row::Project(project));
-                self.reselect();
-            }
-            None => {}
-        }
+        self.fold.collapse(&self.groups());
     }
 
     /// On a collapsed project, expands it; on an expanded one, moves to its first worktree.
     pub fn expand(&mut self) {
-        let Some(Row::Project(path)) = &self.selected else {
-            return;
-        };
-        if !self.collapsed.remove(path)
-            && let Some(Row::Worktree { .. }) = self.rows().get(self.index + 1)
-        {
-            self.select(self.index + 1);
-        }
+        self.fold.expand(&self.groups());
     }
 
-    /// Selects the row at `index`, or the last one past the end.
-    fn select(&mut self, index: usize) {
-        let rows = self.rows();
-        self.index = index.min(rows.len().saturating_sub(1));
-        self.selected = rows.get(self.index).cloned();
-    }
-
-    /// Finds the selected row again after the rows changed; when it is gone, the
-    /// row now at its place is selected.
-    fn reselect(&mut self) {
-        let rows = self.rows();
-        match rows
-            .iter()
-            .position(|row| Some(row) == self.selected.as_ref())
-        {
-            Some(index) => self.index = index,
-            None => self.select(self.index),
-        }
+    /// Each project's path and its worktrees', as drawn.
+    fn groups(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
+        (self.view.iter())
+            .map(|p| {
+                (
+                    p.path.clone(),
+                    p.worktrees.iter().map(|w| w.path.clone()).collect(),
+                )
+            })
+            .collect()
     }
 
     /// How many lines each row takes, as `render` draws them: a project's error too.
@@ -170,44 +126,25 @@ impl Tree {
                 .as_ref()
                 .map_or(0, |error| error.lines().count());
             heights.push(1 + error as u16);
-            if !self.collapsed.contains(&project.path) {
+            if !self.fold.is_collapsed(&project.path) {
                 heights.extend(project.worktrees.iter().map(|_| 1));
             }
         }
         heights
     }
 
-    fn rows(&self) -> Vec<Row> {
-        let mut rows = Vec::new();
-        for project in &self.view {
-            rows.push(Row::Project(project.path.clone()));
-            if !self.collapsed.contains(&project.path) {
-                rows.extend(project.worktrees.iter().map(|worktree| Row::Worktree {
-                    project: project.path.clone(),
-                    path: worktree.path.clone(),
-                }));
-            }
-        }
-        rows
-    }
-
     pub fn render(&mut self, frame: &mut Frame, area: Rect, block: Block, theme: &Theme) {
+        let width = block.inner(area).width as usize;
         let mut items = Vec::new();
         for project in &self.view {
-            let collapsed = self.collapsed.contains(&project.path);
+            let collapsed = self.fold.is_collapsed(&project.path);
             items.push(project_item(project, collapsed, theme));
             if !collapsed {
-                let width = block.inner(area).width as usize;
                 let worktrees = project.worktrees.iter();
                 items.extend(worktrees.map(|worktree| worktree_item(worktree, theme, width)));
             }
         }
-        self.inner = block.inner(area);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(theme.selected());
-        self.list.select(self.selected.as_ref().map(|_| self.index));
-        frame.render_stateful_widget(list, area, &mut self.list);
+        self.fold.render(frame, area, block, items, theme);
     }
 }
 
@@ -393,14 +330,14 @@ pub mod tests {
     }
 
     fn on(project: &str, path: &str) -> Option<Row> {
-        Some(Row::Worktree {
-            project: project.into(),
-            path: path.into(),
+        Some(Row::Child {
+            parent: project.into(),
+            child: path.into(),
         })
     }
 
     fn on_project(path: &str) -> Option<Row> {
-        Some(Row::Project(path.into()))
+        Some(Row::Parent(path.into()))
     }
 
     #[test]
@@ -458,7 +395,7 @@ pub mod tests {
         tree.collapse();
         tree.expand();
         assert_eq!(tree.selected().cloned(), on_project("/code/app"));
-        assert_eq!(tree.rows().len(), 6);
+        assert_eq!(tree.fold.rows(&tree.groups()).len(), 6);
         tree.expand();
         assert_eq!(tree.selected().cloned(), on("/code/app", "/code/app"));
         tree.expand();
@@ -488,7 +425,10 @@ pub mod tests {
             project("/code/web", &[]),
         ]);
         assert_eq!(tree.selected().cloned(), api);
-        assert_eq!(tree.index, 4);
+        // Its new place: the row above it is the one above it now
+        tree.up();
+        let fix = on("/code/app", "/code/app.worktrees/fix");
+        assert_eq!(tree.selected().cloned(), fix);
     }
 
     #[test]
