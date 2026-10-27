@@ -78,7 +78,7 @@ One binary:
  M-d dashboard  M-l/M-h next/previous session  M-j/M-k next/previous window; …
 ```
 
-- **Left, top:** projects (collapsible) → worktrees. Status (§8.4): a dim `●` for output in the last 10 s, a dim `○` otherwise, `·` no session; with agent support (milestone 3), `●` busy, `⚠` needs input, `○` idle. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
+- **Left, top:** projects (collapsible) → worktrees. Status (§8.4): a dim `●` for output in the last 10 s, a dim `○` otherwise, `·` no session; with agent support (milestone 3), `●` busy, `⚠` needs input, `○` idle. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. Its branch's PR, as a badge against the pane's right edge, aligned (5.3): `#42 ✓` while open, with its checks in the theme's colours, `✓` passed, `●` running, `✗` failed (none without checks); dim and with its state once it is not open, `#45 draft ✓`, `#40 merged`, `#41 closed`. A label too long for both is cut with `…`. No PR, or `gh` unavailable: no badge.
 - **Left, below:** every session the daemon has, each with its status, what runs in its current window (what it was started with: `claude`, `zsh`, `vi`), and the `project/worktree` it belongs to, or the folder it started in; under each, as a tree folded and unfolded as the projects are, its windows (its terminals): index, what runs in it, `*` on the current one. As tall as its sessions, up to a third of the column (scrolling past that), one line saying "No sessions" when there are none, and not drawn when a third of the column has no room for a row. The daemon's errors show on its bottom border.
 - **Right:** the shown terminal, titled `<session>:<index> <program>`, at the pane's size, which its program follows. When none is shown, what to press to show one.
 - **Widths.** The left column is 40 columns wide, or half the screen when it is narrower than 80; the terminal takes the rest.
@@ -127,7 +127,7 @@ All keys are configurable (§9). Custom actions run a shell command in a new ter
 projects/*.toml ─► projects
 git worktree list --porcelain (per project) ─► worktrees
 the daemon's list (sessions, their terminals, activity) ─► session and status per worktree (matched by path)
-gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup,url
+gh pr list --state all --limit 100 --json number,headRefName,state,isDraft,isCrossRepository,statusCheckRollup
   (per project)                              ─► PR badge per branch: the open PR, else the newest; none from forks
                                                 checks: ✗ any failed, else ● any running, else ✓
 the daemon's stream for the shown terminal: its screen, then its output
@@ -212,6 +212,9 @@ base = "main"
   error      = "#ff6188"
   input      = "#fc9867"  # ⚠ needs input
   busy       = "#a9dc76"  # ● busy
+  passed     = "#a9dc76"  # a PR's checks: ✓ passed
+  pending    = "#ffd866"  # ● running
+  failed     = "#ff6188"  # ✗ failed
   tag        = "#ab9df2"  # the `repo` tag
   key        = "#78dce8"  # keys in the hint bar
   ```

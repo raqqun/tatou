@@ -18,6 +18,10 @@ error = "red"
 # Statuses: ⚠ needs input, ● busy
 input = "yellow"
 # busy = "reset"
+# A pull request's checks: ✓ all passed, ● some running, ✗ some failed
+passed = "green"
+pending = "yellow"
+failed = "red"
 # The `repo` tag of a project's main worktree
 tag = "cyan"
 # Keys in the hint bar
