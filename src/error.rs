@@ -43,6 +43,10 @@ pub enum Error {
     #[error("{}: git lists no worktree", path.display())]
     NoWorktree { path: PathBuf },
 
+    /// `gh pr list` printed something that is not the JSON it was asked for.
+    #[error("cannot read gh's pull requests: {0}")]
+    PrList(String),
+
     /// The daemon said no, or cannot be reached; its own message.
     #[error("{0}")]
     Daemon(String),
