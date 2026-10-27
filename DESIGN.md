@@ -275,9 +275,24 @@ Milestone 2 is already a useful tool. `MILESTONE.md` breaks these milestones int
 6. **`tatou view` in a split of the user's terminal.** The dashboard in one split of Ghostty (which runs natively on Linux too), and in the next a thin `tatou view` that connects that split straight to the agent the dashboard selects, passing bytes untouched: the split is a real terminal, so everything works as in the terminal itself, and side by side. Least code of all. Costs: two splits rather than one window, set up by the user, the focus moved between them with the terminal's own keys, and its scrollback starting at each switch, as the daemon replays the agent's screen into it.
 7. **A native GUI app**, the closest to supacode: one window, a sidebar and an embedded terminal, with Zed's GPUI and `gpui_terminal` (on `alacritty_terminal`), macOS and Linux. A rewrite of the whole UI, on a pre-1.0 framework; the daemon, git, gh and config code carry over.
 
-Leaning, unconfirmed: 6 for the least to maintain, or 2; 5 or 7 if everything must be in one window. Either way, a spike first, as #108 was for 2.19.
+Leaning, unconfirmed: 6 for the least to maintain, or 2; 5 or 7 if everything must be in one window, on `alacritty_terminal` rather than libghostty-vt for now (see below). Either way, a spike first, as #108 was for 2.19.
 
 **What was known of the libraries on 2026-10-26.** The full libghostty supacode embeds (terminal, renderer and a macOS view) exists for macOS only; a proposal to port its embedding API to Linux was declined in March 2026, the effort moving to libghostty-vt, with a GTK widget library "within consideration", not committed ([discussion #11722](https://github.com/ghostty-org/ghostty/discussions/11722)). libghostty-vt is the emulation core alone, for macOS, Linux, Windows and WebAssembly, with a C and Zig API not yet stable and no tagged release ([Ghostty](https://github.com/ghostty-org/ghostty), [C API overview](https://ghostty-org-ghostty.mintlify.app/api/overview)). Rust: [`libghostty-vt`](https://lib.rs/crates/libghostty-vt), a safe wrapper by Ghostty maintainers ([libghostty-rs](https://github.com/uzaaft/libghostty-rs)), 0.2.2, changing; [`ghostty-vt-rs`](https://github.com/nklmilojevic/ghostty-vt-rs) ships prebuilt static libraries for macOS and Linux, without Zig. GUI widgets build on [`alacritty_terminal`](https://docs.rs/crate/alacritty_terminal/^0.15.0): [`gpui_terminal`](https://docs.rs/gpui-terminal) (macOS and Linux, pre-1.0), and the earlier [`iced_term`](https://docs.rs/crate/iced_term/latest) and [`egui_term`](https://docs.rs/crate/egui_term/latest).
+
+**`alacritty_terminal` or libghostty-vt** (compared on 2026-10-26, #125), for option 5 or 7:
+
+| | `alacritty_terminal` | libghostty-vt (Rust `libghostty-vt`) |
+|---|---|---|
+| Version | 0.26.0 | 0.2.2 (2026-09-28); the C API has no tagged release, and is called unstable |
+| As a library | years of releases; Zed's terminal is built on it | new; breaking changes expected |
+| Build | pure Rust, a plain dependency | its build script clones Ghostty at a pinned commit and builds it with Zig |
+| Packaging | nothing more (`cargo install`, Homebrew, AUR, `.deb`) | every build needs Zig and the network: CI, `cargo install`, each package |
+| Threads | movable between threads: fits the daemon as it is | neither `Send` nor `Sync`: one thread per terminal, the daemon reworked |
+| Emulation | reflow, scrollback, wide characters, selection, search | the same, and prompt marks (OSC 133), kitty graphics, key and mouse encoders |
+
+With `alacritty_terminal`, `reflow.rs`, the `vt100` workarounds and the 4 × 20 floor would go, since it reflows by itself. `term.rs` would stay (its key and mouse encoding are Alacritty the app's, not the library's), and so would tatou's OSC 133 handling, which it does not know. A drawing of its screen into ratatui (`tui-term` draws `vt100`'s only) and the screen replayed on attach would be new code. libghostty-vt is the better emulation, but its cost is in the build and the daemon, and in following an API not yet stable.
+
+So `alacritty_terminal` is the more reliable and the cheaper now; libghostty-vt is worth looking at again once its C API is stable and tagged. Neither removes what makes a terminal inside a terminal costly (the mouse, selection, scrollback and the two screens kept in step stay tatou's), and option 6 needs neither ([`alacritty_terminal`](https://crates.io/crates/alacritty_terminal), [`libghostty-vt`](https://lib.rs/crates/libghostty-vt), [`libghostty-vt-sys`'s build](https://github.com/uzaaft/libghostty-rs)).
 
 ### 12.2 Sessions across restarts
 
