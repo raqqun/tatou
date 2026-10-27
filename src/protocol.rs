@@ -20,8 +20,6 @@ pub enum Request {
         name: String,
         path: PathBuf,
         command: Option<String>,
-        /// The session's agent, which its status follows.
-        agent: bool,
     },
     /// Ends the terminal and what runs in it.
     Kill { terminal: String },
@@ -69,10 +67,7 @@ pub struct Session {
     pub name: String,
     /// The folder it was started in: the worktree it belongs to.
     pub path: PathBuf,
-    /// Its agent's terminal.
-    pub agent: Option<String>,
-    /// When its agent last printed, or any terminal without one, in seconds since
-    /// the Unix epoch.
+    /// When any of its terminals last printed, in seconds since the Unix epoch.
     pub activity: u64,
     /// Its terminals, in the order they were opened.
     pub windows: Vec<Window>,
@@ -129,14 +124,12 @@ impl Request {
                 name,
                 path,
                 command,
-                agent,
             } => {
                 p.u8(2);
                 p.option(session.as_deref());
                 p.str(name);
                 p.str(&path.to_string_lossy());
                 p.option(command.as_deref());
-                p.u8(u8::from(*agent));
             }
             Request::Kill { terminal } => {
                 p.u8(3);
@@ -183,7 +176,6 @@ impl Request {
                 name: r.str()?,
                 path: PathBuf::from(r.str()?),
                 command: r.option()?,
-                agent: r.u8()? == 1,
             },
             3 => Request::Kill { terminal: r.str()? },
             4 => Request::KillSession { session: r.str()? },
@@ -220,7 +212,6 @@ impl Reply {
                     p.str(&session.id);
                     p.str(&session.name);
                     p.str(&session.path.to_string_lossy());
-                    p.option(session.agent.as_deref());
                     p.u64(session.activity);
                     p.u32(session.windows.len() as u32);
                     for window in &session.windows {
@@ -264,7 +255,6 @@ impl Reply {
                     let id = r.str()?;
                     let name = r.str()?;
                     let path = PathBuf::from(r.str()?);
-                    let agent = r.option()?;
                     let activity = r.u64()?;
                     let mut windows = Vec::new();
                     for _ in 0..r.u32()? {
@@ -279,7 +269,6 @@ impl Reply {
                         id,
                         name,
                         path,
-                        agent,
                         activity,
                         windows,
                     });
@@ -417,14 +406,12 @@ mod tests {
             name: "app-fix".into(),
             path: "/code/app wt/fix".into(),
             command: Some("claude --flag 'é'".into()),
-            agent: true,
         });
         round_trip_request(Request::Spawn {
             session: None,
             name: "app-main".into(),
             path: "/code/app".into(),
             command: None,
-            agent: false,
         });
         round_trip_request(Request::Kill {
             terminal: "%3".into(),
@@ -451,7 +438,6 @@ mod tests {
             id: "$1".into(),
             name: "app-fix".into(),
             path: "/code/app.worktrees/fix".into(),
-            agent: Some("%1".into()),
             activity: 1_792_788_783,
             windows: vec![
                 Window {

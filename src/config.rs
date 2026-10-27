@@ -18,18 +18,10 @@ use crate::theme::{self, Theme};
 const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 # Every setting is optional; the values shown are the defaults.
 
-# Agent started in new worktrees, one of the agents below
-# default_agent = "claude"
-
 # Colours of the dashboard: a built-in theme, terminal (the terminal's own
 # palette) or monokai-pro, or one of yours, a file in themes/ next to this one.
 # `T` in the dashboard chooses one and writes it on this line
 # theme = "terminal"
-
-# Commands that start an agent; added to the built-in claude and codex, or
-# replacing one of them when the name is the same. Shells are `t`'s job
-# [agents]
-# aider = "aider"
 
 # Override any default key by action name
 # [keys]
@@ -54,9 +46,6 @@ const TEMPLATE: &str = r#"# tatou configuration: https://github.com/raqqun/tatou
 pub struct Config {
     /// Where it was loaded from, shown in the UI's empty state.
     pub path: PathBuf,
-    pub default_agent: String,
-    /// Built-in agents merged with the user's `[agents]`.
-    pub agents: BTreeMap<String, String>,
     pub keys: Keys,
     pub theme: Theme,
     /// From the files in `projects/`, by file name.
@@ -95,14 +84,14 @@ pub struct Project {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
-    default_agent: Option<String>,
-    #[serde(default)]
-    agents: BTreeMap<String, String>,
     #[serde(default)]
     keys: Keys,
     theme: Option<String>,
     /// Where projects were before they moved to `projects/`; an error with a hint.
     project: Option<toml::Value>,
+    /// The agents' settings before agents were removed; errors with a hint.
+    default_agent: Option<toml::Value>,
+    agents: Option<toml::Value>,
 }
 
 /// A file in `projects/`.
@@ -368,7 +357,7 @@ pub fn save_theme(path: &Path, name: &str) -> Result<()> {
 
 /// `text` with its `theme` line set to `name`: the setting's line, else the
 /// template's commented one, else a new first line. Only lines before the first
-/// table are settings of `config.toml` itself; a `theme` under `[agents]` is an agent.
+/// table are settings of `config.toml` itself; a `theme` under `[keys]` is an action.
 fn with_theme(text: &str, name: &str) -> String {
     let line = format!("theme = {}\n", toml::Value::String(name.to_string()));
     let mut lines: Vec<&str> = text.split_inclusive('\n').collect();
@@ -424,19 +413,12 @@ fn parse(text: &str, path: &Path) -> std::result::Result<Config, String> {
         ));
     }
 
-    // No shell among them: `t` opens shells, `s` and `n` start agents
-    let mut agents = BTreeMap::from([
-        ("claude".to_string(), "claude".to_string()),
-        ("codex".to_string(), "codex".to_string()),
-    ]);
-    agents.extend(file.agents);
-    let default_agent = file.default_agent.unwrap_or_else(|| "claude".into());
-    if !agents.contains_key(&default_agent) {
-        let names: Vec<&str> = agents.keys().map(String::as_str).collect();
-        return Err(format!(
-            "default_agent = \"{default_agent}\" is not one of the agents: {}",
-            names.join(", ")
-        ));
+    if file.default_agent.is_some() || file.agents.is_some() {
+        return Err(
+            "default_agent and [agents] are no longer read: tatou starts shells, \
+                    in which you run any agent; remove them from config.toml"
+                .to_string(),
+        );
     }
 
     let name = file.theme.as_deref().unwrap_or(theme::DEFAULT);
@@ -444,8 +426,6 @@ fn parse(text: &str, path: &Path) -> std::result::Result<Config, String> {
 
     Ok(Config {
         path: path.to_path_buf(),
-        default_agent,
-        agents,
         keys: file.keys,
         theme,
         projects: Vec::new(),
@@ -596,11 +576,6 @@ mod tests {
     fn an_empty_file_gives_the_defaults() {
         let config = parse_ok("");
         assert_eq!(config.path, PathBuf::from("/c/config.toml"));
-        assert_eq!(config.default_agent, "claude");
-        assert_eq!(
-            config.agents.keys().collect::<Vec<_>>(),
-            ["claude", "codex"]
-        );
         assert_eq!(config.keys, Keys::default());
         assert_eq!(config.theme, theme::terminal());
         assert_eq!(config.projects, []);
@@ -615,12 +590,7 @@ mod tests {
     fn the_design_example_parses() {
         let config = parse_ok(
             r#"
-            default_agent = "claude"
             theme = "monokai-pro"
-
-            [agents]
-            claude = "claude"
-            codex  = "codex"
 
             [keys]
             jump = "Enter"
@@ -658,7 +628,7 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_errors_with_their_line() {
-        let message = parse_err("default_agent = \"claude\"\nshow_hidden = true\n");
+        let message = parse_err("theme = \"terminal\"\nshow_hidden = true\n");
         assert!(message.contains("line 2"), "{message}");
         assert!(message.contains("show_hidden"), "{message}");
 
@@ -716,30 +686,17 @@ mod tests {
     }
 
     #[test]
-    fn agents_are_merged_with_the_built_in_ones() {
-        let config = parse_ok("[agents]\naider = \"aider\"\nclaude = \"claude --verbose\"\n");
-        assert_eq!(config.agents["aider"], "aider");
-        assert_eq!(config.agents["claude"], "claude --verbose");
-        assert_eq!(config.agents.len(), 3);
-        assert!(!config.agents.contains_key("shell"), "no built-in shell");
-    }
-
-    #[test]
-    fn a_shell_can_still_be_an_agent_of_ones_own() {
-        let config = parse_ok("default_agent = \"shell\"\n[agents]\nshell = \"$SHELL\"\n");
-        assert_eq!(config.default_agent, "shell");
-        assert_eq!(config.agents["shell"], "$SHELL");
-    }
-
-    #[test]
-    fn default_agent_must_be_an_agent() {
-        let message = parse_err("default_agent = \"aider\"\n");
-        assert!(
-            message.contains("not one of the agents: claude, codex"),
-            "{message}"
-        );
-        let config = parse_ok("default_agent = \"aider\"\n[agents]\naider = \"aider\"\n");
-        assert_eq!(config.default_agent, "aider");
+    fn agents_in_config_toml_are_errors_with_a_hint() {
+        for text in [
+            "default_agent = \"claude\"\n",
+            "[agents]\naider = \"aider\"\n",
+        ] {
+            let message = parse_err(text);
+            assert!(
+                message.starts_with("default_agent and [agents] are no longer read"),
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -865,17 +822,17 @@ mod tests {
         let config = load_from(&path, Some(Path::new("/home/me"))).unwrap();
         assert_eq!(config.projects, []);
 
-        fs::write(&path, "default_agent = \"codex\"\n").unwrap();
+        fs::write(&path, "theme = \"terminal\"\n").unwrap();
         write_template(&path).unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text, "default_agent = \"codex\"\n");
+        assert_eq!(text, "theme = \"terminal\"\n");
     }
 
     #[test]
     fn an_invalid_file_is_a_config_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "default_agent = maybe\n").unwrap();
+        fs::write(&path, "theme = maybe\n").unwrap();
         let err = load_from(&path, None).unwrap_err();
         assert!(matches!(err, Error::Config { path: ref p, .. } if *p == path));
         assert!(err.to_string().contains("line 1"), "{err}");
@@ -980,10 +937,10 @@ mod tests {
 
     #[test]
     fn the_theme_line_is_replaced_and_nothing_else() {
-        let text = "# mine\ndefault_agent = \"codex\"\ntheme = \"terminal\"  # old\n\n[agents]\n";
+        let text = "# mine\ntheme = \"terminal\"  # old\n\n[keys]\ntheme = \"T\"\n";
         assert_eq!(
             with_theme(text, "monokai-pro"),
-            "# mine\ndefault_agent = \"codex\"\ntheme = \"monokai-pro\"\n\n[agents]\n"
+            "# mine\ntheme = \"monokai-pro\"\n\n[keys]\ntheme = \"T\"\n"
         );
     }
 
@@ -998,7 +955,7 @@ mod tests {
 
     #[test]
     fn without_a_theme_line_one_is_added_first() {
-        let text = "themes = 1\n# theme: mine\n[agents]\ntheme = \"theme\"\n# theme = \"x\"\n";
+        let text = "themes = 1\n# theme: mine\n[keys]\ntheme = \"T\"\n# theme = \"x\"\n";
         assert_eq!(
             with_theme(text, "mine"),
             format!("theme = \"mine\"\n{text}"),
@@ -1006,8 +963,8 @@ mod tests {
         );
         assert_eq!(with_theme("", "mine"), "theme = \"mine\"\n");
         assert_eq!(
-            with_theme("default_agent = \"claude\"", "a\"b"),
-            "theme = 'a\"b'\ndefault_agent = \"claude\""
+            with_theme("[keys]\njump = \"Enter\"", "a\"b"),
+            "theme = 'a\"b'\n[keys]\njump = \"Enter\""
         );
     }
 
@@ -1015,10 +972,10 @@ mod tests {
     fn saving_the_theme_writes_the_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "default_agent = \"codex\"\n").unwrap();
+        fs::write(&path, "[keys]\njump = \"Enter\"\n").unwrap();
         save_theme(&path, "monokai-pro").unwrap();
         let text = fs::read_to_string(&path).unwrap();
-        assert_eq!(text, "theme = \"monokai-pro\"\ndefault_agent = \"codex\"\n");
+        assert_eq!(text, "theme = \"monokai-pro\"\n[keys]\njump = \"Enter\"\n");
         let config = load_from(&path, None).unwrap();
         assert_eq!(config.theme.name, "monokai-pro");
     }

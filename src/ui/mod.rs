@@ -22,9 +22,7 @@ use ratatui::widgets::{Block, Paragraph, Wrap};
 use tui_term::vt100;
 use tui_term::widget::PseudoTerminal;
 
-use crate::actions::{
-    self, EDITOR, End, NewWorktree, Program, RemoveWorktree, RestartAgent, StartAgent, Task,
-};
+use crate::actions::{self, EDITOR, End, NewWorktree, Program, RemoveWorktree, Task};
 use crate::client::{Client, Stream};
 use crate::config::{self, Config};
 use crate::error::{Error, Result};
@@ -72,9 +70,8 @@ const WHEEL_LINES: isize = 3;
 const SCROLLBACK: usize = crate::daemon::SCROLLBACK;
 
 /// The worktree actions, hidden from the hint bar on a project row.
-const WORKTREE_ACTIONS: [Action; 5] = [
+const WORKTREE_ACTIONS: [Action; 4] = [
     Action::Jump,
-    Action::StartAgent,
     Action::Shell,
     Action::OpenPr,
     Action::RemoveWorktree,
@@ -170,10 +167,6 @@ enum Purpose {
     NewWorktree {
         project: PathBuf,
     },
-    /// The agent to start in a worktree, or to restart in its session.
-    Agent(AgentFor),
-    /// The restart to run once confirmed.
-    Restart(RestartAgent),
     /// The removal to run once confirmed, forced or not.
     Remove(RemoveWorktree),
     /// The window or session to end once confirmed.
@@ -186,17 +179,6 @@ enum Purpose {
     },
     /// Only to read, e.g. a command's output.
     Notice,
-}
-
-/// The worktree `s` was pressed on.
-struct AgentFor {
-    path: PathBuf,
-    /// Its label, for the dialogs and progress.
-    name: String,
-    /// The session name to give a new session.
-    session_name: String,
-    /// Its session's id and agent pane, when it has a session.
-    session: Option<(String, Option<String>)>,
 }
 
 struct App {
@@ -784,7 +766,6 @@ impl App {
             Action::Expand if worktrees => self.tree.expand(),
             Action::Jump if worktrees => self.jump(),
             Action::NewWorktree if worktrees => self.open_new_worktree(),
-            Action::StartAgent if worktrees => self.choose_agent(),
             Action::Shell if worktrees => self.open(None, false),
             Action::Edit if worktrees => self.open(Some(EDITOR), true),
             Action::RemoveWorktree if worktrees => self.confirm_remove(),
@@ -817,14 +798,6 @@ impl App {
         match (open.purpose, open.dialog) {
             (Purpose::NewWorktree { project }, Dialog::Form(form)) => {
                 self.create_worktree(project, form);
-            }
-            (Purpose::Agent(target), Dialog::Choice(choice)) => {
-                if let Some(agent) = choice.selected() {
-                    self.agent_chosen(target, agent);
-                }
-            }
-            (Purpose::Restart(restart), Dialog::Confirm(_)) => {
-                self.tasks.push(Task::RestartAgent(restart));
             }
             (Purpose::Remove(remove), Dialog::Confirm(_)) => {
                 self.tasks.push(Task::RemoveWorktree(remove));
@@ -1001,63 +974,8 @@ impl App {
         }));
     }
 
-    /// `s` on a worktree: which agent, `default_agent` chosen first.
-    fn choose_agent(&mut self) {
-        let (Some(worktree), Some(project), Ok(config)) = (
-            self.tree.selected_worktree(),
-            self.tree.selected_project(),
-            &self.config,
-        ) else {
-            return;
-        };
-        let name = worktree.label().to_string();
-        let target = AgentFor {
-            path: worktree.path.clone(),
-            session_name: model::session_name(&project.name, &name),
-            session: (worktree.session.as_ref()).map(|s| (s.id.clone(), s.agent_pane.clone())),
-            name,
-        };
-        let agents = config.agents.keys().cloned().collect();
-        let title = format!("Agent for {}", target.name);
-        let choice = Choice::new(&title, agents, &config.default_agent);
-        self.dialog = Some(Open {
-            dialog: Dialog::Choice(choice),
-            purpose: Purpose::Agent(target),
-        });
-    }
-
-    /// Starts `agent` for a worktree without a session; with one, asks first,
-    /// as restarting ends the agent running there.
-    fn agent_chosen(&mut self, target: AgentFor, agent: &str) {
-        let Some(command) = self.config.as_ref().ok().and_then(|c| c.agents.get(agent)) else {
-            return;
-        };
-        let command = command.clone();
-        let Some((session, pane)) = target.session else {
-            self.tasks.push(Task::StartAgent(StartAgent {
-                name: target.name,
-                path: target.path,
-                session: target.session_name,
-                command,
-            }));
-            return;
-        };
-        let question = format!("Restart {agent} in {}?", target.name);
-        let restart = RestartAgent {
-            name: target.name,
-            path: target.path,
-            session,
-            pane,
-            command,
-        };
-        self.dialog = Some(Open {
-            dialog: Dialog::Confirm(Confirm::new("Restart the agent", &question, true)),
-            purpose: Purpose::Restart(restart),
-        });
-    }
-
-    /// The form for a new worktree in the selected row's project: name, base and
-    /// agent. On a worktree, the base is its branch; on the project, or a detached
+    /// The form for a new worktree in the selected row's project: name and base.
+    /// On a worktree, the base is its branch; on the project, or a detached
     /// worktree, the project's `base`, else its remote's default branch
     /// (`origin/main`), else the branch checked out in its main worktree.
     fn open_new_worktree(&mut self) {
@@ -1077,12 +995,7 @@ impl App {
             .or_else(|| view.remote_default.clone())
             .or_else(|| main_branch.and_then(|w| w.branch.clone()))
             .unwrap_or_default();
-        let agents = config.agents.keys().cloned().collect();
-        let fields = vec![
-            Field::text("Name", ""),
-            Field::text("Base", &base),
-            Field::choice("Agent", agents, &config.default_agent),
-        ];
+        let fields = vec![Field::text("Name", ""), Field::text("Base", &base)];
         let form = Form::new(&format!("New worktree in {}", view.name), fields);
         let purpose = Purpose::NewWorktree {
             project: view.path.clone(),
@@ -1110,13 +1023,13 @@ impl App {
         });
     }
 
-    /// What to create for the form's name, base and agent, or why it cannot be.
+    /// What to create for the form's name and base, or why it cannot be.
     fn new_worktree_request(
         &self,
         project: &Path,
         values: &[String],
     ) -> std::result::Result<NewWorktree, String> {
-        let [name, base, agent] = values else {
+        let [name, base] = values else {
             return Err("The form has the wrong fields".to_string());
         };
         let (name, base) = (name.trim(), base.trim());
@@ -1129,9 +1042,6 @@ impl App {
         let Some(settings) = config.projects.iter().find(|p| p.path == project) else {
             return Err(format!("{} is no longer a project", project.display()));
         };
-        let Some(command) = config.agents.get(agent) else {
-            return Err(format!("No agent named {agent}"));
-        };
         let project_name = project.file_name().unwrap_or_default().to_string_lossy();
         Ok(NewWorktree {
             project: project.to_path_buf(),
@@ -1140,7 +1050,6 @@ impl App {
             path: git::worktree_path(project, name, settings.worktree_dir.as_deref()),
             on_create: settings.on_create.clone(),
             session: model::session_name(&project_name, name),
-            command: command.clone(),
         })
     }
 
@@ -1159,7 +1068,7 @@ impl App {
                 let terminal = terminal.clone();
                 self.show(&terminal);
             }
-            // Starting an agent comes with `s` (#22)
+            // `t` opens a shell there, `n` a new worktree with one
             Some(worktree) => {
                 self.message = Some(format!("No session for {} yet", worktree.label()));
             }
@@ -1809,7 +1718,6 @@ mod tests {
         app_project.worktrees[1].session = Some(SessionView {
             id: "$3".into(),
             name: "app-fix".into(),
-            agent_pane: None,
             current: Some("%7".into()),
         });
         showing(vec![app_project])
@@ -1868,7 +1776,7 @@ mod tests {
         press(&mut app, KeyCode::Char('j'));
         assert_eq!(
             hint_line(&mut app),
-            "n new  s start agent  t shell  e edit  p PR  T theme  ? help  q quit",
+            "n new  t shell  e edit  p PR  T theme  ? help  q quit",
             "no session, and the main worktree: no remove"
         );
         press(&mut app, KeyCode::Char('j'));
@@ -2022,7 +1930,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         press(&mut app, KeyCode::Char('n'));
         assert_eq!(
             form_values(&mut app),
-            ["", "main", "claude"],
+            ["", "main"],
             "the main worktree's branch"
         );
         let lines = screen(&mut app, 80, 12);
@@ -2033,11 +1941,7 @@ unknown field `popop`, expected one of `popup`, `back`";
 
         let mut app = with_a_project(Some("develop"));
         press(&mut app, KeyCode::Char('n'));
-        assert_eq!(
-            form_values(&mut app),
-            ["", "develop", "claude"],
-            "the project's base"
-        );
+        assert_eq!(form_values(&mut app), ["", "develop"], "the project's base");
     }
 
     /// The Base the `n` form starts with, with the selection `moves` rows down from
@@ -2099,7 +2003,6 @@ unknown field `popop`, expected one of `popup`, `back`";
             path: "/code/app.worktrees/fix-login".into(),
             on_create: Some("npm install".into()),
             session: "app-fix/login".into(),
-            command: "claude".into(),
         };
         assert_eq!(app.tasks, [Task::NewWorktree(expected)]);
         // Busy: typing changes nothing
@@ -2159,7 +2062,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(selected, Some(path));
         assert!(app.select_when_listed.is_none());
 
-        // Progress done, and the agent shown, with the focus
+        // Progress done, and the shell shown, with the focus
         event(&mut app, actions::Event::Started("%1".into()));
         assert_eq!(shown(&app), Some("%1"));
         assert!(
@@ -2200,284 +2103,11 @@ unknown field `popop`, expected one of `popup`, `back`";
         assert_eq!(hint_line(&mut app), "app: fatal: not a git repository");
     }
 
-    /// `with_a_session`, the `fix` worktree selected.
-    fn on_fix_with_a_session() -> App {
-        let mut app = with_a_session();
-        app.config = Ok(test_config());
-        press(&mut app, KeyCode::Char('j'));
-        press(&mut app, KeyCode::Char('j'));
-        app
-    }
-
-    #[test]
-    fn s_asks_which_agent_then_starts_it_without_a_session() {
-        let mut app = with_a_session();
-        app.config = Ok(test_config());
-        press(&mut app, KeyCode::Char('j'));
-        press(&mut app, KeyCode::Char('s'));
-        let lines = screen(&mut app, 80, 12);
-        assert!(
-            lines.iter().any(|l| l.contains("┌ Agent for main ")),
-            "{lines:?}"
-        );
-        // default_agent is chosen first: Enter keeps it
-        press(&mut app, KeyCode::Char('j'));
-        press(&mut app, KeyCode::Enter);
-        let expected = StartAgent {
-            name: "main".into(),
-            path: "/code/app".into(),
-            session: "app-main".into(),
-            command: "codex".into(),
-        };
-        assert_eq!(app.tasks, [Task::StartAgent(expected)]);
-        assert!(app.dialog.is_none());
-    }
-
-    #[test]
-    fn s_on_a_session_confirms_before_restarting() {
-        let mut app = on_fix_with_a_session();
-        press(&mut app, KeyCode::Char('s'));
-        press(&mut app, KeyCode::Enter);
-        let lines = screen(&mut app, 80, 12);
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("Restart claude in fix? [Y/n]")),
-            "{lines:?}"
-        );
-        assert_eq!(app.tasks, [], "not before it is confirmed");
-        press(&mut app, KeyCode::Enter);
-        let expected = RestartAgent {
-            name: "fix".into(),
-            path: "/code/app.worktrees/fix".into(),
-            session: "$3".into(),
-            pane: None,
-            command: "claude".into(),
-        };
-        assert_eq!(app.tasks, [Task::RestartAgent(expected)]);
-
-        // No, or Esc: nothing restarts
-        let mut app = on_fix_with_a_session();
-        press(&mut app, KeyCode::Char('s'));
-        press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Char('n'));
-        assert_eq!(app.tasks, []);
-        assert!(app.dialog.is_none());
-    }
-
-    #[test]
-    fn s_and_n_offer_agents_only() {
-        let mut app = with_a_session();
-        app.config = Ok(test_config());
-        press(&mut app, KeyCode::Char('j'));
-        press(&mut app, KeyCode::Char('s'));
-        let lines = screen(&mut app, 80, 14).join("\n");
-        assert!(
-            lines.contains("│claude") && lines.contains("│codex"),
-            "{lines}"
-        );
-        assert!(!lines.contains("shell"), "{lines}");
-        press(&mut app, KeyCode::Esc);
-
-        press(&mut app, KeyCode::Char('n'));
-        let mut agents = Vec::new();
-        for _ in 0..3 {
-            agents.push(form_values(&mut app)[2].clone());
-            press(&mut app, KeyCode::Tab);
-            press(&mut app, KeyCode::Tab);
-            press(&mut app, KeyCode::Right);
-            press(&mut app, KeyCode::Tab);
-        }
-        assert_eq!(agents, ["claude", "codex", "claude"], "two agents, round");
-    }
-
-    #[test]
-    fn s_does_nothing_on_a_project() {
-        let mut app = with_a_session();
-        app.config = Ok(test_config());
-        press(&mut app, KeyCode::Char('s'));
-        assert!(app.dialog.is_none());
-    }
-
-    #[test]
-    fn t_opens_a_shell_in_the_worktree() {
-        let mut app = on_fix_with_a_session();
-        press(&mut app, KeyCode::Char('t'));
-        press(&mut app, KeyCode::Char('k'));
-        press(&mut app, KeyCode::Char('t'));
-        let expected = [
-            Task::Program(Program {
-                name: "fix".into(),
-                path: "/code/app.worktrees/fix".into(),
-                session: Some("$3".into()),
-                session_name: "app-fix".into(),
-                command: None,
-            }),
-            Task::Program(Program {
-                name: "main".into(),
-                path: "/code/app".into(),
-                session: None,
-                session_name: "app-main".into(),
-                command: None,
-            }),
-        ];
-        assert_eq!(app.tasks, expected);
-        // Not on a project
-        press(&mut app, KeyCode::Char('k'));
-        press(&mut app, KeyCode::Char('t'));
-        assert_eq!(app.tasks.len(), 2);
-    }
-
-    #[test]
-    fn e_opens_the_editor_in_the_worktree_or_the_projects_repository() {
-        let mut app = on_fix_with_a_session();
-        press(&mut app, KeyCode::Char('e'));
-        // On the project: its main worktree
-        press(&mut app, KeyCode::Char('k'));
-        press(&mut app, KeyCode::Char('k'));
-        press(&mut app, KeyCode::Char('e'));
-        let expected = [
-            Task::Program(Program {
-                name: "fix".into(),
-                path: "/code/app.worktrees/fix".into(),
-                session: Some("$3".into()),
-                session_name: "app-fix".into(),
-                command: Some(EDITOR.into()),
-            }),
-            Task::Program(Program {
-                name: "main".into(),
-                path: "/code/app".into(),
-                session: None,
-                session_name: "app-main".into(),
-                command: Some(EDITOR.into()),
-            }),
-        ];
-        assert_eq!(app.tasks, expected);
-        assert!(hint_line(&mut app).contains("e edit"), "on a project");
-        // Not from the sessions' pane
-        press(&mut app, KeyCode::Tab);
-        press(&mut app, KeyCode::Char('e'));
-        assert_eq!(app.tasks.len(), 2);
-    }
-
-    #[test]
-    fn d_asks_before_removing_and_no_is_the_default() {
-        let mut app = on_fix_with_a_session();
-        press(&mut app, KeyCode::Char('d'));
-        let lines = screen(&mut app, 100, 14).join("\n");
-        assert!(
-            lines.contains("Remove the worktree /code/app.worktrees/fix (branch fix)? Its session"),
-            "{lines}"
-        );
-        assert!(
-            lines.contains("app-fix is closed; the branch stays. [y/N]"),
-            "{lines}"
-        );
-        press(&mut app, KeyCode::Enter);
-        assert_eq!(app.tasks, [], "Enter is no");
-        assert!(app.dialog.is_none());
-
-        press(&mut app, KeyCode::Char('d'));
-        press(&mut app, KeyCode::Char('y'));
-        let expected = RemoveWorktree {
-            name: "fix".into(),
-            project: "/code/app".into(),
-            path: "/code/app.worktrees/fix".into(),
-            session: Some("$3".into()),
-            force: false,
-        };
-        assert_eq!(app.tasks, [Task::RemoveWorktree(expected)]);
-    }
-
-    #[test]
-    fn the_main_worktree_is_never_offered_for_removal() {
-        let mut app = with_a_session();
-        app.config = Ok(test_config());
-        press(&mut app, KeyCode::Char('j'));
-        assert!(
-            !hint_line(&mut app).contains("d remove"),
-            "{}",
-            hint_line(&mut app)
-        );
-        press(&mut app, KeyCode::Char('d'));
-        assert!(app.dialog.is_none());
-        assert_eq!(
-            hint_line(&mut app),
-            "main is the main worktree: it cannot be removed"
-        );
-        press(&mut app, KeyCode::Char('j'));
-        assert!(hint_line(&mut app).contains("d remove"), "a linked one");
-    }
-
-    #[test]
-    fn forcing_is_a_second_explicit_question() {
-        let mut app = on_fix_with_a_session();
-        let remove = RemoveWorktree {
-            name: "fix".into(),
-            project: "/code/app".into(),
-            path: "/code/app.worktrees/fix".into(),
-            session: None,
-            force: false,
-        };
-        let why = "fatal: '/code/app.worktrees/fix' contains modified or untracked files, use --force to delete it";
-        let refused = || actions::Event::RemoveRefused {
-            remove: remove.clone(),
-            why: why.into(),
-        };
-        event(&mut app, refused());
-        let lines = screen(&mut app, 120, 14).join("\n");
-        assert!(lines.contains("git refused to remove fix"), "{lines}");
-        assert!(
-            lines.contains("contains modified or untracked files"),
-            "{lines}"
-        );
-        assert!(
-            lines.contains("Force the removal? Uncommitted changes and untracked files in it are"),
-            "{lines}"
-        );
-        press(&mut app, KeyCode::Enter);
-        assert_eq!(app.tasks, [], "never forced by default");
-
-        event(&mut app, refused());
-        press(&mut app, KeyCode::Char('y'));
-        let forced = RemoveWorktree {
-            force: true,
-            ..remove.clone()
-        };
-        assert_eq!(app.tasks, [Task::RemoveWorktree(forced)]);
-    }
-
-    #[test]
-    fn removal_results_show() {
-        let mut app = on_fix_with_a_session();
-        event(
-            &mut app,
-            actions::Event::Removed {
-                project: "/code/app".into(),
-                name: "fix".into(),
-            },
-        );
-        assert_eq!(hint_line(&mut app), "fix removed; its branch stays");
-        let output = "fatal: cannot remove a locked working tree\nuse 'remove -f -f' to override";
-        event(
-            &mut app,
-            actions::Event::Error {
-                title: "fix not removed".into(),
-                output: output.into(),
-            },
-        );
-        let lines = screen(&mut app, 100, 14).join("\n");
-        assert!(lines.contains("┌ fix not removed "), "{lines}");
-        assert!(lines.contains("use 'remove -f -f' to override"), "{lines}");
-    }
-
-    /// A session in `path`, active at `NOW`, without terminals listed.
     fn daemon_session(id: &str, name: &str, path: &str) -> protocol::Session {
         protocol::Session {
             id: id.into(),
             name: name.into(),
             path: path.into(),
-            agent: None,
             activity: NOW,
             windows: Vec::new(),
         }
@@ -3551,7 +3181,7 @@ unknown field `popop`, expected one of `popup`, `back`";
         let x = lines[y as usize].chars().position(|c| c == 'B').unwrap() as u16;
         click(&mut app, x, y);
         type_text(&mut app, "x");
-        assert_eq!(form_values(&mut app), ["", "mainx", "claude"]);
+        assert_eq!(form_values(&mut app), ["", "mainx"]);
     }
 
     /// With a config whose `themes/` has an invalid theme, `broken`; the themes

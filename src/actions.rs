@@ -16,10 +16,6 @@ use crate::platform;
 #[derive(Debug, PartialEq)]
 pub enum Task {
     NewWorktree(NewWorktree),
-    /// An agent in a new session, for a worktree that has none.
-    StartAgent(StartAgent),
-    /// The agent of a session, started again.
-    RestartAgent(RestartAgent),
     /// A shell, or the editor, in a worktree, shown in the dashboard.
     Program(Program),
     RemoveWorktree(RemoveWorktree),
@@ -72,27 +68,7 @@ pub struct Program {
     pub command: Option<String>,
 }
 
-#[derive(Debug, PartialEq)]
-pub struct StartAgent {
-    /// The worktree's label, for progress.
-    pub name: String,
-    pub path: PathBuf,
-    pub session: String,
-    pub command: String,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct RestartAgent {
-    pub name: String,
-    pub path: PathBuf,
-    /// The session's id.
-    pub session: String,
-    /// The agent's terminal, ended first, if it has one.
-    pub pane: Option<String>,
-    pub command: String,
-}
-
-/// A worktree to create, with its project's `on_create` and an agent to start in it.
+/// A worktree to create, with its project's `on_create` and a shell to open in it.
 #[derive(Debug, PartialEq)]
 pub struct NewWorktree {
     pub project: PathBuf,
@@ -103,8 +79,6 @@ pub struct NewWorktree {
     pub path: PathBuf,
     pub on_create: Option<String>,
     pub session: String,
-    /// The agent's command, run by `sh -c`.
-    pub command: String,
 }
 
 /// What happened, for the UI.
@@ -118,9 +92,9 @@ pub enum Event {
     Refused(String),
     /// The worktree exists, at this path with symlinks resolved.
     Added { project: PathBuf, path: PathBuf },
-    /// `on_create` failed; the worktree stays and the agent still starts.
+    /// `on_create` failed; the worktree stays and the shell still opens.
     OnCreateFailed(String),
-    /// A terminal was started, to show: the agent's, a shell's, the editor's.
+    /// A terminal was started, to show: a shell's, the editor's, a custom action's.
     Started(String),
     /// git refused to remove the worktree, saying why; nothing was changed. The
     /// removal to run, with `force`, if the user confirms.
@@ -161,30 +135,12 @@ fn run(task: Task, client: &Client, events: &Sender<Event>) {
     };
     match task {
         Task::NewWorktree(new) => new_worktree(&new, client, &send),
-        Task::StartAgent(start) => {
-            send(Event::Progress(format!(
-                "{}: starting the agent",
-                start.name
-            )));
-            let started = client.spawn(
-                None,
-                &start.session,
-                &start.path,
-                Some(&start.command),
-                true,
-            );
-            send(match started {
-                Ok(terminal) => Event::Started(terminal),
-                Err(err) => Event::Failed(format!("{}: {err}", start.name)),
-            });
-        }
         Task::Program(program) => {
             let started = client.spawn(
                 program.session.as_deref(),
                 &program.session_name,
                 &program.path,
                 program.command.as_deref(),
-                false,
             );
             send(match started {
                 Ok(terminal) => Event::Started(terminal),
@@ -210,16 +166,6 @@ fn run(task: Task, client: &Client, events: &Sender<Event>) {
             send(match config::save_theme(&config, &name) {
                 Ok(()) => Event::ThemeSaved(name),
                 Err(err) => Event::ThemeNotSaved(err.to_string()),
-            });
-        }
-        Task::RestartAgent(restart) => {
-            send(Event::Progress(format!(
-                "{}: restarting the agent",
-                restart.name
-            )));
-            send(match restart_agent(&restart, client) {
-                Ok(terminal) => Event::Started(terminal),
-                Err(err) => Event::Failed(format!("{}: {err}", restart.name)),
             });
         }
     }
@@ -258,23 +204,8 @@ fn remove_worktree(remove: RemoveWorktree, client: &Client) -> Event {
     }
 }
 
-/// Ends the agent's terminal, if it has one, then starts the agent in a new
-/// terminal of the session; the session's other terminals keep running.
-fn restart_agent(restart: &RestartAgent, client: &Client) -> crate::error::Result<String> {
-    if let Some(pane) = &restart.pane {
-        client.kill(pane)?;
-    }
-    client.spawn(
-        Some(&restart.session),
-        &restart.name,
-        &restart.path,
-        Some(&restart.command),
-        true,
-    )
-}
-
-/// `git worktree add`, then `on_create` in the new worktree, then the agent's
-/// session. A failure of `on_create` is reported and the session still starts.
+/// `git worktree add`, then `on_create` in the new worktree, then a session with
+/// a shell. A failure of `on_create` is reported and the session still starts.
 fn new_worktree(new: &NewWorktree, client: &Client, send: &dyn Fn(Event)) {
     let name = &new.name;
     send(Event::Progress(format!("{name}: creating the worktree")));
@@ -298,14 +229,14 @@ fn new_worktree(new: &NewWorktree, client: &Client, send: &dyn Fn(Event)) {
         }
     }
 
-    send(Event::Progress(format!("{name}: starting the agent")));
-    match client.spawn(None, &new.session, &path, Some(&new.command), true) {
+    send(Event::Progress(format!("{name}: opening a shell")));
+    match client.spawn(None, &new.session, &path, None) {
         Ok(terminal) => {
-            tracing::info!(name, terminal, "agent started");
+            tracing::info!(name, terminal, "shell started");
             send(Event::Started(terminal));
         }
         Err(err) => {
-            tracing::warn!(name, %err, "agent not started");
+            tracing::warn!(name, %err, "shell not started");
             send(Event::Failed(format!("{name}: {err}")));
         }
     }
@@ -363,7 +294,6 @@ mod tests {
             path: git::worktree_path(repo, name, None),
             on_create: on_create.map(String::from),
             session: format!("app-{name}"),
-            command: "sleep 1000".to_string(),
         }
     }
 
@@ -384,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_the_worktree_runs_on_create_and_starts_the_agent() {
+    fn creates_the_worktree_runs_on_create_and_opens_a_shell() {
         let (_daemon, client) = daemon();
         let (_tmp, repo) = repository();
         let new = request(&repo, "fix", Some("touch created"));
@@ -400,7 +330,7 @@ mod tests {
                     path: path.clone(),
                 },
                 Event::Progress("fix: running on_create".into()),
-                Event::Progress("fix: starting the agent".into()),
+                Event::Progress("fix: opening a shell".into()),
             ]
         );
         assert!(
@@ -410,7 +340,7 @@ mod tests {
         let sessions = client.sessions().unwrap();
         assert_eq!(sessions[0].name, "app-fix");
         assert_eq!(sessions[0].path, path);
-        assert_eq!(sessions[0].agent, Some(terminal));
+        assert_eq!(sessions[0].windows[0].id, terminal);
     }
 
     #[test]
@@ -428,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_on_create_keeps_the_worktree_and_starts_the_agent() {
+    fn a_failed_on_create_keeps_the_worktree_and_opens_a_shell() {
         let (_daemon, client) = daemon();
         let (_tmp, repo) = repository();
         let new = request(&repo, "fix", Some("echo oops >&2; exit 3"));
@@ -446,44 +376,6 @@ mod tests {
         assert!(path.exists());
     }
 
-    #[test]
-    fn restarting_ends_the_agent_and_starts_it_again_beside_the_rest() {
-        let (dir, client) = daemon();
-        let agent = client
-            .spawn(None, "app-fix", dir.path(), Some("sleep 1000"), true)
-            .unwrap();
-        let session = client.sessions().unwrap()[0].id.clone();
-        let shell = client
-            .spawn(
-                Some(&session),
-                "app-fix",
-                dir.path(),
-                Some("sleep 1001"),
-                false,
-            )
-            .unwrap();
-        let task = Task::RestartAgent(RestartAgent {
-            name: "fix".into(),
-            path: dir.path().to_path_buf(),
-            session: session.clone(),
-            pane: Some(agent),
-            command: "sleep 2000".into(),
-        });
-        let again = started(&events(task, &client));
-        // The old agent's terminal goes a moment after its program
-        let since = Instant::now();
-        loop {
-            let sessions = client.sessions().unwrap();
-            let ids: Vec<_> = sessions[0].windows.iter().map(|w| w.id.clone()).collect();
-            if ids == [shell.clone(), again.clone()] {
-                assert_eq!(sessions[0].agent, Some(again));
-                break;
-            }
-            assert!(since.elapsed() < Duration::from_secs(5), "{ids:?}");
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-
     fn program(path: &Path, session: Option<&str>, command: Option<&str>) -> Task {
         Task::Program(Program {
             name: "fix".into(),
@@ -497,30 +389,24 @@ mod tests {
     #[test]
     fn ends_a_window_or_a_whole_session_and_never_the_worktree() {
         let (dir, client) = daemon();
-        let agent = client
-            .spawn(None, "app-fix", dir.path(), Some("sleep 1000"), true)
+        let first = client
+            .spawn(None, "app-fix", dir.path(), Some("sleep 1000"))
             .unwrap();
         let session = client.sessions().unwrap()[0].id.clone();
-        let shell = client
-            .spawn(
-                Some(&session),
-                "app-fix",
-                dir.path(),
-                Some("sleep 1001"),
-                false,
-            )
+        let second = client
+            .spawn(Some(&session), "app-fix", dir.path(), Some("sleep 1001"))
             .unwrap();
         client
-            .spawn(None, "notes", dir.path(), Some("sleep 1002"), false)
+            .spawn(None, "notes", dir.path(), Some("sleep 1002"))
             .unwrap();
 
-        let ended = events(Task::End(End::Window(agent)), &client);
+        let ended = events(Task::End(End::Window(first)), &client);
         assert_eq!(ended, [Event::Ended]);
         let since = Instant::now();
         loop {
             let sessions = client.sessions().unwrap();
             let windows: Vec<_> = sessions[0].windows.iter().map(|w| w.id.clone()).collect();
-            if windows == [shell.clone()] {
+            if windows == [second.clone()] {
                 break;
             }
             assert!(since.elapsed() < Duration::from_secs(5), "{windows:?}");
@@ -549,7 +435,6 @@ mod tests {
         let sessions = client.sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "app-fix");
-        assert_eq!(sessions[0].agent, None, "a shell is no agent");
 
         let session = sessions[0].id.clone();
         let task = program(dir.path(), Some(&session), Some(EDITOR));
@@ -572,12 +457,12 @@ mod tests {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    /// The linked worktree `fix` of `repo`, with an agent's session in it.
+    /// The linked worktree `fix` of `repo`, with a session in it.
     fn linked(repo: &Path, client: &Client) -> (PathBuf, String) {
         let path = git::worktree_path(repo, "fix", None);
         git::add(repo, "fix", None, &path).unwrap();
         client
-            .spawn(None, "app-fix", &path, Some("sleep 1000"), true)
+            .spawn(None, "app-fix", &path, Some("sleep 1000"))
             .unwrap();
         let session = client.sessions().unwrap()[0].id.clone();
         (path, session)
@@ -630,7 +515,11 @@ mod tests {
             "{why}"
         );
         assert!(path.join("notes.md").exists(), "nothing changed");
-        assert_eq!(client.sessions().unwrap().len(), 1, "the agent still runs");
+        assert_eq!(
+            client.sessions().unwrap().len(),
+            1,
+            "its session still runs"
+        );
 
         let forced = RemoveWorktree {
             force: true,

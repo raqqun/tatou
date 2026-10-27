@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 
-**tatou**: a minimal terminal UI (ratatui) for running coding agents in parallel across several repositories, one git worktree per task. It lists projects and worktrees with agent status, shows the selected agent's, shell's or editor's terminal in a pane beside them, and keeps every terminal running in a small daemon of its own, so that agents outlive the dashboard. It delegates everything else to `git`, `gh` and `$EDITOR`, and it has no state of its own beyond its config files (`config.toml` and one small file per project) and what its daemon holds in memory.
+**tatou**: a minimal terminal UI (ratatui) for running coding agents in parallel across several repositories, one git worktree per task. It lists projects and worktrees with their activity, opens shells and the editor in them (tatou starts no agent itself: the user runs one in a shell; agent support comes later, as one module per agent), shows the selected terminal in a pane beside them, and keeps every terminal running in a small daemon of its own, so that what runs in them outlives the dashboard. It delegates everything else to `git`, `gh` and `$EDITOR`, and it has no state of its own beyond its config files (`config.toml` and one small file per project) and what its daemon holds in memory.
 
 Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
@@ -72,7 +72,7 @@ A task is done only when `cargo fmt`, `cargo clippy` (no warnings) and `cargo te
 - **Everything tatou creates in a repository is a plain git worktree**, usable without tatou.
 - **Linux and macOS only, no platform sprawl.** All `cfg(target_os)` code lives in `platform.rs`; `portable-pty` hides the pseudo-terminals' differences. Shell snippets and command templates are POSIX `sh` and must not assume GNU userland (macOS ships BSD tools).
 - **Never modify files tatou doesn't own** (agent configs, shell rc files, git config). Print the snippet for the user instead.
-- **All external commands go through `exec.rs`**, using argument vectors, never shell strings built from paths or user input. Exceptions, each run deliberately with `sh -c`: the user's configured `on_create` command, custom-action templates from config, and the programs the daemon runs in terminals (agents' commands from config, through `portable-pty`). When substituting `{path}` and the like into templates, shell-quote the values.
+- **All external commands go through `exec.rs`**, using argument vectors, never shell strings built from paths or user input. Exceptions, each run deliberately with `sh -c`: the user's configured `on_create` command, custom-action templates from config, and the programs the daemon runs in terminals (the editor and custom actions, through `portable-pty`). When substituting `{path}` and the like into templates, shell-quote the values.
 - **The UI loop never blocks on a command or the socket.** Run commands and requests on background threads, and write to the shown terminal's connection through its writer thread; send results back over a channel; keep rendering responsive.
 - **Restore the terminal** (raw mode, alternate screen, bracketed paste, keyboard enhancement) on every exit path, including panics.
 - **Never force destructive git operations silently.** If `git worktree remove` fails, show git's message and require explicit confirmation to force.

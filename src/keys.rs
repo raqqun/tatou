@@ -26,7 +26,6 @@ pub enum Action {
     SwitchPane,
     Jump,
     NewWorktree,
-    StartAgent,
     Shell,
     OpenPr,
     RemoveWorktree,
@@ -40,7 +39,7 @@ pub enum Action {
 impl Action {
     // Not read yet: checking `[keys]` names and the help overlay list them (#41, #44)
     #[allow(dead_code)]
-    pub const ALL: [Action; 15] = [
+    pub const ALL: [Action; 14] = [
         Action::Up,
         Action::Down,
         Action::Collapse,
@@ -48,7 +47,6 @@ impl Action {
         Action::SwitchPane,
         Action::Jump,
         Action::NewWorktree,
-        Action::StartAgent,
         Action::Shell,
         Action::Edit,
         Action::OpenPr,
@@ -70,7 +68,6 @@ impl Action {
             Action::SwitchPane => "switch_pane",
             Action::Jump => "jump",
             Action::NewWorktree => "new_worktree",
-            Action::StartAgent => "start_agent",
             Action::Shell => "shell",
             Action::OpenPr => "open_pr",
             Action::RemoveWorktree => "remove_worktree",
@@ -91,7 +88,6 @@ impl Action {
             Action::SwitchPane => "switch pane",
             Action::Jump => "jump",
             Action::NewWorktree => "new",
-            Action::StartAgent => "start agent",
             Action::Shell => "shell",
             Action::OpenPr => "PR",
             Action::RemoveWorktree => "remove",
@@ -106,7 +102,6 @@ impl Action {
         match self {
             Action::Jump
             | Action::NewWorktree
-            | Action::StartAgent
             | Action::Shell
             | Action::Edit
             | Action::OpenPr
@@ -231,7 +226,6 @@ impl Keymap {
             (Key::plain(KeyCode::Tab), Action::SwitchPane),
             (Key::plain(KeyCode::Enter), Action::Jump),
             (Key::char('n'), Action::NewWorktree),
-            (Key::char('s'), Action::StartAgent),
             (Key::char('t'), Action::Shell),
             (Key::char('e'), Action::Edit),
             (Key::char('p'), Action::OpenPr),
@@ -358,15 +352,7 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "⏎ jump",
-                "n new",
-                "s start agent",
-                "t shell",
-                "e edit",
-                "p PR",
-                "d remove",
-                "T theme",
-                "? help",
+                "⏎ jump", "n new", "t shell", "e edit", "p PR", "d remove", "T theme", "? help",
                 "q quit"
             ]
         );
@@ -375,7 +361,7 @@ mod tests {
             .into_iter()
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(without_jump, ["n", "s", "t", "e", "p", "d", "T", "q"]);
+        assert_eq!(without_jump, ["n", "t", "e", "p", "d", "T", "q"]);
         let sessions: Vec<_> = keymap
             .hints(Pane::Sessions, &[])
             .into_iter()

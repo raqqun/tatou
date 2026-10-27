@@ -9,7 +9,7 @@ use crate::git::Worktree;
 use crate::protocol::{Session, Window};
 use crate::refresh::Update;
 
-/// How long after its last output an agent without hooks still counts as active, in seconds.
+/// How long after its last output a session without hooks still counts as active, in seconds.
 const ACTIVE_FOR: u64 = 10;
 
 /// A project from the config, with its worktrees.
@@ -44,8 +44,6 @@ pub struct SessionView {
     /// The target for the daemon's requests.
     pub id: String,
     pub name: String,
-    /// Its agent's terminal.
-    pub agent_pane: Option<String>,
     /// The terminal Enter shows: the one opened or shown last.
     pub current: Option<String>,
 }
@@ -206,7 +204,6 @@ pub fn merge(
                         session: session.map(|s| SessionView {
                             id: s.id.clone(),
                             name: s.name.clone(),
-                            agent_pane: s.agent.clone(),
                             current: s.windows.iter().find(|w| w.current).map(|w| w.id.clone()),
                         }),
                     });
@@ -254,8 +251,6 @@ fn file_name(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::config::{Keys, Project};
 
@@ -264,8 +259,6 @@ mod tests {
     fn config(projects: &[&str]) -> Config {
         Config {
             path: "/c/config.toml".into(),
-            default_agent: "claude".into(),
-            agents: BTreeMap::new(),
             keys: Keys::default(),
             theme: crate::theme::terminal(),
             projects: projects
@@ -294,22 +287,20 @@ mod tests {
         }
     }
 
-    /// A session started in `path`, without an agent.
+    /// A session started in `path`, without terminals.
     fn session(id: &str, name: &str, path: &str) -> Session {
         Session {
             id: id.into(),
             name: name.into(),
             path: path.into(),
-            agent: None,
             activity: NOW,
             windows: Vec::new(),
         }
     }
 
-    /// A session with its agent in terminal `%1`, the current one.
-    fn agent_session(id: &str, name: &str, path: &str) -> Session {
+    /// A session with one terminal, `%1`, the current one.
+    fn session_with_a_window(id: &str, name: &str, path: &str) -> Session {
         Session {
-            agent: Some("%1".into()),
             windows: vec![Window {
                 id: "%1".into(),
                 index: 0,
@@ -340,7 +331,11 @@ mod tests {
 
     #[test]
     fn lists_projects_and_their_worktrees() {
-        let sessions = [agent_session("$1", "app-fix", "/code/app.worktrees/fix")];
+        let sessions = [session_with_a_window(
+            "$1",
+            "app-fix",
+            "/code/app.worktrees/fix",
+        )];
         let view = merge(&config(&["/code/app"]), &app_worktrees(), &sessions, NOW);
         let expected = ProjectView {
             path: "/code/app".into(),
@@ -364,7 +359,6 @@ mod tests {
                     session: Some(SessionView {
                         id: "$1".into(),
                         name: "app-fix".into(),
-                        agent_pane: Some("%1".into()),
                         current: Some("%1".into()),
                     }),
                     status: Status::Active,

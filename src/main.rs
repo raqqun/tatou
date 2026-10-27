@@ -30,12 +30,13 @@ use tracing::level_filters::LevelFilter;
 const USAGE: &str = "\
 Usage: tatou [command]
 
-Runs coding agents in parallel, each in its own git worktree.
+Runs terminals side by side, one git worktree per task: shells, the editor,
+and the coding agents you start in them.
 
 Commands:
-  (none)         run the dashboard, starting the daemon that keeps the agents
+  (none)         run the dashboard, starting the daemon that keeps the terminals
   add [path]     add the repository at path (default: here) to config.toml
-  stop           end every agent, shell and editor, and the daemon
+  stop           end every terminal, and the daemon
   daemon         run the daemon; `tatou` starts it when needed
   -h, --help     print this help
   -V, --version  print the version

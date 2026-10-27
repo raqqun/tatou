@@ -406,9 +406,9 @@ mod tests {
             "unchanged since the dashboard loaded it"
         );
 
-        write_at(&path, "default_agent = \"codex\"\n", 2_000);
+        write_at(&path, "theme = \"monokai-pro\"\n", 2_000);
         let config = watch.check().unwrap().unwrap();
-        assert_eq!(config.default_agent, "codex");
+        assert_eq!(config.theme.name, "monokai-pro");
         assert!(watch.check().is_none(), "loaded once");
 
         // A project file added, then edited

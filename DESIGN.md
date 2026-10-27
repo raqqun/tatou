@@ -1,6 +1,6 @@
 # tatou — Design
 
-A minimal terminal UI for running coding agents (Claude Code, Codex, Gemini CLI, …) in parallel across several repositories, one git worktree per task. tatou lists the work, shows the agent you pick in a pane beside it, and keeps every agent running in a small daemon of its own.
+A minimal terminal UI for running coding agents (Claude Code, Codex, Gemini CLI, …) in parallel across several repositories, one git worktree per task. tatou lists the work, opens shells and your editor in its worktrees, where you run your agents, shows the terminal you pick in a pane beside it, and keeps every terminal running in a small daemon of its own. It starts no agent itself (decided in 2.20, #127): support for each agent, found on the machine and set up for tatou, comes in milestone 3.
 
 Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
@@ -11,23 +11,24 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 - **No state of its own.** Git knows the worktrees, `gh` knows the PRs. tatou reads them every time. Its daemon holds the running terminals in memory, and nothing else: no database, no cache that can drift, nothing on disk beyond the config.
 - **Never in the way.** Everything tatou creates in your repositories is a plain git worktree; the agents are the ordinary programs you would run yourself. Quitting the dashboard leaves them running; `tatou stop` ends them. Uninstalling tatou loses nothing but what is running.
 - **Reuse, don't rebuild.** Git → `git`. GitHub → `gh`. Files → `$EDITOR`, or the agent. Pseudo-terminals → `portable-pty`; terminal emulation → `vt100`, drawn with `tui-term`.
-- **One terminal at a time, and no multiplexer.** tatou shows the selected agent's, shell's or editor's terminal next to the projects, emulating just enough to draw it and passing keys through. It does not grow multiplexer features: no splits, layouts, tabs, keyboard copy mode or scripting. Selecting with the mouse, as any terminal does, is the one exception (6.9, #115). (Decided in 2.19, #109: tatou used to delegate all of this to tmux and never draw an agent itself.)
+- **One terminal at a time, and no multiplexer.** tatou shows the selected terminal (a shell, the editor, and the agents run in them) next to the projects, emulating just enough to draw it and passing keys through. It does not grow multiplexer features: no splits, layouts, tabs, keyboard copy mode or scripting. Selecting with the mouse, as any terminal does, is the one exception (6.9, #115). (Decided in 2.19, #109: tatou used to delegate all of this to tmux and never draw an agent itself.)
 - **Small.** If a feature needs a new subsystem, it probably doesn't belong in tatou.
 
 ## 2. What it does
 
-1. Lists projects and their worktrees with a status per worktree: busy / needs input / idle / active / quiet / no session.
-2. Creates a worktree (name + base branch) and starts an agent in it; removes both when done.
-3. Shows a worktree's agent, a shell or the editor in a pane beside the projects, and switches between them with one key.
-4. Keeps every agent running when the dashboard quits, in its daemon.
-5. Notifies when an agent needs input.
+1. Lists projects and their worktrees with a status per worktree: active / quiet / no session, from its terminals' output; busy / needs input / idle with agent support (milestone 3).
+2. Creates a worktree (name + base branch) and opens a shell in it; removes both when done.
+3. Shows a worktree's shell, editor or other terminal in a pane beside the projects, and switches between them with one key.
+4. Keeps every terminal running when the dashboard quits, in its daemon.
+5. Notifies when an agent needs input (milestone 3).
 6. Shows a PR/CI badge per worktree.
 7. Exposes everything through configurable keybindings.
 
 ## 3. What it deliberately does not do
 
 - Splits, layouts, tabs, a keyboard copy mode, or more than one terminal on screen.
-- Keep agents across a reboot, or across the daemon ending: terminals live as long as the daemon (an open question: §12.2).
+- Start agents itself, for now: you run yours in a shell. Support for each agent, as a module of its own, comes in milestone 3 (decided in 2.20, #127).
+- Keep terminals across a reboot, or across the daemon ending: terminals live as long as the daemon (an open question: §12.2).
 - A database or state file beyond its config: `config.toml` and one small file per project (§9).
 - Show, edit, create, rename or delete files itself: no file tree, viewer or diff viewer — `$EDITOR` (`e`), a shell opened in the worktree (`t`), or the agent.
 - A PR review UI — `gh`/browser for PRs.
@@ -43,7 +44,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 | Terminals | `portable-pty` (pseudo-terminals), `vt100` (screens), `tui-term` (drawing) |
 | Sessions that outlive the dashboard | tatou's daemon, over a Unix socket |
 | Worktrees, branches | `git` |
-| Agent status | Output activity, seen by the daemon; agents' hooks reporting to it (3.1) |
+| Status | Output activity, seen by the daemon; later, agents' hooks reporting to it (milestone 3) |
 | PR / CI | `gh pr list --json …` |
 | Notifications | `notify-send` (Linux) or `osascript` (macOS) |
 | Clipboard | `pbcopy` (macOS); `wl-copy`, `xclip` or `xsel` (Linux); else OSC 52 to the dashboard's terminal |
@@ -54,7 +55,7 @@ Targets Linux and macOS (Apple silicon). Windows and the BSDs are out of scope.
 
 One binary:
 
-- **Dashboard:** `tatou` — typed in any terminal. Checks git, offers to add the repository it is started in (`Add ~/code/my-app to tatou? [Y/n]`, asked again next time after a no), starts the daemon unless it runs, then runs the full-screen dashboard in this terminal. An invalid `config.toml` stops it with the error. `q` quits the dashboard only: every agent, shell and editor keeps running, and `tatou` shows them again, from this terminal or any other. Several dashboards can run at once.
+- **Dashboard:** `tatou` — typed in any terminal. Checks git, offers to add the repository it is started in (`Add ~/code/my-app to tatou? [Y/n]`, asked again next time after a no), starts the daemon unless it runs, then runs the full-screen dashboard in this terminal. An invalid `config.toml` stops it with the error. `q` quits the dashboard only: every terminal keeps running, and `tatou` shows them again, from this terminal or any other. Several dashboards can run at once.
 - **Daemon:** `tatou daemon` — started by `tatou` when needed, in a process group of its own and without the terminal, so it outlives the dashboard and the terminal closing. It owns the terminals (§8.3), and ends 10 s after it has no terminal left and no dashboard connected.
 - **Stop:** `tatou stop` — ends every terminal, then the daemon.
 - **Add a project:** `tatou add [path]` — adds the repository at `path` (default: the current folder) as a file in `projects/` (§9); `a` in the dashboard does the same from a path dialog.
@@ -64,7 +65,7 @@ One binary:
 ```
 ┌ Projects ──────────────────────┐┌ my-app-fix-login:0 claude ─────────────────────┐
 │ ▾ my-app                       ││                                                │
-│   ● fix-login     #42 ✓        ││  (the shown terminal: the agent, drawn         │
+│   ● fix-login     #42 ✓        ││  (the shown terminal, drawn                    │
 │   ⚠ new-api       #45 ●        ││   from its screen; keys go to it)              │
 │   ○ refactor-db                ││                                                │
 │ ▸ website                      ││                                                │
@@ -77,28 +78,27 @@ One binary:
  M-d dashboard  M-l/M-h next/previous session  M-j/M-k next/previous window; …
 ```
 
-- **Left, top:** projects (collapsible) → worktrees. Status: `●` busy, `⚠` needs input, `○` idle, `·` no session; without hooks (§8.4), a dim `●` for output in the last 10 s and a dim `○` otherwise. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
+- **Left, top:** projects (collapsible) → worktrees. Status (§8.4): a dim `●` for output in the last 10 s, a dim `○` otherwise, `·` no session; with agent support (milestone 3), `●` busy, `⚠` needs input, `○` idle. Each worktree shows its branch (its directory's name when detached); the main worktree is tagged `repo`. PR badge: number + checks `✓ ✗ ●`.
 - **Left, below:** every session the daemon has, each with its status, what runs in its current window (what it was started with: `claude`, `zsh`, `vi`), and the `project/worktree` it belongs to, or the folder it started in; under each, as a tree folded and unfolded as the projects are, its windows (its terminals): index, what runs in it, `*` on the current one. As tall as its sessions, up to a third of the column (scrolling past that), one line saying "No sessions" when there are none, and not drawn when a third of the column has no room for a row. The daemon's errors show on its bottom border.
 - **Right:** the shown terminal, titled `<session>:<index> <program>`, at the pane's size, which its program follows. When none is shown, what to press to show one.
 - **Widths.** The left column is 40 columns wide, or half the screen when it is narrower than 80; the terminal takes the rest.
 - **Bottom:** key hints for the selected row: on a project, only what applies to a project; on a worktree without a session, no jump. With the focus in the terminal, its keys. A message (e.g. a failed command) replaces them until the next key. `?` shows the full keymap.
-- **Focus.** `Tab` moves between Projects and Sessions only. `Enter` on a worktree shows its session's current terminal, on a session its current one, on a window that one, and gives the terminal the focus; `n`, `s`, `t`, `e` and restarts show what they start. In the terminal every key goes to its program, but four, which work from anywhere but a dialog and which no program ever sees: **Alt-d** gives the focus back to the dashboard; **Alt-l / Alt-h** show the next / previous session's current terminal, **Alt-j / Alt-k** the next / previous window of the shown session, wrapping around, with the focus in the terminal; and **Shift-PgUp / Shift-PgDn** scroll its history (below), except on the alternate screen, where they are the program's. The focused pane's border and title are in the theme's accent colour (cyan by default); the others are dim, contents included, keeping their selection and their errors' colour.
+- **Focus.** `Tab` moves between Projects and Sessions only. `Enter` on a worktree shows its session's current terminal, on a session its current one, on a window that one, and gives the terminal the focus; `n`, `t` and `e` show what they start. In the terminal every key goes to its program, but four, which work from anywhere but a dialog and which no program ever sees: **Alt-d** gives the focus back to the dashboard; **Alt-l / Alt-h** show the next / previous session's current terminal, **Alt-j / Alt-k** the next / previous window of the shown session, wrapping around, with the focus in the terminal; and **Shift-PgUp / Shift-PgDn** scroll its history (below), except on the alternate screen, where they are the program's. The focused pane's border and title are in the theme's accent colour (cyan by default); the others are dim, contents included, keeping their selection and their errors' colour.
 - **When the shown program ends**, a neighbour shows instead: another window of its session (the one after, else before), else the next session's current terminal, else the previous one's; with none left, the pane empties and the focus goes back to Projects.
 - **Keys and the mouse.** Where the dashboard's terminal supports the kitty keyboard protocol, tatou asks for disambiguated keys, so that Shift-Enter is not Enter; it goes to the program as Alt-Enter (`ESC CR`), which agents read as a new line. Pastes go through, bracketed when the program asked.
 - **The mouse** is the dashboard's, always, from start to exit (decided in 6.6, #37): every click lands, whatever has the focus. Text is selected holding the terminal's bypass key (Shift in most Linux terminals, kitty, WezTerm and Alacritty; Option in iTerm2), a plain drag included in the shown terminal. A click anywhere in a pane, borders included, moves the focus there: on a row of Projects or Sessions it also selects it, on a `▸`/`▾` folds it; a double click (one cell, within 400 ms) does what Enter does; the wheel moves the selection of the pane under it, not the focus. In the shown terminal, clicks, releases, drags, motion and the wheel go to its program as it asked for them (vim with `mouse=a`, lazygit, htop), encoded as an xterm sends them (SGR, UTF-8 or legacy); a program that did not ask gets the wheel as ↑/↓ on the alternate screen (less, man), as from an xterm, and nothing on the main screen; and in its terminal tatou selects text as a terminal does (6.9): a drag selects a span, a double click a word (a run of non-spaces: a path, a URL or a hash, whole), a triple click the line, on the screen as drawn, highlighted in the theme's selection colour. The mouse going up copies it, wrapped lines joined, with `pbcopy` on macOS, or `wl-copy`, `xclip` or `xsel` on Linux, else by asking the dashboard's terminal with OSC 52; the hint bar says how much. The highlight goes with the next click, a key to the program, its output once the mouse is up, or another terminal shown. With no terminal shown, its pane takes no clicks. In a dialog, a click selects a choice (a double one chooses it) or focuses a form's field, the wheel moves a choice or scrolls a message; confirmations, and clicks outside a dialog, take no clicks. The hint bar is not clickable.
 - **Scrollback** (decided in 6.10, #117). The shown terminal's history, all the daemon keeps (10 000 lines, sent on attach, §8.3), is browsed on its main screen: the wheel, when its program does not read the mouse, by 3 lines; **Shift-PgUp / Shift-PgDn** by a page, from anywhere but a dialog, whatever the program. Its title then reads `app-fix:1 zsh · ↑ 120 of 4210`, the cursor is hidden and the hint bar says any key goes back to the bottom: any key or paste for the program does, first, as scrolling all the way down. New output keeps the view where it is. A selection works on the view and goes when it moves. The alternate screen (vim, less) keeps no history.
 - **Colours.** The dashboard's colours come from its theme (§9): the background and text, the accent, the selection, errors, the statuses, the `repo` tag and the hint bar's keys. The default theme, `terminal`, uses the terminal's own palette and background. The shown terminal keeps its program's colours; only the cells it leaves in the default colours take the theme's background and text, so the pane matches the dashboard. `T` chooses the theme from a list, each shown on the whole dashboard as it is selected (§7).
 - No file pane: reading, editing and diffing files is the editor's job (`e`) and the agent's (decided in 2.18, #103).
-- Dialogs open over the panes and take every key while the dashboard keeps refreshing behind them: a form (Tab/↑↓ between fields, ←→ through a choice, Enter to confirm, Esc to cancel; text fields edit like a shell line, Ctrl-a/e/u/k/w included), a choice list, a `[y/N]` confirmation whose default each dialog picks, and a scrollable message for command output. Their keys are fixed and shown in the hint bar.
+- Dialogs open over the panes and take every key while the dashboard keeps refreshing behind them: a form of text fields (Tab/↑↓ between them, Enter to confirm, Esc to cancel; text fields edit like a shell line, Ctrl-a/e/u/k/w included), a choice list, a `[y/N]` confirmation whose default each dialog picks, and a scrollable message for command output. Their keys are fixed and shown in the hint bar.
 
 ## 7. Actions
 
 ### On a worktree
 | Default key | Action | Implemented as |
 |---|---|---|
-| `Enter` | Show its agent | attach to its session's current terminal |
-| `n` | New worktree | dialog → `git worktree add`, `on_create`, then the agent in a new session, shown |
-| `s` | Start / restart agent | choose the agent → a new session with it, or confirm → end the agent's terminal and start it again in its session, beside the others |
+| `Enter` | Show its session | attach to its session's current terminal |
+| `n` | New worktree | dialog (name, base) → `git worktree add`, `on_create`, then a shell in a new session, shown |
 | `t` | Open shell in worktree | a new terminal running `"${SHELL:-/bin/sh}" -l` in its session, or in a new session; shown |
 | `e` | Edit the worktree (on a project, its repository) | as `t`, running `${EDITOR:-vi} .` |
 | `p` | Open PR | `gh pr view --web` |
@@ -136,17 +136,17 @@ Refresh: the daemon's sessions every ~1 s; each project's worktrees every 5 s, o
 ### 8.2 Worktrees
 - Create: `git -C <repo> worktree add -b <branch> -- <path> <base>`. Path defaults to `<repo>/../<repo>.worktrees/<name>` (configurable with `worktree_dir`); a `/` in the branch name becomes `-` in the folder's, so `feature/login` goes in `feature-login`.
 - Optional per-project `on_create` command, run with `sh -c` in the new worktree.
-- Remove: `git worktree remove <path>`, then, once it is gone, end its session, so a refusal leaves the agent running. On refusal (dirty tree), show git's message; force only after a second, explicit confirmation. The branch is kept.
+- Remove: `git worktree remove <path>`, then, once it is gone, end its session, so a refusal leaves its terminals running. On refusal (dirty tree), show git's message; force only after a second, explicit confirmation. The branch is kept.
 - Worktrees created outside tatou appear automatically.
 
 ### 8.3 The daemon
 **Socket.** `$XDG_STATE_HOME/tatou/tatou.sock` (default `~/.local/state/tatou/tatou.sock`), one daemon per user; a second refuses to start. A runtime file, removed when the daemon ends.
 
-**Protocol** (`protocol.rs`): frames of a 4-byte big-endian length then a payload whose first byte says what it is; strings and bytes are length-prefixed. Requests: list, spawn (session or new session name, path, command or none for the shell, agent or not), kill (a terminal), kill-session, attach (terminal, size), input (bytes), resize, stop. Replies: ok, error, sessions, spawned (session and terminal ids), screen, output, exited. The dashboard opens one connection per request, and one long-lived connection for the shown terminal, which also keeps the daemon from ending.
+**Protocol** (`protocol.rs`): frames of a 4-byte big-endian length then a payload whose first byte says what it is; strings and bytes are length-prefixed. Requests: list, spawn (session or new session name, path, command or none for the shell), kill (a terminal), kill-session, attach (terminal, size), input (bytes), resize, stop. Replies: ok, error, sessions, spawned (session and terminal ids), screen, output, exited. The dashboard opens one connection per request, and one long-lived connection for the shown terminal, which also keeps the daemon from ending.
 
 **Terminals.** Each is a pseudo-terminal running `/bin/sh -c <command>`, or the user's shell as a login shell (`"$SHELL" -l`), in the worktree, with `TATOU=1` and `TERM=xterm-256color` (and without `TMUX`), and a `vt100` screen kept from its output, with 10 000 lines of scrollback. A terminal ends with its program; a session with its last terminal.
 
-**Sessions.** One per worktree, named `<repo>-<name>` (`-2`, `-3`, … when taken), matched to worktrees by the path they were started in, comparing paths with symlinks resolved, never by their names. Its terminals are its windows, in the order they were opened; the current one is the one started or shown last. Its agent's terminal is the one its status follows.
+**Sessions.** One per worktree, named `<repo>-<name>` (`-2`, `-3`, … when taken), matched to worktrees by the path they were started in, comparing paths with symlinks resolved, never by their names. Its terminals are its windows, in the order they were opened; the current one is the one started or shown last. Its status follows the output of all its terminals.
 
 **Showing.** Attaching gives the terminal the pane's size (resizing the pseudo-terminal: one size per terminal, the last attach's), sends its history and its screen as escape codes that draw them (on the main screen, each line that scrolled off its top, with its colours, then enough line ends to scroll them all into the dashboard's history; then its contents; with a full-screen program running, the switch to the alternate screen and its contents after, which `vt100`'s formatted screen alone would leave out, so that a dashboard attaching mid-way knows it; then the input modes), then its output as it comes. Lines that wrapped come back as separate lines.
 
@@ -154,10 +154,10 @@ Refresh: the daemon's sessions every ~1 s; each project's worktrees every 5 s, o
 
 **Lifetime.** Started by `tatou`; ends 10 s after it has no terminal and no dashboard (the delay covers a dashboard starting, between its first requests), or with `tatou stop`, which ends every program first.
 
-### 8.4 Agent status
-Without hooks: output in the agent's terminal within the last 10 s (or in any terminal of a session without an agent) gives "active", else "quiet". The daemon sees every byte its programs print, so this is exact.
+### 8.4 Status
+Output in any terminal of a session within the last 10 s gives "active", else "quiet". The daemon sees every byte its programs print, so this is exact.
 
-With hooks (3.1, planned): agents report their own state, busy, input or idle, by running `tatou mark <state>` from their hooks; it tells the daemon, over its socket, which terminal is in which state (`$TATOU_TERMINAL`, set by the daemon). `TATOU=1` makes it a no-op elsewhere. Claude Code (`~/.claude/settings.json`), added by the user:
+With hooks (milestone 3, planned with agent support): agents report their own state, busy, input or idle, by running `tatou mark <state>` from their hooks; it tells the daemon, over its socket, which terminal is in which state (`$TATOU_TERMINAL`, set by the daemon). `TATOU=1` makes it a no-op elsewhere. Claude Code (`~/.claude/settings.json`), added by the user:
 ```json
 {
   "hooks": {
@@ -167,7 +167,7 @@ With hooks (3.1, planned): agents report their own state, busy, input or idle, b
   }
 }
 ```
-Other agents run the same one-liner from their own notify/hook mechanism. `tatou hooks` prints these snippets.
+Other agents run the same one-liner from their own notify/hook mechanism. How these get into each agent's configuration is part of milestone 3: each agent's module knows its own (§1 and §3 rule out editing them silently).
 
 On a transition to `input` for a terminal that isn't shown: a desktop notification (see §10; skipped silently if unavailable).
 
@@ -176,12 +176,7 @@ On a transition to `input` for a terminal that isn't shown: a desktop notificati
 `$XDG_CONFIG_HOME/tatou/config.toml`, defaulting to `~/.config/tatou/config.toml` on every platform, macOS included, holds the settings; each project is a file of its own in `projects/` next to it, and themes of your own go in `themes/`. tatou writes only these files: `config.toml` once, the commented template when it is missing, then only its `theme` line when you choose a theme with `T`; and a project file when you add a project. Everything else is yours and left as written. A running dashboard reloads them when they change, the theme files included. A full `config.toml`:
 
 ```toml
-default_agent = "claude"
 theme = "monokai-pro"
-
-[agents]
-claude = "claude"
-codex  = "codex"
 
 [keys]                       # override any default
 jump = "Enter"
@@ -205,7 +200,7 @@ base = "main"
 - Every setting is optional. When `config.toml` does not exist, tatou writes it with every setting commented out; without project files, the dashboard says where they go.
 - Project files are `projects/*.toml`, listed by file name; hidden files and other names (editor backups) are ignored. `tatou add` names a file after the repository's folder, with `-2`, `-3`, … when the name is taken; matching always goes by `path`. `[[project]]` in `config.toml` is an error that points here.
 - Unknown keys are errors, reported with the line (`[tmux]` included, since 2.19). `[keys]` action names are checked against the keymap.
-- `[agents]` is merged with the built-in `claude` and `codex`: new names add an agent, a built-in name replaces its command. `default_agent` must name one of them. There is no built-in shell agent: shells are `t`'s job, and `s` and `n` start agents; an agent of your own may still be a shell.
+- `default_agent` and `[agents]` are gone (2.20, #127): tatou starts shells, and you run any agent in them. Either is an error that says to remove it.
 - `theme` names a theme, by default `terminal`, the terminal's own palette; `monokai-pro` (Monokai Pro's dark palette) is built in too. A theme is a flat TOML file named after it, every key optional:
   ```toml
   # themes/monokai-pro.toml
@@ -240,9 +235,9 @@ base = "main"
 
 ## 11. Milestones
 
-1. **Navigate:** config, launcher, list projects/worktrees from git, sessions and status, show a worktree's agent with Enter. (Built on tmux, which 2.19 replaced.)
-2. **Manage:** new/remove worktree, start/restart agent, open shell, edit; native terminals in a daemon (2.19).
-3. **Status:** hooks reporting to the daemon, `tatou hooks`, notifications.
+1. **Navigate:** config, launcher, list projects/worktrees from git, sessions and status, show a worktree's terminal with Enter. (Built on tmux, which 2.19 replaced.)
+2. **Manage:** new/remove worktree, open shell, edit; native terminals in a daemon (2.19); agents dropped, tatou starts terminals only (2.20).
+3. **Agents:** one module per agent (Claude Code, Codex, …): finding the agents installed on the machine, setting each up for tatou (automatically or by asking the user), starting them, their hooks reporting status to the daemon, notifications when one needs input.
 4. ~~**Files**~~: dropped (2.18, #103). Editing is `e`'s, with `$EDITOR`; mouse support moved to milestone 6.
 5. **PRs:** badges and open PR.
 6. **Keys:** configurable keymap, custom shell-command actions, `?` help overlay, mouse support.
@@ -299,6 +294,8 @@ So `alacritty_terminal` is the more reliable and the cheaper now; libghostty-vt 
 **The question.** A terminal lives as long as the daemon (§3, §8.3): quitting the dashboard keeps every agent, but a reboot, `tatou stop` or the daemon ending ends them all, and upgrading tatou means stopping the daemon (#120). Could the sessions be kept across those restarts too?
 
 **What can't be kept.** The processes: a reboot ends them, whatever runs them, tmux and the GUI apps included. Checkpointing them to disk (CRIU) is Linux only, needs privileges and breaks on open sockets, so not for tatou. Nor their screens or a shell's history.
+
+Since 2.20 (#127) tatou starts no agent; option 1 below waits for agent support (milestone 3), where each agent's module would know its resume command in place of `[agents]`.
 
 **What can.** Most of a session already lives elsewhere. The worktrees are in git, and tatou finds them again by itself. An agent's conversation is kept by the agent, per directory: `claude --continue` opens the latest conversation of the directory it starts in, `codex resume --last` likewise ([Codex CLI features](https://developers.openai.com/codex/cli/features)), and each worktree being a directory of its own, a worktree's conversation is its own. Keeping a session can then mean starting its agent again in its worktree with its resume command: the conversation comes back, not the running process nor its screen.
 
